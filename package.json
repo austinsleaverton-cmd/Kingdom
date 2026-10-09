@@ -1,0 +1,33 @@
+{
+  "name": "kingdom",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@types/node": "26.6.5",
+    "lint": "^1.2.2",
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.4.4"
+  },
+  "description": "",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/austinsleaverton-cmd/Kingdom.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/austinsleaverton-cmd/Kingdom/issues"
+  },
+  "homepage": "https://github.com/austinsleaverton-cmd/Kingdom#readme"
+}
