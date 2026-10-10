@@ -2,6 +2,7 @@
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
 import type { Action } from '../world/game';
+import { clearSave, loadGame, saveGame } from '../world/save';
 import { YIELD } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
 import { Hud } from './Hud';
@@ -53,13 +54,13 @@ export class MapScene extends Phaser.Scene {
     });
 
     this.setupInput();
-    this.newGame();
+    this.startGame(loadGame() ?? new GameState());
   }
 
   // ---------- flow ----------
 
-  private newGame(): void {
-    this.state = new GameState();
+  private startGame(state: GameState): void {
+    this.state = state;
     this.hovered = null;
     this.redraw();
     const cap = this.state.map.tiles.find((t) => t.capital && t.owner === 0);
@@ -67,6 +68,13 @@ export class MapScene extends Phaser.Scene {
       const { x, y } = tileCenter(cap);
       this.cameras.main.setZoom(1.2).centerOn(x, y);
     }
+  }
+
+  private newGame(): void {
+    const inProgress = this.state.winner === null && this.state.turn > 1;
+    if (inProgress && !window.confirm('Start a new map? Your current game will be lost.')) return;
+    clearSave();
+    this.startGame(new GameState());
   }
 
   private selectAction(a: Action): void {
@@ -206,6 +214,7 @@ export class MapScene extends Phaser.Scene {
     this.drawOwners();
     this.refreshHover();
     this.hud.update(this.state, this.action);
+    saveGame(this.state);
   }
 
   private drawTerrain(): void {
