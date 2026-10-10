@@ -111,7 +111,7 @@ function valueNoise(rand: () => number, w: number, h: number, cell: number): num
 
 export function generateMap(seed: number, width = MAP_WIDTH, height = MAP_HEIGHT): WorldMap {
   const rand = mulberry32(seed);
-  const big = valueNoise(rand, width, height, 7);
+  const big = valueNoise(rand, width, height, Math.max(5, Math.round(Math.min(width, height) / 3)));
   const small = valueNoise(rand, width, height, 3);
   const tiles: Tile[] = [];
   for (let row = 0; row < height; row++) {

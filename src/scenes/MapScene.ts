@@ -1,11 +1,12 @@
 // Rendering and input only. All rules live in src/world.
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
-import type { Action } from '../world/game';
-import { clearSave, loadGame, saveGame } from '../world/save';
+import type { Action, GameOptions } from '../world/game';
+import { loadGame, saveGame, saveSummary } from '../world/save';
 import { YIELD } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
 import { Hud } from './Hud';
+import { Menu } from './Menu';
 
 const SIZE = 28; // hex radius in px
 const SQRT3 = Math.sqrt(3);
@@ -23,8 +24,9 @@ const TERRAIN_NAME: Record<Terrain, string> = {
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
 export class MapScene extends Phaser.Scene {
-  private state!: GameState;
+  private state: GameState | null = null;
   private hud!: Hud;
+  private menu!: Menu;
   private action: Action = 'claim';
   private hovered: Tile | null = null;
   private lastPointer = { x: 0, y: 0 };
@@ -50,46 +52,71 @@ export class MapScene extends Phaser.Scene {
     this.hud = new Hud({
       onAction: (a) => this.selectAction(a),
       onEndTurn: () => this.endTurn(),
-      onNewGame: () => this.newGame(),
+      onMenu: () => this.openMenu(),
     });
+    this.menu = new Menu(
+      (opts) => this.newGame(opts),
+      () => this.continueGame(),
+    );
 
     this.setupInput();
-    this.startGame(loadGame() ?? new GameState());
+    this.openMenu();
   }
 
   // ---------- flow ----------
 
+  private openMenu(): void {
+    if (this.state) saveGame(this.state);
+    this.hovered = null;
+    this.hoverGfx.clear();
+    this.hud.hideTip();
+    this.hud.setVisible(false);
+    this.menu.show(saveSummary());
+  }
+
+  private continueGame(): void {
+    const saved = this.state ?? loadGame();
+    if (saved) this.startGame(saved);
+  }
+
+  private newGame(opts: GameOptions): void {
+    const save = saveSummary();
+    if (save && !save.finished && !window.confirm('Start a new kingdom? Your saved game will be replaced.')) return;
+    this.startGame(new GameState(opts));
+  }
+
   private startGame(state: GameState): void {
     this.state = state;
     this.hovered = null;
+    this.menu.hide();
+    this.hud.setVisible(true);
     this.redraw();
-    const cap = this.state.map.tiles.find((t) => t.capital && t.owner === 0);
+    const cap = state.map.tiles.find((t) => t.capital && t.owner === 0) ?? state.map.tiles.find((t) => t.owner === 0);
     if (cap) {
       const { x, y } = tileCenter(cap);
       this.cameras.main.setZoom(1.2).centerOn(x, y);
     }
   }
 
-  private newGame(): void {
-    const inProgress = this.state.winner === null && this.state.turn > 1;
-    if (inProgress && !window.confirm('Start a new map? Your current game will be lost.')) return;
-    clearSave();
-    this.startGame(new GameState());
+  private get playing(): boolean {
+    return this.state !== null && !this.menu.visible;
   }
 
   private selectAction(a: Action): void {
     this.action = a;
+    if (!this.state) return;
     this.refreshHover();
     this.hud.update(this.state, this.action);
   }
 
   private endTurn(): void {
-    if (this.state.winner !== null) return;
+    if (!this.state || !this.playing || this.state.winner !== null) return;
     this.state.endTurn();
     this.redraw();
   }
 
   private clickTile(tile: Tile): void {
+    if (!this.state) return;
     const res = this.state.perform(this.action, tile);
     if (!res.ok) {
       this.cameras.main.shake(80, 0.002);
@@ -111,6 +138,7 @@ export class MapScene extends Phaser.Scene {
     });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.playing) return;
       if (this.pressed && p.isDown) {
         if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_THRESHOLD) {
           this.dragging = true;
@@ -130,20 +158,29 @@ export class MapScene extends Phaser.Scene {
       const wasClick = this.pressed && !this.dragging;
       this.pressed = false;
       this.dragging = false;
-      if (!wasClick || !p.leftButtonReleased()) return;
+      if (!this.playing || !wasClick || !p.leftButtonReleased()) return;
       const tile = this.tileAtScreen(p.x, p.y);
       if (tile) this.clickTile(tile);
       this.setHover(this.tileAtScreen(p.x, p.y), p.x, p.y);
     });
 
-    this.input.on('gameout', () => this.setHover(null, 0, 0));
+    this.input.on('gameout', () => {
+      if (this.playing) this.setHover(null, 0, 0);
+    });
 
     this.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (!this.playing) return;
       const cam = this.cameras.main;
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dy > 0 ? 0.9 : 1.1), 0.4, 3));
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dy > 0 ? 0.9 : 1.1), 0.3, 3));
     });
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (this.playing) this.openMenu();
+        else this.continueGame();
+        return;
+      }
+      if (!this.playing) return;
       switch (e.key) {
         case '1': this.selectAction('claim'); break;
         case '2': this.selectAction('raise'); break;
@@ -151,13 +188,12 @@ export class MapScene extends Phaser.Scene {
         case '4': this.selectAction('city'); break;
         case ' ':
         case 'Enter': this.endTurn(); break;
-        case 'n':
-        case 'N': this.newGame(); break;
       }
     });
   }
 
   private tileAtScreen(sx: number, sy: number): Tile | null {
+    if (!this.state) return null;
     const w = this.cameras.main.getWorldPoint(sx, sy);
     const q = ((SQRT3 / 3) * w.x - (1 / 3) * w.y) / SIZE;
     const r = ((2 / 3) * w.y) / SIZE;
@@ -187,7 +223,7 @@ export class MapScene extends Phaser.Scene {
   private refreshHover(): void {
     this.hoverGfx.clear();
     const tile = this.hovered;
-    if (!tile || this.state.winner !== null) {
+    if (!this.state || !tile || this.state.winner !== null) {
       this.hud.hideTip();
       return;
     }
@@ -210,17 +246,18 @@ export class MapScene extends Phaser.Scene {
   // ---------- drawing ----------
 
   private redraw(): void {
-    this.drawTerrain();
-    this.drawOwners();
+    if (!this.state) return;
+    this.drawTerrain(this.state);
+    this.drawOwners(this.state);
     this.refreshHover();
     this.hud.update(this.state, this.action);
     saveGame(this.state);
   }
 
-  private drawTerrain(): void {
+  private drawTerrain(state: GameState): void {
     const g = this.terrainGfx;
     g.clear();
-    for (const t of this.state.map.tiles) {
+    for (const t of state.map.tiles) {
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE);
       g.fillStyle(HEIGHT_COLOR[t.height], 1);
@@ -240,13 +277,13 @@ export class MapScene extends Phaser.Scene {
     }
   }
 
-  private drawOwners(): void {
+  private drawOwners(state: GameState): void {
     const g = this.ownerGfx;
     g.clear();
-    const map = this.state.map;
+    const map = state.map;
     for (const t of map.tiles) {
       if (t.owner === null) continue;
-      const color = this.state.players[t.owner].color;
+      const color = state.players[t.owner].color;
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE);
       g.fillStyle(color, 0.28);

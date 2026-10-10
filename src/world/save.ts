@@ -1,35 +1,43 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
-import { GameState } from './game';
+import { GameState, MAP_SIZES } from './game';
+import type { GameOptions } from './game';
 import { terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
 
-const KEY = 'kingdom-save-v1';
+const KEY = 'kingdom-save-v2';
 const CITY = 1;
 const CAPITAL = 2;
 
 interface SaveData {
-  version: 1;
-  seed: number;
+  version: 2;
+  options: GameOptions;
   turn: number;
   current: PlayerId;
   winner: PlayerId | null;
   winReason: string;
   log: string[];
-  gold: number[];
+  players: { gold: number; alive: boolean }[];
   // per tile: [height, owner, flags]
   tiles: [number, PlayerId | null, number][];
 }
 
+export interface SaveSummary {
+  turn: number;
+  sizeLabel: string;
+  opponents: number;
+  finished: boolean;
+}
+
 export function saveGame(state: GameState): void {
   const data: SaveData = {
-    version: 1,
-    seed: state.seed,
+    version: 2,
+    options: state.options,
     turn: state.turn,
     current: state.current,
     winner: state.winner,
     winReason: state.winReason,
     log: state.log,
-    gold: state.players.map((p) => p.gold),
+    players: state.players.map((p) => ({ gold: p.gold, alive: p.alive })),
     tiles: state.map.tiles.map((t) => [t.height, t.owner, (t.city ? CITY : 0) | (t.capital ? CAPITAL : 0)]),
   };
   try {
@@ -39,16 +47,35 @@ export function saveGame(state: GameState): void {
   }
 }
 
-export function loadGame(): GameState | null {
+function readSave(): SaveData | null {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as SaveData;
-    if (data.version !== 1) return null;
+    if (data.version !== 2 || !MAP_SIZES[data.options.size]) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
 
-    const state = new GameState(data.seed);
+export function saveSummary(): SaveSummary | null {
+  const data = readSave();
+  if (!data) return null;
+  return {
+    turn: data.turn,
+    sizeLabel: MAP_SIZES[data.options.size].label,
+    opponents: data.options.opponents,
+    finished: data.winner !== null,
+  };
+}
+
+export function loadGame(): GameState | null {
+  const data = readSave();
+  if (!data) return null;
+  try {
+    const state = new GameState(data.options);
     if (data.tiles.length !== state.map.tiles.length) return null;
-
     state.map.tiles.forEach((t, i) => {
       const [height, owner, flags] = data.tiles[i];
       t.height = height;
@@ -57,7 +84,13 @@ export function loadGame(): GameState | null {
       t.city = (flags & CITY) !== 0;
       t.capital = (flags & CAPITAL) !== 0;
     });
-    state.players.forEach((p, i) => (p.gold = data.gold[i] ?? p.gold));
+    state.players.forEach((p, i) => {
+      const saved = data.players[i];
+      if (saved) {
+        p.gold = saved.gold;
+        p.alive = saved.alive;
+      }
+    });
     state.turn = data.turn;
     state.current = data.current;
     state.winner = data.winner;

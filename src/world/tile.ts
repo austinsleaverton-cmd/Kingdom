@@ -1,7 +1,7 @@
 // Tile data and terrain rules. No Phaser imports in src/world.
 
 export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
-export type PlayerId = 0 | 1;
+export type PlayerId = number; // 0 is always the human player
 
 export interface Tile {
   col: number;
