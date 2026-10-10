@@ -6,12 +6,15 @@
 - Run: `npm run dev`
 
 ## Structure (do not explore to confirm this, trust it)
-- src/main.ts: Phaser game config and boot
+- src/main.ts: Phaser game config and boot (loads MapScene)
 - src/world/: game data and logic only, no Phaser imports
-  - tile.ts: Tile type, terrain-from-height rules
-  - map.ts: map generation, raiseHeight/lowerHeight
+  - tile.ts: Tile type, terrain-from-height rules, yields, claim costs
+  - map.ts: WorldMap, map generation, neighbors, raiseHeight/lowerHeight
+  - game.ts: GameState: players, gold, turns, actions (claim/raise/lower/city), win checks, rival AI
 - src/scenes/: rendering and input only
-  - MapScene.ts: draws hexes, handles clicks, hover, camera
+  - MapScene.ts: draws hexes, borders, cities, handles clicks, hover, camera
+  - Hud.ts: DOM overlay (stats, action bar, tooltip, game over)
+- src/game/ and the other files in src/scenes/ are old unused stubs
 
 ## Behavior rules
 - Do NOT run ls, find, or read files to explore the project unless I ask or a file I mention is missing.
@@ -19,10 +22,14 @@
 - Do one step at a time. Do not add features I didn't ask for.
 - Do not plan the full implementation in your head first. Write the files, then fix issues.
 - Keep world logic out of scenes. Scenes read from world, never the other way around.
+- Scenes change the world only through GameState.perform / endTurn.
 - After changes, tell me what changed in 1-3 lines and how to test it.
 
 ## Game rules (current)
-- Pointy-top hexes, 30x20 grid
+- Pointy-top hexes, 30x20 grid, odd rows shifted right (odd-r offset)
 - Height 0-5: 0 water, 1 sand, 2-3 grass, 4 hills, 5 mountain
-- owner is null for now
-- No cities, resources, or AI yet
+- 2 players: You (blue) vs Rival (red AI). Each starts with a capital.
+- Gold income per turn: tile yield (sand/grass 1, hills 2, mountain 0) + city 3 + capital 5
+- Actions: claim a tile bordering your land, raise/lower height (3g), found a city (10g + 10g per city owned, 2+ hexes from other cities)
+- Enemy tiles can be claimed at 3x cost; cities 30g, capital 60g
+- Win: hold 60% of land, capture enemy capital, or most tiles at turn 60

@@ -1,27 +1,18 @@
 import Phaser from 'phaser';
-
-class MainScene extends Phaser.Scene {
-  constructor() {
-    super('main');
-  }
-
-  create(): void {
-    // No game logic yet. The dark background filling the window comes
-    // from the game config's `backgroundColor` below.
-  }
-}
+import { MapScene } from './scenes/MapScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'game',
   width: window.innerWidth,
   height: window.innerHeight,
-  backgroundColor: '#111111',
+  backgroundColor: '#0b1a2e',
+  antialias: true,
   scale: {
     mode: Phaser.Scale.RESIZE,
-    autoCenter: Phaser.Scale.CENTER_BOTH
+    autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [MainScene]
+  scene: [MapScene],
 };
 
 export const game = new Phaser.Game(config);
