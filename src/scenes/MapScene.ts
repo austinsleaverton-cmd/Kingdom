@@ -151,8 +151,10 @@ export class MapScene extends Phaser.Scene {
     switch (this.mode) {
       case 'claim':
       case 'city':
-        if (!state.perform(this.mode, tile).ok) return this.fail();
-        break;
+        if (state.perform(this.mode, tile).ok) break;
+        // Not a valid buy, but it's your city or unit: just select it.
+        if (this.selectOwn(state, tile)) break;
+        return this.fail();
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
@@ -170,14 +172,37 @@ export class MapScene extends Phaser.Scene {
           state.moveUnit(unit, tile);
           this.selected = tile;
         } else {
-          this.selected = tile;
-          const here = state.unitAt(tile);
-          this.selectedUnitId = here && here.owner === 0 ? here.id : null;
+          this.selectTile(state, tile);
         }
         break;
       }
     }
     this.redraw();
+  }
+
+  // City first (it's the main thing on a tile); click the same city again to get the unit on it.
+  private selectTile(state: GameState, tile: Tile): void {
+    const here = state.unitAt(tile);
+    const mine = here && here.owner === 0 ? here : null;
+    const ownCity = tile.city && tile.owner === 0;
+    if (ownCity && mine) {
+      const cityAlreadySelected = this.selected === tile && this.selectedUnitId === null;
+      this.selectedUnitId = cityAlreadySelected ? mine.id : null;
+    } else {
+      this.selectedUnitId = mine ? mine.id : null;
+    }
+    this.selected = tile;
+  }
+
+  private selectOwn(state: GameState, tile: Tile): boolean {
+    const here = state.unitAt(tile);
+    const ownCity = tile.city && tile.owner === 0;
+    if (!ownCity && !(here && here.owner === 0)) return false;
+    this.mode = 'select';
+    this.selected = null;
+    this.selectedUnitId = null;
+    this.selectTile(state, tile);
+    return true;
   }
 
   private doJob(job: Job): void {
@@ -415,6 +440,18 @@ export class MapScene extends Phaser.Scene {
         onClick: () => this.recruitBuilder(),
       });
       lines.push(`Food ${state.foodUsed(0)}/${state.foodMade(0)} used`);
+      const here = state.unitAt(tile);
+      if (!unit && here && here.owner === 0) {
+        buttons.push({
+          label: `Select ${UNIT_STATS[here.type].name} here`,
+          enabled: true,
+          hint: 'or click the city again',
+          onClick: () => {
+            this.selectedUnitId = here.id;
+            this.redraw();
+          },
+        });
+      }
     }
     if (!unit && !tile.city) {
       const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
