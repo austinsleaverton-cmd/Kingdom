@@ -2,6 +2,7 @@
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
 import type { AttackPreview, Check, GameOptions } from '../world/game';
+import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { MAX_WALLS, YIELD, cityMaxHp, shieldMax } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
@@ -206,6 +207,39 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  // Does this unit of yours still have something useful to do this turn?
+  private hasWork(state: GameState, u: Unit): boolean {
+    if (u.owner !== 0 || u.hold || state.current !== 0) return false;
+    if (state.reachableFor(u).size > 0) return true;
+    if (UNIT_STATS[u.type].military) return this.findTargets(state, u).size > 0;
+    if (u.type === 'builder') {
+      if (u.acted) return false;
+      const here = state.tileOf(u);
+      return JOBS.some((j) => (j.id === 'raise' || j.id === 'lower' ? this.terraformPreview(state, u, j.id).ok : state.jobCheck(u, j.id, here).ok));
+    }
+    if (u.type === 'settler') return state.foundCheck(u).ok;
+    return false;
+  }
+
+  // After a unit finishes (no moves, nothing left to do), jump to the nearest unit that can still act.
+  private autoAdvance(from: Tile): void {
+    const state = this.state;
+    if (!state || state.winner !== null || this.mode !== 'select') return;
+    const cur = this.selectedUnit;
+    if (cur && this.hasWork(state, cur)) return;
+    let best: Unit | null = null;
+    let bestD = Infinity;
+    for (const u of state.unitsOf(0)) {
+      if (u === cur || !this.hasWork(state, u)) continue;
+      const d = hexDistance(state.tileOf(u), from);
+      if (d < bestD) {
+        bestD = d;
+        best = u;
+      }
+    }
+    if (best) this.focusUnit(best);
+  }
+
   private fail(): void {
     this.cameras.main.shake(80, 0.002);
   }
@@ -213,6 +247,7 @@ export class MapScene extends Phaser.Scene {
   private clickTile(tile: Tile): void {
     const state = this.state;
     if (!state) return;
+    let acted = false; // a unit used moves or its action: maybe jump to the next one
     switch (this.mode) {
       case 'claim':
         if (state.perform('claim', tile, 0, this.claimCity).ok) break;
@@ -234,6 +269,7 @@ export class MapScene extends Phaser.Scene {
         }
         if (!state.doJob(unit, this.mode, tile).ok) return this.fail();
         this.mode = 'select';
+        acted = true;
         break;
       }
       case 'select': {
@@ -244,9 +280,11 @@ export class MapScene extends Phaser.Scene {
         } else if (unit && this.targets.has(tile)) {
           state.attack(unit, tile);
           this.cameras.main.shake(60, 0.003);
+          acted = true;
         } else if (unit && this.reach.has(tile)) {
           state.moveUnit(unit, tile);
           this.selected = tile;
+          acted = true;
         } else {
           this.selectTile(state, tile);
         }
@@ -254,6 +292,7 @@ export class MapScene extends Phaser.Scene {
       }
     }
     this.redraw();
+    if (acted) this.autoAdvance(tile);
   }
 
   // City first (it's the main thing on a tile); click the same city again to get the unit on it.
@@ -291,8 +330,10 @@ export class MapScene extends Phaser.Scene {
       this.redraw();
       return;
     }
-    if (!state.doJob(unit, job, state.tileOf(unit)).ok) return this.fail();
+    const here = state.tileOf(unit);
+    if (!state.doJob(unit, job, here).ok) return this.fail();
     this.redraw();
+    this.autoAdvance(here);
   }
 
   private recruit(type: UnitType): void {
