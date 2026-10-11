@@ -1,7 +1,8 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { CITY_REGEN, CLAIM_COST, GROWTH_NEED, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { CITY_REGEN, CLAIM_COST, GROWTH_NEED, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { IMPROVEMENT_NAME } from './tile';
 import type { PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
@@ -38,23 +39,24 @@ export interface DifficultyConfig {
   focusHuman: boolean; // only marches on you
   landWin: boolean; // rivals can win by holding most of the land
   builderUses: number; // jobs a builder can do before it retires (0 = unlimited)
+  pillage: boolean; // AI troops wreck farms and roads on enemy land
 }
 
 export const DIFFICULTY: Record<Difficulty, DifficultyConfig> = {
   easy: {
     label: 'Easy', note: 'Rivals grow slowly, keep small armies and rarely attack.',
     income: 0.7, troopsPerCity: 0.5, maxArmy: 3, attackTurn: 45, attackArmy: 3, garrison: 2,
-    builders: 1, maxWalls: 1, smart: false, aggression: 0.5, focusHuman: false, landWin: false, builderUses: 0,
+    builders: 1, maxWalls: 1, smart: false, aggression: 0.5, focusHuman: false, landWin: false, builderUses: 0, pillage: false,
   },
   normal: {
     label: 'Normal', note: 'Rivals build up, defend, and attack once they have an army.',
     income: 1, troopsPerCity: 1, maxArmy: 8, attackTurn: 22, attackArmy: 4, garrison: 1,
-    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true, builderUses: 3,
+    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true, builderUses: 3, pillage: true,
   },
   hard: {
     label: 'Hard', note: 'Rivals earn more, counter your troops, and come for you early.',
     income: 1.25, troopsPerCity: 1.5, maxArmy: 14, attackTurn: 14, attackArmy: 4, garrison: 1,
-    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true, builderUses: 3,
+    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true, builderUses: 3, pillage: true,
   },
 };
 
@@ -133,6 +135,7 @@ export const SIEGE_MULT = 1.5; // troops hit cities harder than units
 export const CAPTURE_HP = 0.5; // captured cities start at this share of max hp
 export const HOME_HEAL = 0.25; // units on their own land heal this share of max HP per turn
 export const BIG_CLAIM_RADIUS = 4; // claim range once a city reaches level 3
+export const PILLAGE_GOLD = 3; // loot for wrecking an enemy farm, pasture, forest or mine (roads give 1)
 export const GROWTH_SHARE_CAP = 3; // most spare food a single city can use for growth per turn
 
 const CITY_NAMES = [
@@ -740,7 +743,7 @@ export class GameState {
     const goals = nextTo
       ? new Set(this.map.neighbors(dest).filter((n) => n === from || (isLand(n) && !blocked(n) && !taken(n))))
       : new Set([dest]);
-    const path = findPath(this.map, from, goals, blocked);
+    const path = findPath(this.map, from, goals, blocked, unit.owner);
     if (!path) return fail('No way to get there');
     if (!path.length) return fail('Already next to it', true);
     const turnAt = routeTurns(unit, path, from);
@@ -925,6 +928,7 @@ export class GameState {
     city.growth = 0;
     city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
     city.shield = 0;
+    city.wallTurns = 0; // half-built walls are lost
     this.invalidate();
     if (wasCapital) this.eliminate(prev, captor);
     else this.addLog(`${this.players[captor].name} captured ${this.cityName(city)} from ${this.you(prev)}`);
@@ -968,14 +972,8 @@ export class GameState {
         if (target.city) return fail('Cities already count as roads');
         if (target.road) return fail('Already a road');
         break;
-      case 'walls': {
-        if (!target.city) return fail('Walls go on a city: stand the builder on it');
-        if (target.walls >= MAX_WALLS) return fail('Walls are maxed');
-        const stone = this.wallStoneCost(target);
-        const free = this.isFree(p);
-        if (!free && this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
-        break;
-      }
+      case 'walls':
+        return fail('Build walls from the city panel');
       case 'raise':
         if (target.height >= MAX_HEIGHT) return fail('Already a mountain');
         if (target.city && target.height + 1 >= MAX_HEIGHT) return fail("Cities can't sit on mountains");
@@ -997,6 +995,7 @@ export class GameState {
     if (p !== this.current) return fail('Not your turn');
     if (!city.city || city.owner !== p) return fail('Build walls in your own city');
     if (city.walls >= MAX_WALLS) return fail('Walls are maxed');
+    if (city.wallTurns > 0) return fail(`Walls going up: ${city.wallTurns} turn${city.wallTurns === 1 ? '' : 's'} left`);
     const stone = this.wallStoneCost(city);
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     if (this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
@@ -1010,9 +1009,65 @@ export class GameState {
     const player = this.players[p];
     player.gold -= c.cost;
     if (!this.isFree(p)) player.stone -= this.wallStoneCost(city);
-    city.walls += 1;
-    city.shield = shieldMax(city); // new walls go up at full strength
+    // Paid now, built over a few turns (bigger walls take longer), like training troops
+    city.wallTurns = this.wallTurnsFor(city);
     return c;
+  }
+
+  wallTurnsFor(city: Tile): number {
+    return WALL_TURNS[Math.min(city.walls, MAX_WALLS - 1)];
+  }
+
+  // Start of the owner's turn: walls under construction get a turn closer
+  private advanceWalls(p: PlayerId): void {
+    for (const c of this.cities()) {
+      if (c.owner !== p || c.wallTurns <= 0) continue;
+      c.wallTurns -= 1;
+      if (c.wallTurns > 0) continue;
+      c.walls = Math.min(MAX_WALLS, c.walls + 1);
+      c.shield = shieldMax(c); // new walls go up at full strength
+      this.tell(p, `${this.cityName(c)} finished walls level ${c.walls}`);
+    }
+  }
+
+  // ---------- pillage ----------
+
+  // A troop standing on enemy land wrecks the farm/pasture/forest/mine there (or the road). Uses its attack.
+  pillageCheck(unit: Unit): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (!UNIT_STATS[unit.type].military) return fail('Only troops can pillage');
+    if (unit.owner !== this.current) return fail('Not your turn');
+    if (unit.acted) return fail('Already acted this turn');
+    const here = this.tileOf(unit);
+    if (here.city) return fail("Can't pillage a city: attack it");
+    if (!this.isEnemy(here.owner, unit.owner)) return fail('Stand on enemy land to pillage');
+    if (!here.improvement && !here.road) return fail('Nothing here to pillage');
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  // What pillaging here would wreck, and the loot
+  pillageTarget(tile: Tile): { name: string; gold: number } | null {
+    if (tile.improvement) return { name: IMPROVEMENT_NAME[tile.improvement], gold: PILLAGE_GOLD };
+    if (tile.road) return { name: 'road', gold: 1 };
+    return null;
+  }
+
+  pillage(unit: Unit): Check {
+    const c = this.pillageCheck(unit);
+    if (!c.ok) return c;
+    const here = this.tileOf(unit);
+    const what = this.pillageTarget(here)!;
+    const victim = here.owner!;
+    if (here.improvement) here.improvement = null;
+    else here.road = false;
+    this.players[unit.owner].gold += what.gold;
+    unit.acted = true;
+    unit.moves = 0;
+    unit.hold = false;
+    this.clearRoute(unit);
+    this.invalidate();
+    this.addLog(`${this.players[unit.owner].name} pillaged ${this.whose(victim)} ${what.name}`);
+    return { ok: true, cost: 0, reason: `+${what.gold} gold` };
   }
 
   wallStoneCost(city: Tile): number {
@@ -1035,11 +1090,6 @@ export class GameState {
         break;
       case 'road':
         target.road = true;
-        break;
-      case 'walls':
-        if (!this.isFree(unit.owner)) this.players[unit.owner].stone -= this.wallStoneCost(target);
-        target.walls += 1;
-        target.shield = shieldMax(target); // new walls go up at full strength
         break;
       case 'raise':
         this.map.raiseHeight(target);
@@ -1084,6 +1134,7 @@ export class GameState {
     this.players[p].gold += Math.round(this.income(p) * mult);
     this.players[p].stone += this.stoneIncome(p);
     this.growCities(p);
+    this.advanceWalls(p);
     // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
       if (t.owner !== p || this.besieged(t)) continue;

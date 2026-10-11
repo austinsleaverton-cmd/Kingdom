@@ -111,6 +111,10 @@ function aiQueue(g: GameState, p: PlayerId): void {
       continue;
     }
   }
+  // Walls: queue the next level when there's stone for it
+  for (const city of cities) {
+    if (city.walls < Math.min(cfg.maxWalls, MAX_WALLS) && g.wallCheck(city, p).ok) g.buildWalls(city, p);
+  }
   // Builders are instant
   if (builders < Math.min(cfg.builders, cities.length) && g.players[p].gold >= 15 + settlerReserve(g, p)) {
     const city = cities.find((c) => g.recruitCheck('builder', c, p).ok);
@@ -144,10 +148,7 @@ function stepToward(g: GameState, unit: Unit, goal: Tile, keep = 0): void {
 function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   if (t.owner !== p) return null;
   const cfg = DIFFICULTY[g.options.difficulty];
-  if (t.city) {
-    if (t.walls < Math.min(cfg.maxWalls, MAX_WALLS) && g.players[p].stone >= g.wallStoneCost(t)) return 'walls';
-    return null;
-  }
+  if (t.city) return null; // walls are a city action now (see aiQueue)
   if (t.improvement) return null;
   const hungry = g.foodUsed(p) + 3 > g.foodMade(p);
   const mines = g.ownedTiles(p).filter((x) => x.improvement === 'mine').length;
@@ -282,10 +283,11 @@ function aiTroops(g: GameState, p: PlayerId): void {
       stepToward(g, unit, goal, goal.city && g.isEnemy(goal.owner, p) ? Math.max(keep, 1) : keep);
     }
 
-    // 3. Attack after moving
+    // 3. Attack after moving, or wreck what it's standing on
     if (!g.units.includes(unit) || unit.acted) continue;
     const after = bestAttack(g, unit);
     if (after) g.attack(unit, after);
+    else if (cfg.pillage && g.pillageCheck(unit).ok) g.pillage(unit);
   }
 }
 

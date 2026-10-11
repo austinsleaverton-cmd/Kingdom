@@ -85,14 +85,19 @@ const TERRAIN_MOVE: Record<Terrain, number> = {
   mountain: 3,
 };
 
-const hasRoad = (t: Tile) => t.road || t.city;
+// Roads (and cities) only speed up their owner: enemy roads are just ground to an invader.
+// owner undefined = anyone's roads count (used for display only).
+const hasRoad = (t: Tile, owner?: PlayerId) => {
+  if (owner !== undefined && t.owner !== null && t.owner !== owner) return false;
+  return t.road || (t.city && (owner === undefined || t.owner === owner));
+};
 
-export const FOREST_MOVE = 2; // forests are slow to walk through (roads still cut through)
+export const FOREST_MOVE = 2; // forests are slow to walk through (your own roads still cut through)
 
-export function moveCost(from: Tile, to: Tile): number {
+export function moveCost(from: Tile, to: Tile, owner?: PlayerId): number {
   if (to.terrain === 'water') return Infinity;
-  if (hasRoad(from) && hasRoad(to)) return 0.5;
-  if (to.improvement === 'forest' && !to.road) return Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]);
+  if (hasRoad(from, owner) && hasRoad(to, owner)) return 0.5;
+  if (to.improvement === 'forest' && !(to.road && hasRoad(to, owner))) return Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]);
   return TERRAIN_MOVE[to.terrain];
 }
 
@@ -113,7 +118,7 @@ export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boole
     const left = best.get(cur)!;
     for (const n of map.neighbors(cur)) {
       if (blocked(n)) continue;
-      const cost = moveCost(cur, n);
+      const cost = moveCost(cur, n, unit.owner);
       if (cost === Infinity) continue;
       let after = left - cost;
       if (after < 0) {
@@ -133,7 +138,7 @@ export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boole
 
 // Cheapest path (by move cost) from the unit to the nearest goal tile. Excludes the start tile.
 // blocked tiles can't be entered. Returns null if no goal can be reached.
-export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (t: Tile) => boolean): Tile[] | null {
+export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (t: Tile) => boolean, owner?: PlayerId): Tile[] | null {
   if (goals.has(from)) return [];
   const dist = new Map<Tile, number>([[from, 0]]);
   const prev = new Map<Tile, Tile>();
@@ -178,7 +183,7 @@ export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (
     }
     for (const n of map.neighbors(cur)) {
       if (blocked(n)) continue;
-      const c = moveCost(cur, n);
+      const c = moveCost(cur, n, owner);
       if (c === Infinity) continue;
       const nd = d + c;
       if (nd >= (dist.get(n) ?? Infinity)) continue;
@@ -199,7 +204,7 @@ export function routeTurns(unit: Unit, path: Tile[], from: Tile): number[] {
   let cur = from;
   const out: number[] = [];
   for (const t of path) {
-    const c = moveCost(cur, t);
+    const c = moveCost(cur, t, unit.owner);
     if (c <= left) left -= c;
     else if (left === full) left = 0;
     else {
