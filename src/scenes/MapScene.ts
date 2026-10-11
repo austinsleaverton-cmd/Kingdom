@@ -128,6 +128,8 @@ export class MapScene extends Phaser.Scene {
   }
 
   private setMode(m: Mode): void {
+    // Pressing Select (1) while already selecting clears the selection
+    if (m === 'select' && this.mode === 'select') this.clearSelection();
     this.mode = m;
     if (m !== 'claim') this.claimCity = null;
     this.redraw();
@@ -234,7 +236,10 @@ export class MapScene extends Phaser.Scene {
       }
       case 'select': {
         const unit = this.selectedUnit;
-        if (unit && this.targets.has(tile)) {
+        if (unit && state.tileOf(unit) === tile) {
+          // Clicking the selected unit again deselects it
+          this.clearSelection();
+        } else if (unit && this.targets.has(tile)) {
           state.attack(unit, tile);
           this.cameras.main.shake(60, 0.003);
         } else if (unit && this.reach.has(tile)) {
@@ -375,8 +380,13 @@ export class MapScene extends Phaser.Scene {
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (this.playing) this.openMenu();
-        else this.continueGame();
+        if (!this.playing) this.continueGame();
+        else if (this.selected || this.mode !== 'select') {
+          // First Esc clears the selection, second opens the menu
+          this.clearSelection();
+          this.mode = 'select';
+          this.redraw();
+        } else this.openMenu();
         return;
       }
       if (!this.playing) return;
@@ -533,6 +543,7 @@ export class MapScene extends Phaser.Scene {
       } else lines.push('Click a lit hex to move. One job per turn.');
       if (stats.military) lines[0] = `Moves ${unit.moves}/${stats.moves}`;
       if (unit.owner === 0) {
+        lines.push('Click it again (or Esc) to deselect.');
         if (unit.hold) lines.push('Holding: skipped by the end-of-turn check until you move it');
         buttons.push({
           label: unit.hold ? 'Stop holding' : 'Hold position',
