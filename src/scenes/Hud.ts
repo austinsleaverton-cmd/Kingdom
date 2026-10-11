@@ -113,6 +113,12 @@ const CSS = `
 .k-over { inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); pointer-events: auto; position: absolute; }
 .k-over .k-panel { position: static; text-align: center; padding: 24px 32px; font-size: 16px; }
 .k-over h1 { margin: 0 0 8px; }
+.k-who { font-weight: 600; margin-left: 6px; }
+.k-pass { inset: 0; display: none; align-items: center; justify-content: center; background: rgba(5,10,20,0.92); pointer-events: auto; position: absolute; }
+.k-pass .k-panel { position: static; text-align: center; padding: 26px 34px; font-size: 16px; min-width: 240px; border-width: 2px; }
+.k-pass h1 { margin: 0 0 6px; font-size: 30px; }
+.k-pass .k-sub2 { color: #9ca3af; font-size: 13px; }
+.k-pass button { margin-top: 18px; color: #fff; border: 0; padding: 10px 26px; font-size: 16px; font-weight: 600; }
 .k-over button { margin-top: 16px; background: #2563eb; color: #fff; border: 0; padding: 8px 18px; }
 .k-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-weight: 600; }
 .k-head .k-tog { display: inline-block; width: auto; margin: 0; background: transparent; border: 1px solid #444; border-radius: 4px; padding: 0 7px; font-size: 13px; line-height: 18px; color: #bbb; }
@@ -195,6 +201,8 @@ export class Hud {
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
   private idle: HTMLDivElement;
   private prefs: Record<string, boolean>; // collapsed panels and panel sections
+  private pass: HTMLDivElement; // hot-seat: "pass the device" screen between people
+  private passStart: (() => void) | null = null;
 
   constructor(handlers: HudHandlers) {
     const style = document.createElement('style');
@@ -240,6 +248,9 @@ export class Hud {
     this.idle = el('k-panel k-idle');
     this.root.appendChild(this.idle);
 
+    this.pass = el('k-pass');
+    this.root.appendChild(this.pass);
+
     this.over = el('k-over');
     const box = el('k-panel');
     this.overText = el('');
@@ -255,16 +266,22 @@ export class Hud {
 
   update(state: GameState, mode: string): void {
     const land = state.landCount();
-    const me = state.players[0];
+    const cur = state.current; // whoever is playing right now (hot-seat: changes every turn)
+    const me = state.players[cur];
     const free = state.options.freeBuild;
-    const used = state.foodUsed(0);
-    const made = state.foodMade(0);
+    const used = state.foodUsed(cur);
+    const made = state.foodMade(cur);
     const left = made - used;
     const modeLabel = state.sandbox
       ? 'Sandbox'
-      : `${DIFFICULTY[state.options.difficulty].label} · ${state.players.length - 1} rival${state.players.length > 2 ? 's' : ''}`;
+      : state.hotseat
+        ? `${state.players.length} players${state.players.some((p) => p.isAI) ? ` · ${DIFFICULTY[state.options.difficulty].label} AI` : ''}`
+        : `${DIFFICULTY[state.options.difficulty].label} · ${state.players.length - 1} rival${state.players.length > 2 ? 's' : ''}`;
 
-    this.statsBox.head.innerHTML = `Turn ${state.turn} <span class="k-mode">${modeLabel}</span>`;
+    const who = state.hotseat
+      ? ` <span class="k-who"><span class="k-dot" style="background:#${me.color.toString(16).padStart(6, '0')}"></span>${escape(me.name)}</span>`
+      : '';
+    this.statsBox.head.innerHTML = `Turn ${state.turn}${who} <span class="k-mode">${modeLabel}</span>`;
 
     // One row per resource: name, amount, plain-English note
     const row = (icon: string, label: string, value: string, note: string, warn = false) =>
@@ -272,10 +289,10 @@ export class Hud {
       `<b>${value}</b><span class="k-note${warn ? ' k-warn' : ''}">${note}</span></div>`;
     const foodPct = made > 0 ? Math.min(100, (used / made) * 100) : 100;
     const mine =
-      row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(0)} next turn`) +
+      row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(cur)} next turn`) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
       `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
-      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(0) > 0 ? `+${state.stoneIncome(0)} next turn` : 'build mines for walls');
+      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(cur) > 0 ? `+${state.stoneIncome(cur)} next turn` : 'build mines for walls');
 
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const rows = state.players
@@ -285,11 +302,11 @@ export class Hud {
         const cells = p.alive
           ? `<td>${Math.round((tiles / land) * 100)}%</td><td>${state.cityCount(p.id)}</td><td>${state.unitsOf(p.id).length}</td>`
           : `<td colspan="3">defeated</td>`;
-        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === 0 ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${p.name}</td>${cells}</tr>`;
+        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === cur ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${escape(p.name)}</td>${cells}</tr>`;
       })
       .join('');
     const table = state.sandbox
-      ? `<div class="k-res" style="margin-top:6px">${plural(state.cityCount(0), 'city')} · ${plural(state.unitsOf(0).length, 'unit')}</div>`
+      ? `<div class="k-res" style="margin-top:6px">${plural(state.cityCount(cur), 'city')} · ${plural(state.unitsOf(cur).length, 'unit')}</div>`
       : `<h4>Kingdoms</h4><table class="k-tab"><tr><th></th><th>Land</th><th>Cities</th><th>Units</th></tr>${rows}</table>`;
     const recent = state.log.slice(-4).reverse().map((l) => escape(l.replace(/^T(\d+): /, 'Turn $1 · ')));
     this.stats.innerHTML =
@@ -316,8 +333,9 @@ export class Hud {
     for (const [id, b] of this.modeBtns) b.classList.toggle('k-on', id === mode);
 
     if (state.winner !== null) {
-      const won = state.winner === 0;
-      this.overText.innerHTML = `<h1>${won ? 'Victory' : 'Defeat'}</h1>${escape(state.winReason)}`;
+      const w = state.players[state.winner];
+      const title = state.hotseat ? (w.isAI ? `${w.name} wins` : `${w.name} wins!`) : w.isAI ? 'Defeat' : 'Victory';
+      this.overText.innerHTML = `<h1>${escape(title)}</h1>${escape(state.winReason)}`;
       this.over.style.display = 'flex';
     } else {
       this.over.style.display = 'none';
@@ -399,6 +417,33 @@ export class Hud {
       this.sel.appendChild(f);
     }
     this.selBox.panel.style.display = 'block';
+  }
+
+  // Hot-seat: cover the map until the next person is holding the device.
+  showPass(name: string, color: number, turn: number, note: string, onStart: () => void): void {
+    const hex = `#${color.toString(16).padStart(6, '0')}`;
+    this.pass.innerHTML = '';
+    const box = el('k-panel');
+    box.style.borderColor = hex;
+    box.innerHTML = `<div class="k-sub2">Turn ${turn} \u00b7 pass the device to</div><h1 style="color:${hex}">${escape(name)}</h1><div class="k-sub2">${escape(note)}</div>`;
+    const go = button(`<kbd>Space</kbd>I'm ${escape(name)}, start my turn`, () => this.startPass());
+    go.style.background = hex;
+    box.appendChild(go);
+    this.pass.appendChild(box);
+    this.passStart = onStart;
+    this.pass.style.display = 'flex';
+    this.hideTip();
+  }
+
+  startPass(): void {
+    const fn = this.passStart;
+    this.passStart = null;
+    this.pass.style.display = 'none';
+    fn?.();
+  }
+
+  get passVisible(): boolean {
+    return this.pass.style.display === 'flex';
   }
 
   // End-of-turn check: some units still have nothing ordered.
