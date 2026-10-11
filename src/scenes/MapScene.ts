@@ -1076,6 +1076,24 @@ export class MapScene extends Phaser.Scene {
         g.fillRect(x - 7, y + 1, 14, 9);
         g.fillStyle(0xd4a017, 1);
         g.fillCircle(x, y + 5, 2.5);
+      } else if (t.improvement === 'pasture') {
+        // wooden fence with a horseshoe
+        g.lineStyle(2, 0x8b5a2b, 1);
+        g.lineBetween(x - 12, y + 2, x + 12, y + 2);
+        g.lineBetween(x - 12, y + 8, x + 12, y + 8);
+        for (const px of [-11, -4, 4, 11]) g.lineBetween(x + px, y - 1, x + px, y + 11);
+        g.lineStyle(2.5, 0xe5e7eb, 1);
+        g.beginPath();
+        g.arc(x, y - 8, 4, Phaser.Math.DegToRad(200), Phaser.Math.DegToRad(340), true);
+        g.strokePath();
+      } else if (t.improvement === 'forest') {
+        // three pine trees
+        for (const [dx, dy, s] of [[-8, 4, 1], [8, 4, 1], [0, -3, 1.2]] as const) {
+          g.fillStyle(0x5b3a1e, 1);
+          g.fillRect(x + dx - 1, y + dy + 4 * s, 2, 4);
+          g.fillStyle(0x1f5e2e, 1);
+          g.fillTriangle(x + dx - 6 * s, y + dy + 5 * s, x + dx, y + dy - 8 * s, x + dx + 6 * s, y + dy + 5 * s);
+        }
       }
     }
     // Roads: connect road/city tiles to neighbors that also have roads
