@@ -3,6 +3,7 @@ import { GameState, MAP_SIZES } from './game';
 import type { GameOptions } from './game';
 import { cityMaxHp, shieldMax, terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
+import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
 
 const KEY = 'kingdom-save-v3';
@@ -121,7 +122,7 @@ export function loadGame(): GameState | null {
     state.winner = data.winner;
     state.winReason = data.winReason;
     state.log = data.log;
-    state.units = (data.units ?? []).map((u) => ({ ...u }));
+    state.units = (data.units ?? []).map((u) => ({ ...u, hp: u.hp ?? UNIT_STATS[u.type].hp }));
     state.nextUnitId = data.nextUnitId ?? state.units.length + 1;
     state.training = (data.training ?? []).map((t) => ({ ...t }));
     state.invalidate();

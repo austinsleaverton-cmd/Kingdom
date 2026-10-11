@@ -61,6 +61,20 @@ export const CLAIM_RADIUS = 4; // can only buy land this close to one of your ci
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
 export const CITY_SPACING = 3; // cities must be at least this many hexes apart
+export const STRONG_BONUS = 1.5; // damage multiplier vs the type a unit is strong against
+export const COUNTER_SHARE = 0.5; // melee defenders hit back for this share of their attack
+export const CITY_COUNTER = 4; // cities hit melee attackers back for this (+2 per wall level)
+export const KNIGHT_VS_WALLS = 0.5; // knights are bad at breaking walls
+export const SIEGE_MULT = 1.5; // troops hit cities harder than units
+export const CAPTURE_HP = 0.5; // captured cities start at this share of max hp
+
+export interface AttackPreview {
+  ok: boolean;
+  reason: string;
+  dmg: number; // damage dealt
+  counter: number; // damage taken back
+  kind: 'unit' | 'city' | 'none';
+}
 
 const fail = (reason: string, cost = 0): Check => ({ ok: false, cost, reason });
 
@@ -186,7 +200,23 @@ export class GameState {
 
   reachableFor(unit: Unit): Map<Tile, number> {
     if (unit.owner !== this.current) return new Map();
-    return reachable(this.map, unit, (t) => this.unitAt(t) !== undefined);
+    const canCapture = UNIT_STATS[unit.type].canCapture === true;
+    return reachable(this.map, unit, (t) => {
+      if (this.unitAt(t)) return true;
+      // Enemy cities block movement until destroyed; then only capture-capable troops can walk in.
+      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture;
+      return false;
+    });
+  }
+
+  besieged(city: Tile): boolean {
+    return this.units.some(
+      (u) => UNIT_STATS[u.type].military && city.owner !== null && this.isEnemy(u.owner, city.owner) && hexDistance(this.tileOf(u), city) <= 2,
+    );
+  }
+
+  isEnemy(owner: PlayerId | null, p: PlayerId): boolean {
+    return owner !== null && owner !== p && this.players[owner].alive;
   }
 
   claimCost(tile: Tile, p: PlayerId): number {
@@ -329,7 +359,7 @@ export class GameState {
       return 'queued';
     }
     const at = this.spawnTile(city)!;
-    const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true };
+    const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true, hp: stats.hp };
     this.units.push(unit);
     return unit;
   }
@@ -351,7 +381,7 @@ export class GameState {
         continue;
       }
       const stats = UNIT_STATS[t.type];
-      this.units.push({ id: this.nextUnitId++, type: t.type, owner: p, col: at.col, row: at.row, moves: stats.moves, acted: false });
+      this.units.push({ id: this.nextUnitId++, type: t.type, owner: p, col: at.col, row: at.row, moves: stats.moves, acted: false, hp: stats.hp });
       if (p === 0) this.addLog(`${stats.name} ready`);
     }
     this.training = keep;
@@ -369,7 +399,121 @@ export class GameState {
     unit.col = dest.col;
     unit.row = dest.row;
     unit.moves = left;
+    // Walking into a destroyed enemy city takes it.
+    if (dest.city && this.isEnemy(dest.owner, unit.owner) && dest.hp <= 0) this.captureCity(dest, unit.owner);
     return true;
+  }
+
+  // ---------- combat ----------
+
+  private defenseMult(tile: Tile, defender: PlayerId): number {
+    let m = 1;
+    if (tile.terrain === 'hills') m *= 0.8;
+    if (tile.terrain === 'mountain') m *= 0.7;
+    if (tile.city && tile.owner === defender) m *= 0.75;
+    return m;
+  }
+
+  private typeMult(attacker: UnitType, defender: UnitType): number {
+    return UNIT_STATS[attacker].strongVs === defender ? STRONG_BONUS : 1;
+  }
+
+  attackPreview(unit: Unit, target: Tile): AttackPreview {
+    const no = (reason: string): AttackPreview => ({ ok: false, reason, dmg: 0, counter: 0, kind: 'none' });
+    if (this.winner !== null) return no('Game over');
+    const stats = UNIT_STATS[unit.type];
+    if (!stats.military) return no("This unit can't fight");
+    if (unit.owner !== this.current) return no('Not your turn');
+    if (unit.acted) return no('Already attacked this turn');
+    const from = this.tileOf(unit);
+    const dist = hexDistance(from, target);
+    if (dist < 1 || dist > stats.range) return no(`Out of range (${stats.range})`);
+    const melee = dist === 1 && stats.range === 1;
+    const defender = this.unitAt(target);
+    if (defender) {
+      if (defender.owner === unit.owner) return no('Your own unit');
+      if (!this.isEnemy(defender.owner, unit.owner)) return no('Nothing to attack');
+      const d = UNIT_STATS[defender.type];
+      if (!d.military) return { ok: true, reason: '', dmg: defender.hp, counter: 0, kind: 'unit' };
+      const dmg = Math.max(1, Math.round(stats.atk * this.typeMult(unit.type, defender.type) * this.defenseMult(target, defender.owner)));
+      const counter = melee && dmg < defender.hp
+        ? Math.round(d.atk * COUNTER_SHARE * this.typeMult(defender.type, unit.type) * this.defenseMult(from, unit.owner))
+        : 0;
+      return { ok: true, reason: '', dmg, counter, kind: 'unit' };
+    }
+    if (target.city && this.isEnemy(target.owner, unit.owner)) {
+      if (target.hp <= 0 && target.shield <= 0) return no(stats.canCapture ? 'Destroyed: move in to capture' : 'Destroyed: send a swordsman or knight');
+      const wallMult = unit.type === 'knight' && target.shield > 0 ? KNIGHT_VS_WALLS : 1;
+      const dmg = Math.max(1, Math.round(stats.atk * SIEGE_MULT * wallMult));
+      const counter = dist === 1 ? CITY_COUNTER + 2 * target.walls : 0;
+      return { ok: true, reason: '', dmg, counter, kind: 'city' };
+    }
+    return no('Nothing to attack');
+  }
+
+  attack(unit: Unit, target: Tile): AttackPreview {
+    const pv = this.attackPreview(unit, target);
+    if (!pv.ok) return pv;
+    const a = this.players[unit.owner];
+    unit.acted = true;
+    unit.moves = 0;
+    if (pv.kind === 'unit') {
+      const defender = this.unitAt(target)!;
+      const dName = `${this.players[defender.owner].name} ${UNIT_STATS[defender.type].name}`;
+      defender.hp -= pv.dmg;
+      if (defender.hp <= 0) {
+        this.units = this.units.filter((u) => u !== defender);
+        this.addLog(`${a.name} destroyed a ${dName}`);
+      }
+    } else {
+      const absorbed = Math.min(target.shield, pv.dmg);
+      target.shield -= absorbed;
+      target.hp = Math.max(0, target.hp - (pv.dmg - absorbed));
+      if (target.hp === 0) this.addLog(`${a.name} broke ${this.players[target.owner!].name}'s ${target.capital ? 'capital' : 'city'}`);
+    }
+    unit.hp -= pv.counter;
+    if (unit.hp <= 0) {
+      this.units = this.units.filter((u) => u !== unit);
+      this.addLog(`${a.name} lost a ${UNIT_STATS[unit.type].name}`);
+      return pv;
+    }
+    // A melee capture-capable unit that destroys a city walks right in.
+    if (pv.kind === 'city' && target.hp === 0 && hexDistance(this.tileOf(unit), target) === 1 && UNIT_STATS[unit.type].canCapture && !this.unitAt(target)) {
+      unit.col = target.col;
+      unit.row = target.row;
+      this.captureCity(target, unit.owner);
+    }
+    return pv;
+  }
+
+  // The captor gets the city plus the loser's land that is closer to it than to their other cities.
+  // Taking a capital knocks the owner out entirely.
+  private captureCity(city: Tile, captor: PlayerId): void {
+    const prev = city.owner;
+    if (prev === null) return;
+    const theirCities = this.cities().filter((c) => c.owner === prev);
+    for (const t of this.map.tiles) {
+      if (t.owner !== prev || t === city) continue;
+      let nearest = city;
+      let best = hexDistance(t, city);
+      for (const c of theirCities) {
+        const d = hexDistance(t, c);
+        if (d < best) {
+          best = d;
+          nearest = c;
+        }
+      }
+      if (nearest === city) t.owner = captor;
+    }
+    const wasCapital = city.capital;
+    city.owner = captor;
+    city.capital = false;
+    city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
+    city.shield = 0;
+    this.invalidate();
+    if (wasCapital) this.eliminate(prev, captor);
+    else this.addLog(`${this.players[captor].name} captured a city from ${this.players[prev].name}`);
+    this.checkWin();
   }
 
   jobCheck(unit: Unit, job: Job, target: Tile): Check {
@@ -479,15 +623,19 @@ export class GameState {
   private startTurn(p: PlayerId): void {
     this.players[p].gold += this.income(p);
     this.players[p].stone += this.stoneIncome(p);
-    // Cities heal and walls rebuild a little every turn.
+    // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
-      if (t.owner !== p) continue;
+      if (t.owner !== p || this.besieged(t)) continue;
       t.hp = Math.min(cityMaxHp(t), t.hp + CITY_REGEN);
       t.shield = Math.min(shieldMax(t), t.shield + CITY_REGEN);
     }
     for (const u of this.unitsOf(p)) {
-      u.moves = UNIT_STATS[u.type].moves;
+      const stats = UNIT_STATS[u.type];
+      u.moves = stats.moves;
       u.acted = false;
+      // Units heal faster at home
+      const home = this.tileOf(u).owner === p;
+      u.hp = Math.min(stats.hp, u.hp + (home ? 5 : 2));
     }
     this.advanceTraining(p);
   }

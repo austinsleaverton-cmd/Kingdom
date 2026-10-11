@@ -9,13 +9,13 @@
 ## Structure (do not explore to confirm this, trust it)
 - src/main.ts: Phaser game config and boot (loads MapScene)
 - src/world/: game data and logic only, no Phaser imports
-  - tile.ts: Tile type (terrain, owner, city, improvement, road), terrain rules, yields, claim costs
+  - tile.ts: Tile type (terrain, owner, city, improvement, road, city hp/walls/shield), terrain rules, yields, claim costs
   - map.ts: WorldMap, map generation, neighbors, raiseHeight/lowerHeight
-  - units.ts: unit types/stats (builder, settler), training, builder jobs, movement costs, reachable()
-  - game.ts: GameState: players, gold/food/stone, turns, claim, recruit/train/move/jobs, settlers founding cities, win checks, rival AI
+  - units.ts: unit types/stats (builder, settler, swordsman, archer, knight), training, builder jobs, movement costs, reachable()
+  - game.ts: GameState: players, gold/food/stone, turns, claim, recruit/train/move/jobs, settlers, combat (attackPreview/attack), city capture, win checks, rival AI
   - save.ts: autosave/load to localStorage (key kingdom-save-v3)
 - src/scenes/: rendering and input only
-  - MapScene.ts: draws hexes, roads, buildings, units, borders; selection, movement, modes, camera; autosaves after every redraw
+  - MapScene.ts: draws hexes, roads, buildings, units, borders, city bars; selection, movement, attack targets, modes, camera; autosaves after every redraw
   - Hud.ts: DOM overlay (collapsible stats/help/selection panels, mode bar, tooltip, game over)
   - Menu.ts: start screen (map size, rivals, free building, continue)
 - src/game/ and the other files in src/scenes/ are old unused stubs
@@ -26,27 +26,31 @@
 - Do one step at a time. Do not add features I didn't ask for.
 - Do not plan the full implementation in your head first. Write the files, then fix issues.
 - Keep world logic out of scenes. Scenes read from world, never the other way around.
-- Scenes change the world only through GameState methods (perform, recruit, moveUnit, doJob, foundCity, endTurn).
+- Scenes change the world only through GameState methods (perform, recruit, moveUnit, doJob, foundCity, attack, endTurn).
 - If you add new state to GameState, Tile or Unit, add it to save.ts too.
 - After changes, tell me what changed in 1-3 lines and how to test it.
 
 ## Game rules (current)
 - Pointy-top hexes, odd rows shifted right (odd-r offset). Sizes: small 20x14, medium 30x20, large 44x30, huge 60x40
 - Height 0-5: 0 water, 1 sand, 2-3 grass, 4 hills, 5 mountain
-- Players: You (blue) + 0-3 AI rivals. 0 rivals = sandbox (no win conditions)
+- Players: You (blue) + 0-3 AI rivals. 0 rivals = sandbox (no win conditions, no troops)
 - Gold per turn: tile yield (sand/grass 1, hills 2, mountain 0) + city 3 + capital 5
-- Food is supply: capital 3, city 2, farm 3. Units (and units in training) use food: builder 1, settler 2
-- Stone: mines give 2/turn (will pay for walls)
-- Builder (15g, instant, 2 moves): one job per turn on own land: farm (grass/sand, 5g), mine (hills/mountain, 8g), road (2g), raise/lower its tile or a neighbor (3g)
-- Settler (10g + 10g per city owned, 3 turns to train, 2 moves): founds a city on unclaimed or own land, 3+ hexes from any city; settler is consumed. One unit in training per city
-- Move costs: grass/sand 1, hills 2, mountain 3, road-to-road 0.5. Full-move units can always step 1 tile
-- Claim: buy unowned land bordering yours, within 4 hexes of one of your cities. Price +8% per tile bought
-- Owned land can never be claimed; only conquering the city (step 3) takes it
+- Food is supply: capital 3, city 2, farm 3. Units (and units in training) use food
+- Stone: mines give 2/turn, pays for walls
+- Builder (15g, instant, 2 moves): one job per turn on own land: farm, mine, road, walls (on a city: 10/20/30 stone + 5g, +40 shield per level, max 3), raise/lower its tile or a neighbor
+- Settler (10g + 10g per city owned, 3 turns): founds a city on unclaimed or own land, 3+ hexes from any city; consumed
+- City HP 100, capital 150. Shield absorbs damage first. Both regen 10/turn unless enemy troops within 2 hexes
+- Troops: Swordsman (25g, 30hp, atk 8, beats Archer), Archer (30g, 20hp, atk 7, range 2, no return fire, beats Knight), Knight (45g, 35hp, atk 10, 4 moves, beats Swordsman, half damage vs walls)
+- Combat: one attack per turn, ends movement. Strong-vs = 1.5x. Hills/mountain/own city reduce damage taken. Melee defenders hit back at 50%. Cities hit melee attackers back (4 + 2 per wall level). Troops deal 1.5x to cities
+- Capture: city at 0 HP + Swordsman/Knight moves in. Captor gets the city and the loser's land closer to it than to their other cities. Capturing a capital eliminates that player (all their land to captor)
+- Units heal 5/turn at home, 2 elsewhere
+- Move costs: grass/sand 1, hills 2, mountain 3, road-to-road 0.5. Enemy cities block movement until destroyed
+- Claim: buy unowned land bordering yours, within 4 hexes of one of your cities. Price +8% per tile bought. Owned land can never be claimed
 - Win: take every rival capital or hold 60% of land
 
 ## Roadmap
 1. DONE builders, food, stone, farms, mines, roads, settlers
-2. City HP + walls (builders build walls with stone)
-3. Troops: swordsman, archer, knight; combat; capture cities by destroying them; captured city takes the land closest to it
-4. AI uses builders and troops (AI already uses settlers)
+2. DONE city HP + walls
+3. DONE troops, combat, capture
+4. AI uses builders, troops, walls (AI already uses settlers)
 5. Balance pass

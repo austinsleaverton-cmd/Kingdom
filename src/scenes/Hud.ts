@@ -226,6 +226,8 @@ export class Hud {
       `Click your city to recruit a <b>Builder</b> or train a <b>Settler</b> (takes 3 turns). ` +
       `Select a unit, click a lit hex to move. Builders do one job per turn: farms (food), mines (stone), roads, or raise/lower land. ` +
       `Settlers found new cities 3+ hexes from any other city. Stand a builder on a city to build walls (stone from mines): the blue bar is a shield that takes damage before the city's health.<br><br>` +
+      `<b>Troops</b> (square tokens) train in cities: Swordsman beats Archer, Archer (range 2, no return fire) beats Knight, Knight (fast) beats Swordsman. ` +
+      `Select a troop, click a red hex to attack. Knock a city to 0 HP, then march a Swordsman or Knight in to capture it and the land around it. Cities stop healing while enemy troops are within 2 hexes.<br><br>` +
       `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last.<br><br>` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 

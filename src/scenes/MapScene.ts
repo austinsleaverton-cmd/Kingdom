@@ -1,11 +1,11 @@
 // Rendering and input only. All rules live in src/world.
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
-import type { Check, GameOptions } from '../world/game';
+import type { AttackPreview, Check, GameOptions } from '../world/game';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { MAX_WALLS, YIELD, cityMaxHp, shieldMax } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
-import { JOBS, UNIT_STATS } from '../world/units';
+import { JOBS, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
 import type { BarMode, PanelButton, PanelModel } from './Hud';
@@ -38,6 +38,7 @@ export class MapScene extends Phaser.Scene {
   private selected: Tile | null = null;
   private selectedUnitId: number | null = null;
   private reach = new Map<Tile, number>();
+  private targets = new Map<Tile, AttackPreview>();
   private lastPointer = { x: 0, y: 0 };
 
   private terrainGfx!: Phaser.GameObjects.Graphics;
@@ -136,6 +137,7 @@ export class MapScene extends Phaser.Scene {
     this.selected = null;
     this.selectedUnitId = null;
     this.reach = new Map();
+    this.targets = new Map();
   }
 
   private endTurn(): void {
@@ -171,7 +173,10 @@ export class MapScene extends Phaser.Scene {
       }
       case 'select': {
         const unit = this.selectedUnit;
-        if (unit && this.reach.has(tile)) {
+        if (unit && this.targets.has(tile)) {
+          state.attack(unit, tile);
+          this.cameras.main.shake(60, 0.003);
+        } else if (unit && this.reach.has(tile)) {
           state.moveUnit(unit, tile);
           this.selected = tile;
         } else {
@@ -378,8 +383,14 @@ export class MapScene extends Phaser.Scene {
         return { label: this.mode === 'raise' ? 'Raise' : 'Lower', check: state.jobCheck(unit, this.mode, tile) };
       }
       case 'select': {
+        const pv = this.targets.get(tile);
+        if (pv) {
+          const kill = pv.kind === 'unit' && pv.dmg >= (state.unitAt(tile)?.hp ?? 0) ? ' (kills it)' : '';
+          return { label: 'Attack', check: { ok: true, cost: 0, reason: `deal ${pv.dmg}${kill}, take ${pv.counter}` } };
+        }
         const left = this.reach.get(tile);
         if (left === undefined) return null;
+        if (tile.city && tile.owner !== null && tile.owner !== 0) return { label: 'Move in', check: { ok: true, cost: 0, reason: 'capture this city!' } };
         return { label: 'Move', check: { ok: true, cost: 0, reason: `${left} moves left after` } };
       }
     }
@@ -410,7 +421,7 @@ export class MapScene extends Phaser.Scene {
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
     if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
-    if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name}`);
+    if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
     let status = '';
     if (hc) {
       if (this.mode === 'select') status = `${hc.label}: ${hc.check.reason}`;
@@ -435,7 +446,11 @@ export class MapScene extends Phaser.Scene {
       title = `${stats.name}${onCity ? ' (in city: click city again to switch)' : ''}`;
       lines.push(`Moves ${unit.moves}/${stats.moves}${unit.acted ? ' · done working this turn' : ''}`);
       const here = state.tileOf(unit);
-      if (unit.type === 'settler') {
+      if (stats.military) {
+        lines.push(`HP ${unit.hp}/${stats.hp} · Attack ${stats.atk} · Range ${stats.range}`);
+        if (stats.strongVs) lines.push(`Strong vs ${UNIT_STATS[stats.strongVs].name}s${stats.canCapture ? ' · can capture cities' : ''}`);
+        lines.push(unit.acted ? 'Already attacked this turn' : 'Click a red hex to attack. Break a city to 0 HP, then march in.');
+      } else if (unit.type === 'settler') {
         lines.push('Move to an open spot 3+ hexes from any city, then found it. The settler is used up.');
         const c = state.foundCheck(unit);
         buttons.push({
@@ -446,6 +461,7 @@ export class MapScene extends Phaser.Scene {
           onClick: () => this.foundCity(),
         });
       } else lines.push('Click a lit hex to move. One job per turn.');
+      if (stats.military) lines[0] = `Moves ${unit.moves}/${stats.moves}`;
       for (const j of unit.type === 'builder' ? JOBS : []) {
         const terraform = j.id === 'raise' || j.id === 'lower';
         const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
@@ -461,9 +477,10 @@ export class MapScene extends Phaser.Scene {
     }
     if (tile.city && tile.owner === 0) {
       if (!unit) title = `${tile.capital ? 'Capital' : 'City'}${state.unitAt(tile)?.owner === 0 ? ' (click again for the unit)' : ''}`;
-      const recruitables: { type: UnitType; key: string }[] = [
+      const recruitables: { type: UnitType; key?: string }[] = [
         { type: 'builder', key: 'B' },
         { type: 'settler', key: 'S' },
+        ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
       ];
       for (const r of recruitables) {
         const c = state.recruitCheck(r.type, tile, 0);
@@ -502,6 +519,14 @@ export class MapScene extends Phaser.Scene {
         });
       }
     }
+    const other = state.unitAt(tile);
+    if (!unit && other && other.owner !== 0) {
+      lines.push(`${state.players[other.owner].name} ${UNIT_STATS[other.type].name}: ${other.hp}/${UNIT_STATS[other.type].hp} HP`);
+    }
+    if (tile.city && tile.owner !== null && tile.owner !== 0) {
+      title = `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'}`;
+      lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
+    }
     if (!unit && !tile.city) {
       const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
       lines.push(owner, `Height ${tile.height}${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
@@ -526,6 +551,20 @@ export class MapScene extends Phaser.Scene {
     return last;
   }
 
+  private findTargets(state: GameState, unit: Unit): Map<Tile, AttackPreview> {
+    const out = new Map<Tile, AttackPreview>();
+    const stats = UNIT_STATS[unit.type];
+    if (!stats.military || unit.acted || unit.owner !== state.current) return out;
+    const here = state.tileOf(unit);
+    const near = new Set<Tile>(state.map.neighbors(here));
+    if (stats.range >= 2) for (const n of [...near]) for (const m of state.map.neighbors(n)) if (m !== here) near.add(m);
+    for (const t of near) {
+      const pv = state.attackPreview(unit, t);
+      if (pv.ok) out.set(t, pv);
+    }
+    return out;
+  }
+
   // ---------- drawing ----------
 
   private redraw(): void {
@@ -535,6 +574,7 @@ export class MapScene extends Phaser.Scene {
     if (this.selectedUnitId !== null && !unit) this.clearSelection();
     if (unit) this.selected = state.tileOf(unit);
     this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
+    this.targets = unit && this.mode === 'select' ? this.findTargets(state, unit) : new Map();
 
     this.drawTerrain(state);
     this.drawOwners(state);
@@ -660,21 +700,47 @@ export class MapScene extends Phaser.Scene {
       const home = state.tileOf(unit);
       g.fillStyle(0x000000, 0.4);
       for (const t of state.map.tiles) {
-        if (t === home || this.reach.has(t)) continue;
+        if (t === home || this.reach.has(t) || this.targets.has(t)) continue;
         const { x, y } = tileCenter(t);
         g.fillPoints(hexCorners(x, y, SIZE), true);
       }
       for (const t of this.reach.keys()) {
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
-        g.fillStyle(0xffffff, 0.12);
+        const capture = t.city && t.owner !== null && t.owner !== unit.owner;
+        g.fillStyle(capture ? 0xfacc15 : 0xffffff, capture ? 0.3 : 0.12);
         g.fillPoints(pts, true);
-        g.lineStyle(2, 0xffffff, 0.85);
+        g.lineStyle(capture ? 3 : 2, capture ? 0xfacc15 : 0xffffff, 0.9);
         g.strokePoints(pts, true);
-        if (!state.unitAt(t)) {
+        if (!state.unitAt(t) && !capture) {
           g.fillStyle(0xffffff, 0.9);
           g.fillCircle(x, y, 4);
         }
+      }
+    }
+    if (this.targets.size > 0 && unit) {
+      if (this.reach.size === 0) {
+        // No moves left but can still attack: dim the rest so targets stand out
+        const home = state.tileOf(unit);
+        g.fillStyle(0x000000, 0.4);
+        for (const t of state.map.tiles) {
+          if (t === home || this.targets.has(t)) continue;
+          const { x, y } = tileCenter(t);
+          g.fillPoints(hexCorners(x, y, SIZE), true);
+        }
+      }
+      for (const t of this.targets.keys()) {
+        const { x, y } = tileCenter(t);
+        const pts = hexCorners(x, y, SIZE - 3);
+        g.fillStyle(0xef4444, 0.35);
+        g.fillPoints(pts, true);
+        g.lineStyle(3, 0xf87171, 1);
+        g.strokePoints(pts, true);
+        // crosshair
+        g.lineStyle(2, 0xffffff, 0.9);
+        g.strokeCircle(x, y - 14, 5);
+        g.lineBetween(x - 8, y - 14, x + 8, y - 14);
+        g.lineBetween(x, y - 22, x, y - 6);
       }
     }
     if (this.mode === 'claim') {
@@ -740,12 +806,30 @@ export class MapScene extends Phaser.Scene {
       const { x, y } = unitPos(t);
       const color = state.players[u.owner].color;
       const isSel = u.id === this.selectedUnitId;
-      g.fillStyle(0x000000, 0.35);
-      g.fillCircle(x + 1, y + 2, 11);
-      g.fillStyle(color, 1);
-      g.fillCircle(x, y, 11);
-      g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
-      g.strokeCircle(x, y, 11);
+      const stats = UNIT_STATS[u.type];
+      if (stats.military) {
+        // Troops are squares, civilians are circles
+        g.fillStyle(0x000000, 0.35);
+        g.fillRoundedRect(x - 10, y - 9, 22, 22, 5);
+        g.fillStyle(color, 1);
+        g.fillRoundedRect(x - 11, y - 11, 22, 22, 5);
+        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
+        g.strokeRoundedRect(x - 11, y - 11, 22, 22, 5);
+      } else {
+        g.fillStyle(0x000000, 0.35);
+        g.fillCircle(x + 1, y + 2, 11);
+        g.fillStyle(color, 1);
+        g.fillCircle(x, y, 11);
+        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
+        g.strokeCircle(x, y, 11);
+      }
+      if (u.hp < stats.hp) {
+        const frac = Math.max(0, u.hp / stats.hp);
+        g.fillStyle(0x111111, 0.9);
+        g.fillRect(x - 12, y + 13, 24, 4);
+        g.fillStyle(frac > 0.5 ? 0x22c55e : frac > 0.25 ? 0xeab308 : 0xef4444, 1);
+        g.fillRect(x - 11, y + 14, 22 * frac, 2);
+      }
       // ready indicator for your units with moves or work left
       if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
         g.fillStyle(0x4ade80, 1);
@@ -759,7 +843,11 @@ export class MapScene extends Phaser.Scene {
           .setDepth(4);
         this.unitLabels.push(label);
       }
-      label.setText(UNIT_STATS[u.type].letter).setPosition(x, y).setVisible(true);
+      label
+        .setText(stats.letter)
+        .setFontSize(stats.letter.length > 1 ? 11 : 13)
+        .setPosition(x, y)
+        .setVisible(true);
       i++;
     }
     for (; i < this.unitLabels.length; i++) this.unitLabels[i].setVisible(false);

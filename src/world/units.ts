@@ -2,7 +2,7 @@
 import type { WorldMap } from './map';
 import type { PlayerId, Terrain, Tile } from './tile';
 
-export type UnitType = 'builder' | 'settler';
+export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight';
 
 export interface UnitStats {
   name: string;
@@ -11,12 +11,32 @@ export interface UnitStats {
   food: number; // food upkeep per turn
   moves: number;
   train: number; // turns in the city before it appears (0 = right away)
+  hp: number;
+  atk: number; // 0 = can't attack
+  range: number; // 1 = melee, 2 = shoots over a tile
+  military: boolean;
+  strongVs?: UnitType; // deals bonus damage to this type
+  canCapture?: boolean; // can walk into a destroyed enemy city
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
-  builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0 },
-  settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3 },
+  builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0, hp: 10, atk: 0, range: 0, military: false },
+  settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3, hp: 10, atk: 0, range: 0, military: false },
+  swordsman: {
+    name: 'Swordsman', letter: 'Sw', cost: 25, food: 1, moves: 2, train: 2,
+    hp: 30, atk: 8, range: 1, military: true, strongVs: 'archer', canCapture: true,
+  },
+  archer: {
+    name: 'Archer', letter: 'Ar', cost: 30, food: 1, moves: 2, train: 2,
+    hp: 20, atk: 7, range: 2, military: true, strongVs: 'knight',
+  },
+  knight: {
+    name: 'Knight', letter: 'Kn', cost: 45, food: 2, moves: 4, train: 3,
+    hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true,
+  },
 };
+
+export const TROOPS: UnitType[] = ['swordsman', 'archer', 'knight'];
 
 export interface Unit {
   id: number;
@@ -25,7 +45,8 @@ export interface Unit {
   col: number;
   row: number;
   moves: number; // moves left this turn
-  acted: boolean; // used its action this turn
+  acted: boolean; // used its action this turn (job or attack)
+  hp: number;
 }
 
 // A unit being trained in a city.
