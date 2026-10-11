@@ -216,11 +216,12 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  // Does this unit of yours still have moves (or an attack) left this turn?
+  // Does this unit of yours still have a real move (or an attack) left this turn?
+  // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
   // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
     if (u.owner !== 0 || u.hold || state.current !== 0) return false;
-    if (u.moves > 0 && state.reachableFor(u).size > 0) return true;
+    if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
 
@@ -243,6 +244,16 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (best) this.focusUnit(best);
+  }
+
+  // N: cycle to the next unit that can still act (by id, wrapping around).
+  private nextUnit(): void {
+    const state = this.state;
+    if (!state) return;
+    const ready = state.unitsOf(0).filter((u) => this.hasWork(state, u)).sort((a, b) => a.id - b.id);
+    if (!ready.length) return this.fail();
+    const cur = this.selectedUnitId ?? -1;
+    this.focusUnit(ready.find((u) => u.id > cur) ?? ready[0]);
   }
 
   private fail(): void {
@@ -462,6 +473,8 @@ export class MapScene extends Phaser.Scene {
       }
       switch (key) {
         case '1': this.setMode('select'); break;
+        case 'N':
+        case 'TAB': e.preventDefault(); this.nextUnit(); break;
         case 'K': this.toggleClaim(); break;
         case 'W': if (!unit && this.selected?.city && this.selected.owner === 0) this.buildWalls(this.selected); break;
         case 'B': if (!unit) this.recruit('builder'); break;
@@ -650,7 +663,7 @@ export class MapScene extends Phaser.Scene {
       title: stats.name,
       subtitle: `${state.players[unit.owner].name}${where}`,
       sections,
-      footer: 'Click it again or Esc to deselect',
+      footer: 'Click it again or Esc to deselect · N or Tab = next unit',
     };
   }
 
