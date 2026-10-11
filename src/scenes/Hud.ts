@@ -303,7 +303,7 @@ export class Hud {
       `<h4>Goal</h4>${goal}` +
       `<h4>Your turn</h4><ul>` +
       `<li>Click a <b>city</b> to train units, build walls (W), claim land (K) or rename it.</li>` +
-      `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect.</li>` +
+      `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect. N or Tab jumps to the next unit.</li>` +
       `<li><b>End turn</b> (Space) when you're done.</li></ul>` +
       `<h4>Units</h4><ul>` +
       `<li><b>Builder</b> (hammer): farms, mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
@@ -311,7 +311,8 @@ export class Hud {
       `<li><b>Swordsman</b> beats Archer, <b>Archer</b> (shoots 2 hexes) beats Knight, <b>Knight</b> (fast) beats Swordsman.</li>` +
       `<li>Units heal 25% per turn on your land.</li></ul>` +
       `<h4>Land & war</h4><ul>` +
-      `<li>Each city owns land up to ${CLAIM_RADIUS} hexes away. Buy more from the city's Claim land.</li>` +
+      `<li>Each city owns land up to ${CLAIM_RADIUS} hexes away (4 once it grows into a City). Buy more from the city's Claim land.</li>` +
+      `<li><b>Cities grow</b> from spare food: each level (dots on the name tag) adds gold, food and HP.</li>` +
       `<li>Break a city to 0 HP (red hexes = attack), then walk a Swordsman or Knight in to take it and all its land.</li>` +
       `<li>Walls (built in the city with stone) add a blue bar that soaks damage first. Cities don't heal while enemies are within 2 hexes.</li></ul>`;
 

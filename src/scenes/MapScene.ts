@@ -4,7 +4,7 @@ import { GameState } from '../world/game';
 import type { AttackPreview, Check, GameOptions } from '../world/game';
 import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
-import { MAX_WALLS, YIELD, cityMaxHp, shieldMax } from '../world/tile';
+import { LEVEL_NAMES, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
 import { JOBS, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
@@ -613,7 +613,7 @@ export class MapScene extends Phaser.Scene {
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
     const home = state.homeCity(tile);
-    if (tile.city) lines.unshift(state.cityName(tile));
+    if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]})`);
     else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
     if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
     if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
@@ -719,6 +719,26 @@ export class MapScene extends Phaser.Scene {
     if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
     sections.push({ bars });
 
+    // Growth: spare food fills the bar, a full bar is the next level
+    const lvl = cityLevel(city);
+    const unlock = (n: number) =>
+      n === 3 ? 'claims land 4 hexes out' : n === MAX_LEVEL ? 'troops train 1 turn faster' : '+1 gold, +1 food, +10 HP';
+    const growLines = [`Level ${lvl} ${LEVEL_NAMES[lvl - 1]}${lvl > 1 ? `: +${lvl - 1} gold, +${lvl - 1} food, +${(lvl - 1) * 10} HP` : ''}`];
+    if (lvl < MAX_LEVEL) {
+      growLines.push(
+        state.besieged(city)
+          ? 'Not growing: enemy troops nearby'
+          : `+${state.growthRate(city).toFixed(1)} per turn (spare food speeds it up)`,
+      );
+      growLines.push(`Next: ${LEVEL_NAMES[lvl]} · ${unlock(lvl + 1)}`);
+    } else growLines.push('Max size: troops train 1 turn faster');
+    sections.push({
+      heading: 'Growth',
+      summary: `Lv ${lvl} ${LEVEL_NAMES[lvl - 1]}`,
+      bars: lvl < MAX_LEVEL ? [{ label: 'Growth', value: Math.floor(city.growth), max: state.growthNeed(city), color: '#a3e635' }] : [],
+      lines: growLines,
+    });
+
     const wc = state.wallCheck(city, 0);
     const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
     sections.push({
@@ -810,7 +830,7 @@ export class MapScene extends Phaser.Scene {
     }
     return {
       title: state.cityName(city),
-      subtitle: city.capital ? 'Your capital' : 'Your city',
+      subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} · ${city.capital ? 'your capital' : 'your city'}`,
       titleAction: { label: 'Rename', onClick: () => this.renameCity(city) },
       sections,
     };
@@ -837,7 +857,10 @@ export class MapScene extends Phaser.Scene {
     }
     return {
       title,
-      subtitle: tile.city && tile.owner !== null ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'}` : undefined,
+      subtitle:
+        tile.city && tile.owner !== null
+          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} · ${LEVEL_NAMES[cityLevel(tile) - 1]}`
+          : undefined,
       sections: [{ bars, lines }],
     };
   }
@@ -988,14 +1011,15 @@ export class MapScene extends Phaser.Scene {
         }
         this.drawCity(g, x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
-        this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital);
+        this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, cityLevel(t));
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
   }
 
   // Name tag under each city, drawn above units so it never gets covered.
-  private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean): void {
+  // Dots after the name show the city's level (1 dot = Village ... 5 = Metropolis).
+  private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean, level: number): void {
     let label = this.cityLabels[i];
     if (!label) {
       label = this.add
@@ -1005,7 +1029,8 @@ export class MapScene extends Phaser.Scene {
       this.cityLabels.push(label);
     }
     const bg = `#${color.toString(16).padStart(6, '0')}`;
-    label.setText(capital ? `\u2605 ${name}` : name).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
+    const text = `${capital ? '\u2605 ' : ''}${name} ${'\u2022'.repeat(level)}`;
+    label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
 
   // Health bar (only when damaged) with the wall shield bar above it.
@@ -1092,7 +1117,7 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
+      // Claim zone: this city's area (hexes within its claim radius). Dim everything else hard.
       const city = this.claimCity;
       const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, 0))));
       g.fillStyle(0x000000, 0.55);
