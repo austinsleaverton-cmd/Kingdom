@@ -270,7 +270,7 @@ export class Hud {
       row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(0)} next turn`) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
       `<div class="k-foodbar"><div style="width:${foodPct}%;background:${foodColor}"></div></div>` +
-      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(0) > 0 ? `+${state.stoneIncome(0)} next turn` : 'build mines for walls');
+      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(0) > 0 ? `+${state.stoneIncome(0)} next turn · for walls` : 'build mines for walls');
 
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const rows = state.players
@@ -296,18 +296,18 @@ export class Hud {
     this.help.innerHTML =
       `<h4>Goal</h4>${goal}` +
       `<h4>Your turn</h4><ul>` +
-      `<li>Click a <b>city</b> to train units, claim land (K) or rename it.</li>` +
+      `<li>Click a <b>city</b> to train units, build walls (W), claim land (K) or rename it.</li>` +
       `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect.</li>` +
       `<li><b>End turn</b> (Space) when you're done.</li></ul>` +
       `<h4>Units</h4><ul>` +
-      `<li><b>Builder</b> (hammer): farms, mines, roads, walls, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
+      `<li><b>Builder</b> (hammer): farms, mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
       `<li><b>Settler</b> (flag): founds a new city 3+ hexes from others.</li>` +
       `<li><b>Swordsman</b> beats Archer, <b>Archer</b> (shoots 2 hexes) beats Knight, <b>Knight</b> (fast) beats Swordsman.</li>` +
       `<li>Units heal 25% per turn on your land.</li></ul>` +
       `<h4>Land & war</h4><ul>` +
       `<li>Each city owns land up to ${CLAIM_RADIUS} hexes away. Buy more from the city's Claim land.</li>` +
       `<li>Break a city to 0 HP (red hexes = attack), then walk a Swordsman or Knight in to take it and all its land.</li>` +
-      `<li>Walls (blue bar) soak damage first. Cities don't heal while enemies are within 2 hexes.</li></ul>`;
+      `<li>Walls (built in the city with stone) add a blue bar that soaks damage first. Cities don't heal while enemies are within 2 hexes.</li></ul>`;
 
     for (const [id, b] of this.modeBtns) b.classList.toggle('k-on', id === mode);
 

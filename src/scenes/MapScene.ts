@@ -309,6 +309,13 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  private buildWalls(city: Tile): void {
+    const state = this.state;
+    if (!state) return;
+    if (!state.buildWalls(city, 0).ok) return this.fail();
+    this.redraw();
+  }
+
   private foundCity(): void {
     const state = this.state;
     const unit = this.selectedUnit;
@@ -410,6 +417,7 @@ export class MapScene extends Phaser.Scene {
       switch (key) {
         case '1': this.setMode('select'); break;
         case 'K': this.toggleClaim(); break;
+        case 'W': if (!unit && this.selected?.city && this.selected.owner === 0) this.buildWalls(this.selected); break;
         case 'B': if (!unit) this.recruit('builder'); break;
         case 'S': if (!unit) this.recruit('settler'); break;
         case ' ':
@@ -574,7 +582,7 @@ export class MapScene extends Phaser.Scene {
           label: j.label,
           key: j.key,
           enabled: c.ok,
-          hint: c.ok ? (terraform ? 'pick a hex' : j.id === 'walls' ? this.wallHint(state, here, c.cost) : `${c.cost}g`) : c.reason,
+          hint: c.ok ? (terraform ? 'pick a hex' : `${c.cost}g`) : c.reason,
           active: this.mode === j.id,
           onClick: () => this.doJob(j.id),
         });
@@ -607,9 +615,26 @@ export class MapScene extends Phaser.Scene {
 
     const bars: PanelBar[] = [{ label: 'Health', value: city.hp, max: cityMaxHp(city), color: this.hpColor(city.hp / cityMaxHp(city)) }];
     if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
+    sections.push({ bars });
+
+    const wc = state.wallCheck(city, 0);
+    const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
     sections.push({
-      bars,
-      lines: city.walls ? [] : [`No walls yet: stand a builder here (needs stone, max level ${MAX_WALLS})`],
+      heading: 'Defense',
+      lines: [
+        city.walls
+          ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first`
+          : 'No walls yet. Walls cost stone (mines make it).',
+      ],
+      buttons: [
+        {
+          label: city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
+          key: 'W',
+          enabled: wc.ok,
+          hint: wc.ok ? (state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`) : wc.reason,
+          onClick: () => this.buildWalls(city),
+        },
+      ],
     });
 
     sections.push({
@@ -704,11 +729,6 @@ export class MapScene extends Phaser.Scene {
       subtitle: tile.city && tile.owner !== null ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'}` : undefined,
       sections: [{ bars, lines }],
     };
-  }
-
-  private wallHint(state: GameState, city: Tile, gold: number): string {
-    const free = state.options.freeBuild;
-    return free ? 'free' : `${gold}g + ${state.wallStoneCost(city)} stone`;
   }
 
   // Raise/lower is valid if any target (builder tile or neighbor) works.
