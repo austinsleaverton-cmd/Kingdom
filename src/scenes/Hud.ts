@@ -49,8 +49,7 @@ const CSS = `
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-.k-sel { bottom: 70px; left: 12px; width: 250px; display: none; }
-.k-sel h4 { margin: 0 0 4px; }
+.k-sel { bottom: 70px; left: 12px; width: 250px; }
 .k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 8px; }
 .k-sel button { display: flex; justify-content: space-between; width: 100%; margin-top: 4px; padding: 6px 10px; font-size: 13px; }
 .k-sel button small { opacity: 0.7; margin-left: 8px; }
@@ -60,7 +59,72 @@ const CSS = `
 .k-over .k-panel { position: static; text-align: center; padding: 24px 32px; font-size: 16px; }
 .k-over h1 { margin: 0 0 8px; }
 .k-over button { margin-top: 16px; background: #2563eb; color: #fff; border: 0; padding: 8px 18px; }
+.k-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-weight: 600; }
+.k-head .k-tog { display: inline-block; width: auto; margin: 0; background: transparent; border: 1px solid #444; border-radius: 4px; padding: 0 7px; font-size: 13px; line-height: 18px; color: #bbb; }
+.k-body { margin-top: 6px; }
+.k-collapsed .k-body { display: none; }
+.k-collapsed { padding: 6px 10px; }
+@media (max-width: 700px) {
+  .k-hud { font-size: 12px; }
+  .k-stats { min-width: 0; max-width: 46vw; }
+  .k-help { max-width: 46vw; }
+  .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
+  .k-hud button { padding: 6px 8px; }
+  .k-sel { bottom: 120px; width: 210px; }
+}
 `;
+
+const UI_KEY = 'kingdom-ui';
+
+function loadCollapsed(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(UI_KEY) ?? '{}') as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsed(state: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify(state));
+  } catch {
+    // ignore
+  }
+}
+
+// A panel with a clickable header that hides/shows its body.
+class Collapsible {
+  readonly panel: HTMLDivElement;
+  readonly head: HTMLSpanElement;
+  readonly body: HTMLDivElement;
+  private tog: HTMLButtonElement;
+
+  constructor(className: string, key: string, defaultCollapsed: boolean, prefs: Record<string, boolean>) {
+    this.panel = el(className);
+    const headRow = el('k-head');
+    this.head = document.createElement('span');
+    this.tog = document.createElement('button');
+    this.tog.className = 'k-tog';
+    headRow.appendChild(this.head);
+    headRow.appendChild(this.tog);
+    this.body = el('k-body');
+    this.panel.appendChild(headRow);
+    this.panel.appendChild(this.body);
+    const set = (collapsed: boolean) => {
+      this.panel.classList.toggle('k-collapsed', collapsed);
+      this.tog.textContent = collapsed ? '+' : '\u2013';
+      this.tog.title = collapsed ? 'Expand' : 'Minimize';
+    };
+    set(prefs[key] ?? defaultCollapsed);
+    headRow.onclick = () => {
+      const collapsed = !this.panel.classList.contains('k-collapsed');
+      set(collapsed);
+      prefs[key] = collapsed;
+      saveCollapsed(prefs);
+      this.tog.blur();
+    };
+  }
+}
 
 export class Hud {
   private root: HTMLDivElement;
@@ -70,6 +134,8 @@ export class Hud {
   private overText: HTMLDivElement;
   private help: HTMLDivElement;
   private sel: HTMLDivElement;
+  private statsBox: Collapsible;
+  private selBox: Collapsible;
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
 
   constructor(handlers: HudHandlers) {
@@ -80,14 +146,22 @@ export class Hud {
     this.root = el('k-hud');
     document.body.appendChild(this.root);
 
-    this.stats = el('k-panel k-stats');
-    this.root.appendChild(this.stats);
+    const prefs = loadCollapsed();
+    const mobile = window.innerWidth < 700;
 
-    this.help = el('k-panel k-help');
-    this.root.appendChild(this.help);
+    this.statsBox = new Collapsible('k-panel k-stats', 'stats', false, prefs);
+    this.stats = this.statsBox.body;
+    this.root.appendChild(this.statsBox.panel);
 
-    this.sel = el('k-panel k-sel');
-    this.root.appendChild(this.sel);
+    const helpBox = new Collapsible('k-panel k-help', 'help', mobile, prefs);
+    helpBox.head.textContent = 'How to play';
+    this.help = helpBox.body;
+    this.root.appendChild(helpBox.panel);
+
+    this.selBox = new Collapsible('k-panel k-sel', 'sel', false, prefs);
+    this.sel = this.selBox.body;
+    this.root.appendChild(this.selBox.panel);
+    this.selBox.panel.style.display = 'none';
 
     const bar = el('k-panel k-bar');
     for (const m of MODES) {
@@ -138,8 +212,10 @@ export class Hud {
       );
     });
     const modeLabel = state.sandbox ? 'Sandbox' : `${state.players.length - 1} rival${state.players.length > 2 ? 's' : ''}`;
+    const me = state.players[0];
+    this.statsBox.head.textContent = `Turn ${state.turn} · ${state.options.freeBuild ? 'free' : `${me.gold}g`} · food ${state.foodUsed(0)}/${state.foodMade(0)}`;
     this.stats.innerHTML =
-      `<div class="k-row"><b>Turn ${state.turn}</b><span>${modeLabel} · seed ${state.seed}</span></div><hr style="border-color:#333">` +
+      `<div class="k-row k-res"><span>${modeLabel}</span><span>seed ${state.seed}</span></div>` +
       rows.join('') +
       `<div class="k-log">${state.log.map(escape).join('<br>')}</div>`;
 
@@ -166,13 +242,11 @@ export class Hud {
 
   showPanel(model: PanelModel | null): void {
     if (!model) {
-      this.sel.style.display = 'none';
+      this.selBox.panel.style.display = 'none';
       return;
     }
     this.sel.innerHTML = '';
-    const h = document.createElement('h4');
-    h.textContent = model.title;
-    this.sel.appendChild(h);
+    this.selBox.head.textContent = model.title;
     const lines = el('k-lines');
     lines.innerHTML = model.lines.map(escape).join('<br>');
     this.sel.appendChild(lines);
@@ -186,7 +260,7 @@ export class Hud {
       if (b.active) btn.classList.add('k-on');
       this.sel.appendChild(btn);
     }
-    this.sel.style.display = 'block';
+    this.selBox.panel.style.display = 'block';
   }
 
   showTip(lines: string[], status: string, ok: boolean, x: number, y: number): void {
