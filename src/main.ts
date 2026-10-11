@@ -17,6 +17,19 @@ const config: Phaser.Types.Core.GameConfig = {
 
 export const game = new Phaser.Game(config);
 
+// iOS can leave the page scrolled or the canvas mis-sized after rotating, so taps land in the
+// wrong place. Snap back to the top and re-measure whenever the screen size changes.
+const fixViewport = () => {
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+  game.scale.refresh();
+};
+window.addEventListener('resize', fixViewport);
+window.visualViewport?.addEventListener('resize', fixViewport);
+window.addEventListener('orientationchange', () => {
+  fixViewport();
+  window.setTimeout(fixViewport, 350); // iOS reports the new size a moment late
+});
+
 // Installable app + offline play (only on the built site, not the dev server)
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => {
