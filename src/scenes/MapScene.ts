@@ -168,6 +168,13 @@ export class MapScene extends Phaser.Scene {
     if (this.hud.idleVisible) force = true; // second press of End turn / Space
     const idle = state.idleUnits(0);
     if (!force && idle.length > 0) {
+      // Jump to the nearest waiting unit, then ask (Space again ends the turn anyway)
+      const cur = this.selectedUnit;
+      if (!cur || !idle.includes(cur)) {
+        const from = this.selected ?? state.tileOf(idle[0]);
+        const next = idle.reduce((a, b) => (hexDistance(state.tileOf(b), from) < hexDistance(state.tileOf(a), from) ? b : a));
+        this.focusUnit(next);
+      }
       const counts = new Map<string, number>();
       for (const u of idle) counts.set(UNIT_STATS[u.type].name, (counts.get(UNIT_STATS[u.type].name) ?? 0) + 1);
       const names = [...counts].map(([n, c]) => (c > 1 ? `${c} ${n}s` : n)).join(', ');
@@ -185,6 +192,8 @@ export class MapScene extends Phaser.Scene {
     state.endTurn();
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
     this.redraw();
+    // New turn: start on the unit nearest to where you left off
+    this.autoAdvance(this.selected);
   }
 
   private focusUnit(unit: Unit): void {
@@ -207,24 +216,20 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  // Does this unit of yours still have something useful to do this turn?
+  // Does this unit of yours still have moves (or an attack) left this turn?
+  // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
     if (u.owner !== 0 || u.hold || state.current !== 0) return false;
-    if (state.reachableFor(u).size > 0) return true;
-    if (UNIT_STATS[u.type].military) return this.findTargets(state, u).size > 0;
-    if (u.type === 'builder') {
-      if (u.acted) return false;
-      const here = state.tileOf(u);
-      return JOBS.some((j) => (j.id === 'raise' || j.id === 'lower' ? this.terraformPreview(state, u, j.id).ok : state.jobCheck(u, j.id, here).ok));
-    }
-    if (u.type === 'settler') return state.foundCheck(u).ok;
-    return false;
+    if (u.moves > 0 && state.reachableFor(u).size > 0) return true;
+    return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
 
   // After a unit finishes (no moves, nothing left to do), jump to the nearest unit that can still act.
-  private autoAdvance(from: Tile): void {
+  private autoAdvance(from: Tile | null): void {
     const state = this.state;
     if (!state || state.winner !== null || this.mode !== 'select') return;
+    from = from ?? state.map.tiles.find((t) => t.capital && t.owner === 0) ?? null;
+    if (!from) return;
     const cur = this.selectedUnit;
     if (cur && this.hasWork(state, cur)) return;
     let best: Unit | null = null;
