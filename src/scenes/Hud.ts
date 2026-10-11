@@ -69,7 +69,7 @@ const CSS = `
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-.k-sel { bottom: 70px; left: 12px; width: 250px; }
+.k-sel { bottom: 70px; left: 12px; width: 250px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
 .k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 4px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
 .k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 6px; margin-top: 6px; }
@@ -131,8 +131,13 @@ const CSS = `
   .k-help { max-width: 46vw; }
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
-  .k-sel { bottom: 120px; width: 210px; }
+  .k-sel { bottom: 120px; width: 210px; max-height: calc(100% - 180px); }
   .k-idle { bottom: 120px; }
+}
+/* Phones sideways: not much height, so the selection panel runs down the right side and scrolls */
+@media (orientation: landscape) and (max-height: 500px) {
+  .k-sel { left: auto; right: max(8px, env(safe-area-inset-right)); top: 52px; bottom: 8px; width: 230px; max-height: none; }
+  .k-stats { max-height: calc(100% - 70px); overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
 }
 `;
 

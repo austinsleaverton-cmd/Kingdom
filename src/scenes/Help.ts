@@ -2,10 +2,10 @@
 // Numbers come straight from src/world so the guide stays right when the rules change.
 import {
   ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SPACING, CLAIM_RADIUS,
-  DIFFICULTY, FARM_FOOD, HOME_HEAL, KNIGHTS_PER_PASTURE, MINE_STONE, WIN_SHARE,
+  DIFFICULTY, FARM_FOOD, HOME_HEAL, KNIGHTS_PER_PASTURE, MINE_STONE, PILLAGE_GOLD, WIN_SHARE,
 } from '../world/game';
 import type { Difficulty } from '../world/game';
-import { CLAIM_COST, GROWTH_NEED, LEVEL_NAMES, MAX_WALLS, WALL_SHIELD, WALL_STONE, YIELD } from '../world/tile';
+import { CLAIM_COST, GROWTH_NEED, LEVEL_NAMES, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
 import { JOB_COST, UNIT_STATS } from '../world/units';
 
 const CSS = `
@@ -48,6 +48,7 @@ function difficultyTable(): string {
     row('AI tactics', (d) => (c(d).smart ? 'counters your troops, picks off wounded units, retreats to heal' : 'simple')) +
     row('AI goes after', (d) => (c(d).focusHuman ? 'people first' : 'whoever is closest')) +
     row(`AI can win by holding ${pct(WIN_SHARE)} land`, (d) => (c(d).landWin ? 'yes' : 'no')) +
+    row('AI pillages your land', (d) => (c(d).pillage ? 'yes' : 'no')) +
     row('Your builder jobs', (d) => (c(d).builderUses ? `${c(d).builderUses}, then it retires` : 'unlimited')) +
     `</table>`
   );
@@ -84,14 +85,14 @@ function guideHtml(): string {
         `<li>Each city owns land around it. <b>Claim land</b> (city panel) buys more within ${CLAIM_RADIUS} hexes (${BIG_CLAIM_RADIUS} once it's a ${LEVEL_NAMES[2]}). ` +
         `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, water ${CLAIM_COST.water}g, a little more each time. Water counts as yours but not toward the land-share win.</li>` +
         `<li><b>Growth</b>: spare food fills a city's growth bar (${GROWTH_NEED.join(' / ')}). Levels: ${LEVEL_NAMES.join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
-        `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone. Each level adds a ${WALL_SHIELD} point shield that soaks damage first.</li>` +
+        `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone, paid up front. They take ${WALL_TURNS.join('/')} turns to build. Each level adds a ${WALL_SHIELD} point shield that soaks damage first. Losing the city loses half-built walls.</li>` +
         `<li>Cities heal every turn unless enemy troops are within 2 hexes (a siege), and don't grow under siege.</li></ul>`,
     ),
     sec(
       'Builders',
       `<ul><li>A builder does one job per turn on the tile it stands on (your land only).</li>` +
         `<li>Farm ${JOB_COST.farm}g (grass or sand), Pasture ${JOB_COST.pasture}g and Forest ${JOB_COST.forest}g (grass), Mine ${JOB_COST.mine}g (hills or mountains), Road ${JOB_COST.road}g, Raise/Lower land ${JOB_COST.raise}g.</li>` +
-        `<li>A new job replaces what was there. Roads (and cities) cut movement cost to half.</li>` +
+        `<li>A new job replaces what was there. Roads (and cities) cut movement cost to half, but only for their owner: enemy roads don't help invaders.</li>` +
         `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain.</li>` +
         `<li>Forests cost 2 moves to cross and give cover like hills.</li></ul>`,
     ),
@@ -106,7 +107,8 @@ function guideHtml(): string {
         `<ul><li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
         `<li>Units heal ${pct(HOME_HEAL)} a turn on your own land, not in the field.</li>` +
-        `<li>Break a city to 0 HP, then walk a Swordsman or Knight in to take it and all its land.</li></ul>`,
+        `<li>Break a city to 0 HP, then walk a Swordsman or Knight in to take it and all its land.</li>` +
+        `<li><b>Pillage</b> (<kbd>L</kbd>): a troop on enemy land can wreck the farm, pasture, forest or mine there (+${PILLAGE_GOLD}g) or the road (+1g). It uses its attack for the turn.</li></ul>`,
     ),
     sec(
       'Routes (multi-turn moves)',
@@ -126,7 +128,7 @@ function guideHtml(): string {
       'Controls',
       `<ul><li>Drag to move the map, pinch or scroll to zoom.</li>` +
         `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route, <kbd>Esc</kbd> deselect / menu.</li>` +
-        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land.</li>` +
+        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land. Troops: <kbd>L</kbd> pillage.</li>` +
         `<li>Builder: <kbd>F</kbd> farm, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li></ul>`,
     ),
   ].join('');
