@@ -5,6 +5,7 @@ import { CITY_REGEN, CLAIM_COST, MAX_HEIGHT, MAX_WALLS, WALL_STONE, YIELD, cityM
 import type { PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, reachable } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
+import { runAI } from './ai';
 
 export type Action = 'claim';
 
@@ -19,11 +20,49 @@ export const MAP_SIZES: Record<MapSize, { label: string; width: number; height: 
 
 export const MAX_OPPONENTS = 3;
 
+export type Difficulty = 'easy' | 'normal' | 'hard';
+
+export interface DifficultyConfig {
+  label: string;
+  note: string;
+  income: number; // AI gold multiplier
+  troopsPerCity: number; // standing army size per city
+  maxArmy: number;
+  attackTurn: number; // won't march on anyone before this turn
+  attackArmy: number; // troops needed before it goes to war
+  garrison: number; // troops kept home while at war
+  builders: number;
+  maxWalls: number;
+  smart: boolean; // counters your troops, focuses wounded units and weak cities, retreats to heal
+  aggression: number; // chance it takes an attack it can make (smart AIs always do)
+  focusHuman: boolean; // only marches on you
+  landWin: boolean; // rivals can win by holding most of the land
+}
+
+export const DIFFICULTY: Record<Difficulty, DifficultyConfig> = {
+  easy: {
+    label: 'Easy', note: 'Rivals grow slowly, keep small armies and rarely attack.',
+    income: 0.7, troopsPerCity: 0.5, maxArmy: 3, attackTurn: 45, attackArmy: 3, garrison: 2,
+    builders: 1, maxWalls: 1, smart: false, aggression: 0.5, focusHuman: false, landWin: false,
+  },
+  normal: {
+    label: 'Normal', note: 'Rivals build up, defend, and attack once they have an army.',
+    income: 1, troopsPerCity: 1, maxArmy: 8, attackTurn: 22, attackArmy: 4, garrison: 1,
+    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true,
+  },
+  hard: {
+    label: 'Hard', note: 'Rivals earn more, counter your troops, and come for you early.',
+    income: 1.25, troopsPerCity: 1.5, maxArmy: 14, attackTurn: 14, attackArmy: 4, garrison: 1,
+    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true,
+  },
+};
+
 export interface GameOptions {
   seed: number;
   size: MapSize;
   opponents: number; // 0 = sandbox, no rivals and no win conditions
   freeBuild: boolean; // your actions cost no gold
+  difficulty: Difficulty;
 }
 
 export interface Player {
@@ -79,7 +118,7 @@ export interface AttackPreview {
 const fail = (reason: string, cost = 0): Check => ({ ok: false, cost, reason });
 
 export function defaultOptions(): GameOptions {
-  return { seed: randomSeed(), size: 'medium', opponents: 1, freeBuild: false };
+  return { seed: randomSeed(), size: 'medium', opponents: 1, freeBuild: false, difficulty: 'easy' };
 }
 
 export function randomSeed(): number {
@@ -100,7 +139,11 @@ export class GameState {
   training: Training[] = [];
 
   constructor(options: GameOptions) {
-    this.options = { ...options, opponents: Math.max(0, Math.min(MAX_OPPONENTS, options.opponents)) };
+    this.options = {
+      ...options,
+      opponents: Math.max(0, Math.min(MAX_OPPONENTS, options.opponents)),
+      difficulty: DIFFICULTY[options.difficulty] ? options.difficulty : 'normal',
+    };
     const { width, height } = MAP_SIZES[this.options.size];
     this.map = generateMap(this.options.seed, width, height);
     this.players = [];
@@ -271,6 +314,7 @@ export class GameState {
 
   // ---------- actions ----------
 
+  // Claim only ever targets unowned land (see check), so this just buys the tile.
   perform(action: Action, tile: Tile, p: PlayerId = this.current): Check {
     const result = this.check(action, tile, p);
     if (!result.ok) return result;
@@ -279,18 +323,10 @@ export class GameState {
     this.invalidate();
 
     switch (action) {
-      case 'claim': {
-        const prevOwner = tile.owner;
+      case 'claim':
         tile.owner = p;
-        if (prevOwner === null) player.claims += 1;
-        if (tile.capital && prevOwner !== null) {
-          tile.capital = false; // captured capitals become regular cities
-          this.eliminate(prevOwner, p);
-        } else if (tile.city && prevOwner !== null) {
-          this.addLog(`${player.name} took a city from ${this.players[prevOwner].name}`);
-        }
+        player.claims += 1;
         break;
-      }
     }
     this.checkWin();
     return result;
@@ -459,17 +495,17 @@ export class GameState {
     unit.moves = 0;
     if (pv.kind === 'unit') {
       const defender = this.unitAt(target)!;
-      const dName = `${this.players[defender.owner].name} ${UNIT_STATS[defender.type].name}`;
+      const dName = `${defender.owner === 0 ? 'your' : `a ${this.players[defender.owner].name}`} ${UNIT_STATS[defender.type].name}`;
       defender.hp -= pv.dmg;
       if (defender.hp <= 0) {
         this.units = this.units.filter((u) => u !== defender);
-        this.addLog(`${a.name} destroyed a ${dName}`);
+        this.addLog(`${a.name} destroyed ${dName}`);
       }
     } else {
       const absorbed = Math.min(target.shield, pv.dmg);
       target.shield -= absorbed;
       target.hp = Math.max(0, target.hp - (pv.dmg - absorbed));
-      if (target.hp === 0) this.addLog(`${a.name} broke ${this.players[target.owner!].name}'s ${target.capital ? 'capital' : 'city'}`);
+      if (target.hp === 0) this.addLog(`${a.name} broke ${this.whose(target.owner!)} ${target.capital ? 'capital' : 'city'}`);
     }
     unit.hp -= pv.counter;
     if (unit.hp <= 0) {
@@ -512,7 +548,7 @@ export class GameState {
     city.shield = 0;
     this.invalidate();
     if (wasCapital) this.eliminate(prev, captor);
-    else this.addLog(`${this.players[captor].name} captured a city from ${this.players[prev].name}`);
+    else this.addLog(`${this.players[captor].name} captured ${this.whose(prev)} city`);
     this.checkWin();
   }
 
@@ -621,7 +657,8 @@ export class GameState {
   // ---------- internals ----------
 
   private startTurn(p: PlayerId): void {
-    this.players[p].gold += this.income(p);
+    const mult = this.players[p].isAI ? DIFFICULTY[this.options.difficulty].income : 1;
+    this.players[p].gold += Math.round(this.income(p) * mult);
     this.players[p].stone += this.stoneIncome(p);
     // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
@@ -640,6 +677,10 @@ export class GameState {
     this.advanceTraining(p);
   }
 
+  private whose(p: PlayerId): string {
+    return p === 0 ? 'your' : `${this.players[p].name}'s`;
+  }
+
   private addLog(msg: string): void {
     this.log.push(`T${this.turn}: ${msg}`);
     if (this.log.length > 6) this.log.shift();
@@ -655,7 +696,7 @@ export class GameState {
     for (const t of this.map.tiles) {
       if (t.owner === loser) t.owner = captor;
     }
-    this.addLog(`${c.name} captured ${l.name}'s capital!`);
+    this.addLog(`${c.name} captured ${this.whose(loser)} capital!`);
   }
 
   private checkWin(): void {
@@ -676,7 +717,8 @@ export class GameState {
     }
     const land = this.landCount();
     for (const pl of this.players) {
-      if (!pl.alive) continue;
+      // On Easy, rivals can't win just by owning land
+      if (!pl.alive || (pl.isAI && !DIFFICULTY[this.options.difficulty].landWin)) continue;
       const share = this.ownedTiles(pl.id).length / land;
       if (share >= WIN_SHARE) {
         this.winner = pl.id;
@@ -731,90 +773,8 @@ export class GameState {
     }
   }
 
+  // Rival turns live in ai.ts
   private runAI(p: PlayerId): void {
-    this.aiSettlers(p);
-    this.aiQueueSettler(p);
-    for (let i = 0; i < 80 && this.winner === null && this.players[p].alive; i++) {
-      const tile = this.pickAIClaim(p);
-      if (!tile) return;
-      this.perform('claim', tile, p);
-    }
-  }
-
-  private wantsSettler(p: PlayerId): boolean {
-    const busy = this.unitsOf(p).some((u) => u.type === 'settler') || this.training.some((t) => t.owner === p && t.type === 'settler');
-    return !busy && this.cityCount(p) < 15;
-  }
-
-  private aiQueueSettler(p: PlayerId): void {
-    if (!this.wantsSettler(p)) return;
-    const city = this.cities().find((c) => c.owner === p && this.recruitCheck('settler', c, p).ok);
-    if (city) this.recruit('settler', city, p);
-  }
-
-  // How good a spot is for a new city (higher is better, -1 if not allowed).
-  private settleScore(tile: Tile, p: PlayerId): number {
-    if (tile.terrain === 'water' || tile.terrain === 'mountain' || tile.city) return -1;
-    if (tile.owner !== null && tile.owner !== p) return -1;
-    if (this.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) return -1;
-    let room = 0;
-    for (const n of this.map.neighbors(tile)) {
-      if (n.owner === null && isLand(n) && n.terrain !== 'mountain') room += 1;
-    }
-    return room;
-  }
-
-  private aiSettlers(p: PlayerId): void {
-    for (const unit of this.unitsOf(p).filter((u) => u.type === 'settler')) {
-      const here = this.tileOf(unit);
-      // Nearest good spot (ties broken by more room), measured from the settler.
-      let target: Tile | null = null;
-      let best = -Infinity;
-      for (const t of this.map.tiles) {
-        const sc = this.settleScore(t, p);
-        if (sc < 2) continue;
-        const v = sc - hexDistance(here, t) * 0.8;
-        if (v > best) {
-          best = v;
-          target = t;
-        }
-      }
-      if (!target) {
-        if (this.foundCheck(unit).ok) this.foundCity(unit);
-        continue;
-      }
-      if (target !== here) {
-        const reach = this.reachableFor(unit);
-        let step: Tile | null = null;
-        let d = hexDistance(here, target);
-        for (const t of reach.keys()) {
-          const dt = hexDistance(t, target);
-          if (dt < d) {
-            d = dt;
-            step = t;
-          }
-        }
-        if (step) this.moveUnit(unit, step);
-      }
-      if (this.tileOf(unit) === target && this.foundCheck(unit).ok) this.foundCity(unit);
-    }
-  }
-
-  private pickAIClaim(p: PlayerId): Tile | null {
-    const gold = this.players[p].gold;
-    const reserve = this.wantsSettler(p) ? Math.floor(this.cityCost(p) / 2) : 0;
-    let best: Tile | null = null;
-    let bestScore = 0;
-    for (const t of this.map.tiles) {
-      if (t.owner !== null || !isLand(t)) continue;
-      const c = this.check('claim', t, p);
-      if (!c.ok || gold - c.cost < reserve) continue;
-      const score = ((YIELD[t.terrain] + 0.5) / c.cost) * 10;
-      if (score > bestScore) {
-        bestScore = score;
-        best = t;
-      }
-    }
-    return best;
+    runAI(this, p);
   }
 }

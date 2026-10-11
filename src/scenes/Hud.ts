@@ -1,7 +1,7 @@
 // DOM overlay: stats, mode bar, selection panel, tooltip and game-over screen.
 // Reads from the world, never writes to it: clicks go back through handlers.
 import type { GameState } from '../world/game';
-import { WIN_SHARE } from '../world/game';
+import { DIFFICULTY, WIN_SHARE } from '../world/game';
 
 export type BarMode = 'select' | 'claim';
 
@@ -210,7 +210,9 @@ export class Hud {
         `<span>${state.cityCount(p.id)} cities · ${state.unitsOf(p.id).length} units</span></div></div>`
       );
     });
-    const modeLabel = state.sandbox ? 'Sandbox' : `${state.players.length - 1} rival${state.players.length > 2 ? 's' : ''}`;
+    const modeLabel = state.sandbox
+      ? 'Sandbox'
+      : `${state.players.length - 1} rival${state.players.length > 2 ? 's' : ''} · ${DIFFICULTY[state.options.difficulty].label}`;
     const me = state.players[0];
     this.statsBox.head.textContent = `Turn ${state.turn} · ${state.options.freeBuild ? 'free' : `${me.gold}g`} · food ${state.foodUsed(0)}/${state.foodMade(0)}`;
     this.stats.innerHTML =
@@ -220,7 +222,8 @@ export class Hud {
 
     const goal = state.sandbox
       ? '<b>Sandbox:</b> no rivals, no deadline. Grow and shape your kingdom however you want.'
-      : `<b>Goal:</b> take every rival capital or hold ${Math.round(WIN_SHARE * 100)}% of the land. Lose your capital and it's over.`;
+      : `<b>Goal:</b> take every rival capital or hold ${Math.round(WIN_SHARE * 100)}% of the land. Lose your capital and it's over. ` +
+        `Rivals build armies too: keep a few troops and walls at home.`;
     this.help.innerHTML =
       `${goal}<br><br>` +
       `Click your city to recruit a <b>Builder</b> or train a <b>Settler</b> (takes 3 turns). ` +

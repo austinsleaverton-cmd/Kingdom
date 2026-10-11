@@ -1,6 +1,6 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
-import { GameState, MAP_SIZES } from './game';
-import type { GameOptions } from './game';
+import { DIFFICULTY, GameState, MAP_SIZES } from './game';
+import type { Difficulty, GameOptions } from './game';
 import { cityMaxHp, shieldMax, terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
 import { UNIT_STATS } from './units';
@@ -33,6 +33,7 @@ export interface SaveSummary {
   turn: number;
   sizeLabel: string;
   opponents: number;
+  difficulty: Difficulty;
   finished: boolean;
 }
 
@@ -85,6 +86,7 @@ export function saveSummary(): SaveSummary | null {
     turn: data.turn,
     sizeLabel: MAP_SIZES[data.options.size].label,
     opponents: data.options.opponents,
+    difficulty: DIFFICULTY[data.options.difficulty] ? data.options.difficulty : 'normal',
     finished: data.winner !== null,
   };
 }

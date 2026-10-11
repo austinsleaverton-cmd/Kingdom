@@ -1,18 +1,19 @@
-// Start screen (DOM overlay): pick map size, rivals, free building, or continue a save.
-import { MAP_SIZES, MAX_OPPONENTS, defaultOptions, randomSeed } from '../world/game';
-import type { GameOptions, MapSize } from '../world/game';
+// Start screen (DOM overlay): pick map size, rivals, difficulty, free building, or continue a save.
+import { DIFFICULTY, MAP_SIZES, MAX_OPPONENTS, defaultOptions, randomSeed } from '../world/game';
+import type { Difficulty, GameOptions, MapSize } from '../world/game';
 import type { SaveSummary } from '../world/save';
 
 const CSS = `
 .k-menu { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
   background: radial-gradient(ellipse at center, rgba(20,40,70,0.85), rgba(5,10,20,0.97)); font: 15px/1.4 system-ui, sans-serif; color: #eee; z-index: 10; }
-.k-menu-box { background: rgba(15,15,22,0.95); border: 1px solid #333; border-radius: 12px; padding: 28px 32px; width: 380px; }
+.k-menu-box { background: rgba(15,15,22,0.95); border: 1px solid #333; border-radius: 12px; padding: 28px 32px; width: 380px; max-width: calc(100vw - 40px); box-sizing: border-box; }
 .k-menu h1 { margin: 0 0 4px; font-size: 34px; letter-spacing: 2px; }
 .k-menu .k-sub { color: #999; margin-bottom: 20px; font-size: 13px; }
 .k-menu h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #aaa; }
 .k-seg { display: flex; gap: 6px; }
 .k-seg button { flex: 1; background: #262630; color: #ddd; border: 1px solid #444; border-radius: 6px; padding: 8px 0; font: inherit; cursor: pointer; }
 .k-seg button.k-on { background: #2563eb; border-color: #60a5fa; color: #fff; }
+.k-seg button:disabled { opacity: 0.35; cursor: default; }
 .k-menu label { display: flex; gap: 8px; align-items: center; margin-top: 14px; cursor: pointer; }
 .k-menu .k-note { color: #8a8a8a; font-size: 12px; margin-top: 6px; min-height: 32px; }
 .k-menu .k-go { width: 100%; margin-top: 18px; padding: 11px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; background: #15803d; color: #fff; }
@@ -25,6 +26,7 @@ export class Menu {
   private opts: GameOptions = defaultOptions();
   private sizeBtns = new Map<MapSize, HTMLButtonElement>();
   private oppBtns: HTMLButtonElement[] = [];
+  private diffBtns = new Map<Difficulty, HTMLButtonElement>();
   private free: HTMLInputElement;
   private note: HTMLDivElement;
   private cont: HTMLButtonElement;
@@ -69,6 +71,18 @@ export class Menu {
     }
     box.appendChild(opps);
 
+    box.appendChild(heading('Difficulty'));
+    const diffs = segment();
+    for (const key of Object.keys(DIFFICULTY) as Difficulty[]) {
+      const b = segButton(DIFFICULTY[key].label, () => {
+        this.opts.difficulty = key;
+        this.refresh();
+      });
+      this.diffBtns.set(key, b);
+      diffs.appendChild(b);
+    }
+    box.appendChild(diffs);
+
     const label = document.createElement('label');
     this.free = document.createElement('input');
     this.free.type = 'checkbox';
@@ -97,7 +111,10 @@ export class Menu {
 
   show(save: SaveSummary | null): void {
     if (save) {
-      const mode = save.opponents === 0 ? 'Sandbox' : `${save.opponents} rival${save.opponents > 1 ? 's' : ''}`;
+      const mode =
+        save.opponents === 0
+          ? 'Sandbox'
+          : `${save.opponents} rival${save.opponents > 1 ? 's' : ''} · ${DIFFICULTY[save.difficulty].label}`;
       this.cont.innerHTML = `Continue <small>· Turn ${save.turn} · ${save.sizeLabel} · ${mode}${save.finished ? ' · finished' : ''}</small>`;
       this.cont.style.display = 'block';
     } else {
@@ -117,12 +134,16 @@ export class Menu {
   private refresh(): void {
     for (const [k, b] of this.sizeBtns) b.classList.toggle('k-on', k === this.opts.size);
     this.oppBtns.forEach((b, i) => b.classList.toggle('k-on', i === this.opts.opponents));
+    for (const [k, b] of this.diffBtns) {
+      b.classList.toggle('k-on', k === this.opts.difficulty && this.opts.opponents > 0);
+      b.disabled = this.opts.opponents === 0;
+    }
     this.free.checked = this.opts.freeBuild;
     const { width, height } = MAP_SIZES[this.opts.size];
     this.note.textContent =
       this.opts.opponents === 0
         ? `Sandbox: just you on a ${width}x${height} map. No rivals, no turn pressure, build however you like.`
-        : `${this.opts.opponents} AI rival${this.opts.opponents > 1 ? 's' : ''} on a ${width}x${height} map. Take every rival capital or hold 60% of the land.`;
+        : `${this.opts.opponents} AI rival${this.opts.opponents > 1 ? 's' : ''} on a ${width}x${height} map. ${DIFFICULTY[this.opts.difficulty].note}`;
   }
 }
 
