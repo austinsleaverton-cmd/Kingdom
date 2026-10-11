@@ -136,7 +136,7 @@ const CSS = `
 }
 /* Phones sideways: not much height, so the selection panel runs down the right side and scrolls */
 @media (orientation: landscape) and (max-height: 500px) {
-  .k-sel { left: auto; right: max(8px, env(safe-area-inset-right)); top: 52px; bottom: 8px; width: 230px; max-height: none; }
+  .k-sel { left: auto; right: max(8px, env(safe-area-inset-right)); top: 52px; bottom: auto; width: 230px; max-height: calc(100% - 60px); }
   .k-stats { max-height: calc(100% - 70px); overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
 }
 `;
