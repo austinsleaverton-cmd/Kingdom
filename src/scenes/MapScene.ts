@@ -1,11 +1,14 @@
 // Rendering and input only. All rules live in src/world.
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
-import type { Action, GameOptions } from '../world/game';
+import type { Check, GameOptions } from '../world/game';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { YIELD } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
+import { JOBS, UNIT_STATS } from '../world/units';
+import type { Job, Unit } from '../world/units';
 import { Hud } from './Hud';
+import type { BarMode, PanelButton, PanelModel } from './Hud';
 import { Menu } from './Menu';
 
 const SIZE = 28; // hex radius in px
@@ -23,17 +26,26 @@ const TERRAIN_NAME: Record<Terrain, string> = {
 // Hex edge i (between corner i and i+1) faces this neighbor direction.
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
+// select: click to select/move. claim/city: click to buy. raise/lower: builder picks a target.
+type Mode = BarMode | 'raise' | 'lower';
+
 export class MapScene extends Phaser.Scene {
   private state: GameState | null = null;
   private hud!: Hud;
   private menu!: Menu;
-  private action: Action = 'claim';
+  private mode: Mode = 'select';
   private hovered: Tile | null = null;
+  private selected: Tile | null = null;
+  private selectedUnitId: number | null = null;
+  private reach = new Map<Tile, number>();
   private lastPointer = { x: 0, y: 0 };
 
   private terrainGfx!: Phaser.GameObjects.Graphics;
   private ownerGfx!: Phaser.GameObjects.Graphics;
+  private overlayGfx!: Phaser.GameObjects.Graphics;
+  private unitGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
+  private unitLabels: Phaser.GameObjects.Text[] = [];
 
   private pressed = false;
   private dragging = false;
@@ -45,12 +57,14 @@ export class MapScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.terrainGfx = this.add.graphics();
-    this.ownerGfx = this.add.graphics();
-    this.hoverGfx = this.add.graphics();
+    this.terrainGfx = this.add.graphics().setDepth(0);
+    this.ownerGfx = this.add.graphics().setDepth(1);
+    this.overlayGfx = this.add.graphics().setDepth(2);
+    this.unitGfx = this.add.graphics().setDepth(3);
+    this.hoverGfx = this.add.graphics().setDepth(5);
 
     this.hud = new Hud({
-      onAction: (a) => this.selectAction(a),
+      onMode: (m) => this.setMode(m),
       onEndTurn: () => this.endTurn(),
       onMenu: () => this.openMenu(),
     });
@@ -86,6 +100,7 @@ export class MapScene extends Phaser.Scene {
   }
 
   private startGame(state: GameState): void {
+    if (state !== this.state) this.clearSelection();
     this.state = state;
     this.hovered = null;
     this.menu.hide();
@@ -102,26 +117,89 @@ export class MapScene extends Phaser.Scene {
     return this.state !== null && !this.menu.visible;
   }
 
-  private selectAction(a: Action): void {
-    this.action = a;
-    if (!this.state) return;
-    this.refreshHover();
-    this.hud.update(this.state, this.action);
+  private get selectedUnit(): Unit | null {
+    if (!this.state || this.selectedUnitId === null) return null;
+    return this.state.unitById(this.selectedUnitId) ?? null;
+  }
+
+  private setMode(m: Mode): void {
+    this.mode = m;
+    if (m === 'claim' || m === 'city') this.clearSelection();
+    this.redraw();
+  }
+
+  private clearSelection(): void {
+    this.selected = null;
+    this.selectedUnitId = null;
+    this.reach = new Map();
   }
 
   private endTurn(): void {
     if (!this.state || !this.playing || this.state.winner !== null) return;
     this.state.endTurn();
+    if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
     this.redraw();
   }
 
+  private fail(): void {
+    this.cameras.main.shake(80, 0.002);
+  }
+
   private clickTile(tile: Tile): void {
-    if (!this.state) return;
-    const res = this.state.perform(this.action, tile);
-    if (!res.ok) {
-      this.cameras.main.shake(80, 0.002);
+    const state = this.state;
+    if (!state) return;
+    switch (this.mode) {
+      case 'claim':
+      case 'city':
+        if (!state.perform(this.mode, tile).ok) return this.fail();
+        break;
+      case 'raise':
+      case 'lower': {
+        const unit = this.selectedUnit;
+        if (!unit) {
+          this.mode = 'select';
+          break;
+        }
+        if (!state.doJob(unit, this.mode, tile).ok) return this.fail();
+        this.mode = 'select';
+        break;
+      }
+      case 'select': {
+        const unit = this.selectedUnit;
+        if (unit && this.reach.has(tile)) {
+          state.moveUnit(unit, tile);
+          this.selected = tile;
+        } else {
+          this.selected = tile;
+          const here = state.unitAt(tile);
+          this.selectedUnitId = here && here.owner === 0 ? here.id : null;
+        }
+        break;
+      }
+    }
+    this.redraw();
+  }
+
+  private doJob(job: Job): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit) return;
+    if (job === 'raise' || job === 'lower') {
+      this.mode = this.mode === job ? 'select' : job;
+      this.redraw();
       return;
     }
+    if (!state.doJob(unit, job, state.tileOf(unit)).ok) return this.fail();
+    this.redraw();
+  }
+
+  private recruitBuilder(): void {
+    const state = this.state;
+    if (!state || !this.selected) return;
+    const unit = state.recruit('builder', this.selected);
+    if (!unit) return this.fail();
+    this.selectedUnitId = unit.id;
+    this.selected = state.tileOf(unit);
     this.redraw();
   }
 
@@ -158,7 +236,12 @@ export class MapScene extends Phaser.Scene {
       const wasClick = this.pressed && !this.dragging;
       this.pressed = false;
       this.dragging = false;
-      if (!this.playing || !wasClick || !p.leftButtonReleased()) return;
+      if (!this.playing || !wasClick) return;
+      if (p.rightButtonReleased()) {
+        this.cancel();
+        return;
+      }
+      if (!p.leftButtonReleased()) return;
       const tile = this.tileAtScreen(p.x, p.y);
       if (tile) this.clickTile(tile);
       this.setHover(this.tileAtScreen(p.x, p.y), p.x, p.y);
@@ -181,15 +264,27 @@ export class MapScene extends Phaser.Scene {
         return;
       }
       if (!this.playing) return;
-      switch (e.key) {
-        case '1': this.selectAction('claim'); break;
-        case '2': this.selectAction('raise'); break;
-        case '3': this.selectAction('lower'); break;
-        case '4': this.selectAction('city'); break;
+      const key = e.key.toUpperCase();
+      const job = JOBS.find((j) => j.key === key);
+      if (job && this.selectedUnit) {
+        this.doJob(job.id);
+        return;
+      }
+      switch (key) {
+        case '1': this.setMode('select'); break;
+        case '2': this.setMode('claim'); break;
+        case '3': this.setMode('city'); break;
+        case 'B': this.recruitBuilder(); break;
         case ' ':
-        case 'Enter': this.endTurn(); break;
+        case 'ENTER': this.endTurn(); break;
       }
     });
+  }
+
+  private cancel(): void {
+    if (this.mode !== 'select') this.mode = 'select';
+    else this.clearSelection();
+    this.redraw();
   }
 
   private tileAtScreen(sx: number, sy: number): Tile | null {
@@ -220,44 +315,145 @@ export class MapScene extends Phaser.Scene {
     this.refreshHover();
   }
 
+  private hoverCheck(state: GameState, tile: Tile): { label: string; check: Check } | null {
+    switch (this.mode) {
+      case 'claim':
+        return { label: 'Claim', check: state.check('claim', tile, 0) };
+      case 'city':
+        return { label: 'City', check: state.check('city', tile, 0) };
+      case 'raise':
+      case 'lower': {
+        const unit = this.selectedUnit;
+        if (!unit) return null;
+        return { label: this.mode === 'raise' ? 'Raise' : 'Lower', check: state.jobCheck(unit, this.mode, tile) };
+      }
+      case 'select': {
+        const left = this.reach.get(tile);
+        if (left === undefined) return null;
+        return { label: 'Move', check: { ok: true, cost: 0, reason: `${left} moves left after` } };
+      }
+    }
+  }
+
   private refreshHover(): void {
     this.hoverGfx.clear();
+    const state = this.state;
     const tile = this.hovered;
-    if (!this.state || !tile || this.state.winner !== null) {
+    if (!state || !tile || state.winner !== null) {
       this.hud.hideTip();
       return;
     }
-    const check = this.state.check(this.action, tile, 0);
+    const hc = this.hoverCheck(state, tile);
+    const ok = hc ? hc.check.ok : true;
     const { x, y } = tileCenter(tile);
-    this.hoverGfx.lineStyle(3, check.ok ? 0xffffff : 0xff5555, 0.95);
+    this.hoverGfx.lineStyle(3, ok ? 0xffffff : 0xff5555, 0.95);
     this.hoverGfx.strokePoints(hexCorners(x, y, SIZE - 1.5), true);
 
-    const owner = tile.owner === null ? 'Unclaimed' : this.state.players[tile.owner].name;
+    const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
+    const extras = [tile.capital ? 'Capital' : tile.city ? 'City' : '', tile.improvement ?? '', tile.road ? 'road' : '']
+      .filter(Boolean)
+      .join(' · ');
+    const unit = state.unitAt(tile);
     const lines = [
       `${TERRAIN_NAME[tile.terrain]} (height ${tile.height})`,
-      `${owner}${tile.capital ? ' · Capital' : tile.city ? ' · City' : ''}`,
+      `${owner}${extras ? ` · ${extras}` : ''}`,
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
-    const label = this.action[0].toUpperCase() + this.action.slice(1);
-    const status = check.ok ? `${label}: ${check.cost}g` : `${label}: ${check.reason}`;
-    this.hud.showTip(lines, status, check.ok, this.lastPointer.x, this.lastPointer.y);
+    if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name}`);
+    let status = '';
+    if (hc) {
+      if (this.mode === 'select') status = `${hc.label}: ${hc.check.reason}`;
+      else status = hc.check.ok ? `${hc.label}: ${hc.check.cost}g` : `${hc.label}: ${hc.check.reason}`;
+    }
+    this.hud.showTip(lines, status, ok, this.lastPointer.x, this.lastPointer.y);
+  }
+
+  // ---------- selection panel ----------
+
+  private buildPanel(state: GameState): PanelModel | null {
+    const tile = this.selected;
+    if (!tile) return null;
+    const unit = this.selectedUnit;
+    const buttons: PanelButton[] = [];
+    const lines: string[] = [];
+    let title = TERRAIN_NAME[tile.terrain];
+
+    if (unit) {
+      const stats = UNIT_STATS[unit.type];
+      title = `${stats.name}`;
+      lines.push(`Moves ${unit.moves}/${stats.moves}${unit.acted ? ' · done working this turn' : ''}`);
+      lines.push('Click a lit hex to move. One job per turn.');
+      const here = state.tileOf(unit);
+      for (const j of JOBS) {
+        const terraform = j.id === 'raise' || j.id === 'lower';
+        const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
+        buttons.push({
+          label: j.label,
+          key: j.key,
+          enabled: c.ok,
+          hint: c.ok ? (terraform ? 'pick a hex' : `${c.cost}g`) : c.reason,
+          active: this.mode === j.id,
+          onClick: () => this.doJob(j.id),
+        });
+      }
+    }
+    if (tile.city && tile.owner === 0) {
+      if (!unit) title = tile.capital ? 'Capital' : 'City';
+      const c = state.recruitCheck('builder', tile, 0);
+      const s = UNIT_STATS.builder;
+      buttons.push({
+        label: `Recruit ${s.name}`,
+        key: 'B',
+        enabled: c.ok,
+        hint: c.ok ? `${c.cost}g · ${s.food} food` : c.reason,
+        onClick: () => this.recruitBuilder(),
+      });
+      lines.push(`Food ${state.foodUsed(0)}/${state.foodMade(0)} used`);
+    }
+    if (!unit && !tile.city) {
+      const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
+      lines.push(owner, `Height ${tile.height}${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
+    }
+    return { title, lines, buttons };
+  }
+
+  // Raise/lower is valid if any target (builder tile or neighbor) works.
+  private terraformPreview(state: GameState, unit: Unit, job: 'raise' | 'lower'): Check {
+    const here = state.tileOf(unit);
+    let last: Check = { ok: false, cost: 0, reason: 'Nothing to change' };
+    for (const t of [here, ...state.map.neighbors(here)]) {
+      const c = state.jobCheck(unit, job, t);
+      if (c.ok) return c;
+      last = c;
+    }
+    return last;
   }
 
   // ---------- drawing ----------
 
   private redraw(): void {
-    if (!this.state) return;
-    this.drawTerrain(this.state);
-    this.drawOwners(this.state);
+    const state = this.state;
+    if (!state) return;
+    const unit = this.selectedUnit;
+    if (this.selectedUnitId !== null && !unit) this.clearSelection();
+    if (unit) this.selected = state.tileOf(unit);
+    this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
+
+    this.drawTerrain(state);
+    this.drawOwners(state);
+    this.drawOverlay(state);
+    this.drawUnits(state);
     this.refreshHover();
-    this.hud.update(this.state, this.action);
-    saveGame(this.state);
+    this.hud.update(state, this.mode);
+    this.hud.showPanel(this.buildPanel(state));
+    saveGame(state);
   }
 
   private drawTerrain(state: GameState): void {
     const g = this.terrainGfx;
     g.clear();
-    for (const t of state.map.tiles) {
+    const map = state.map;
+    for (const t of map.tiles) {
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE);
       g.fillStyle(HEIGHT_COLOR[t.height], 1);
@@ -274,6 +470,36 @@ export class MapScene extends Phaser.Scene {
         g.fillEllipse(x - 6, y + 4, 14, 8);
         g.fillEllipse(x + 6, y + 6, 12, 7);
       }
+      if (t.improvement === 'farm') {
+        g.lineStyle(2, 0xf0d264, 1);
+        for (let i = -1; i <= 1; i++) g.lineBetween(x - 11, y + i * 6, x + 11, y + i * 6);
+      } else if (t.improvement === 'mine') {
+        g.fillStyle(0x2b2b2b, 1);
+        g.fillRect(x - 7, y + 1, 14, 9);
+        g.fillStyle(0xd4a017, 1);
+        g.fillCircle(x, y + 5, 2.5);
+      }
+    }
+    // Roads: connect road/city tiles to neighbors that also have roads
+    const hasRoad = (t: Tile) => t.road || t.city;
+    g.lineStyle(4, 0x7a5a32, 0.95);
+    for (const t of map.tiles) {
+      if (!hasRoad(t)) continue;
+      const a = tileCenter(t);
+      let linked = false;
+      for (let dir = 0; dir < 6; dir++) {
+        const n = map.neighborAt(t, dir);
+        if (!n || !hasRoad(n)) continue;
+        linked = true;
+        if (dir === 0 || dir === 4 || dir === 5) {
+          const b = tileCenter(n);
+          g.lineBetween(a.x, a.y, b.x, b.y);
+        }
+      }
+      if (t.road && !linked) {
+        g.fillStyle(0x7a5a32, 1);
+        g.fillCircle(a.x, a.y, 4);
+      }
     }
   }
 
@@ -286,7 +512,7 @@ export class MapScene extends Phaser.Scene {
       const color = state.players[t.owner].color;
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE);
-      g.fillStyle(color, 0.28);
+      g.fillStyle(color, 0.22);
       g.fillPoints(pts, true);
 
       g.lineStyle(3, color, 1);
@@ -300,6 +526,67 @@ export class MapScene extends Phaser.Scene {
 
       if (t.city) this.drawCity(g, x, y, color, t.capital);
     }
+  }
+
+  private drawOverlay(state: GameState): void {
+    const g = this.overlayGfx;
+    g.clear();
+    g.fillStyle(0xffffff, 0.2);
+    for (const t of this.reach.keys()) {
+      const { x, y } = tileCenter(t);
+      g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+    }
+    const unit = this.selectedUnit;
+    if ((this.mode === 'raise' || this.mode === 'lower') && unit) {
+      const here = state.tileOf(unit);
+      for (const t of [here, ...state.map.neighbors(here)]) {
+        const ok = state.jobCheck(unit, this.mode, t).ok;
+        g.fillStyle(ok ? 0x22c55e : 0xef4444, ok ? 0.3 : 0.15);
+        const { x, y } = tileCenter(t);
+        g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+      }
+    }
+    if (this.selected) {
+      const { x, y } = tileCenter(this.selected);
+      g.lineStyle(3, 0xfacc15, 1);
+      g.strokePoints(hexCorners(x, y, SIZE - 2), true);
+    }
+  }
+
+  private drawUnits(state: GameState): void {
+    const g = this.unitGfx;
+    g.clear();
+    let i = 0;
+    for (const u of state.units) {
+      const t = state.tileOf(u);
+      const c = tileCenter(t);
+      const x = t.city ? c.x + 10 : c.x;
+      const y = t.city ? c.y + 10 : c.y;
+      const color = state.players[u.owner].color;
+      const isSel = u.id === this.selectedUnitId;
+      g.fillStyle(0x000000, 0.35);
+      g.fillCircle(x + 1, y + 2, 11);
+      g.fillStyle(color, 1);
+      g.fillCircle(x, y, 11);
+      g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
+      g.strokeCircle(x, y, 11);
+      // ready indicator for your units with moves or work left
+      if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
+        g.fillStyle(0x4ade80, 1);
+        g.fillCircle(x + 9, y - 9, 3.5);
+      }
+      let label = this.unitLabels[i];
+      if (!label) {
+        label = this.add
+          .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '13px', fontStyle: 'bold', color: '#ffffff' })
+          .setOrigin(0.5)
+          .setDepth(4);
+        this.unitLabels.push(label);
+      }
+      label.setText(UNIT_STATS[u.type].letter).setPosition(x, y).setVisible(true);
+      i++;
+    }
+    for (; i < this.unitLabels.length; i++) this.unitLabels[i].setVisible(false);
   }
 
   private drawCity(g: Phaser.GameObjects.Graphics, x: number, y: number, color: number, capital: boolean): void {

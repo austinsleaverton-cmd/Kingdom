@@ -9,13 +9,15 @@
 ## Structure (do not explore to confirm this, trust it)
 - src/main.ts: Phaser game config and boot (loads MapScene)
 - src/world/: game data and logic only, no Phaser imports
-  - tile.ts: Tile type, terrain-from-height rules, yields, claim costs
+  - tile.ts: Tile type (terrain, owner, city, improvement, road), terrain rules, yields, claim costs
   - map.ts: WorldMap, map generation, neighbors, raiseHeight/lowerHeight
-  - game.ts: GameState: players, gold, turns, actions (claim/raise/lower/city), win checks, rival AI
-  - save.ts: autosave/load to localStorage (key kingdom-save-v1)
+  - units.ts: unit types/stats, builder jobs, movement costs, reachable()
+  - game.ts: GameState: players, gold/food/stone, turns, claim/city, recruit/move/jobs, win checks, rival AI
+  - save.ts: autosave/load to localStorage (key kingdom-save-v3)
 - src/scenes/: rendering and input only
-  - MapScene.ts: draws hexes, borders, cities, handles clicks, hover, camera; autosaves after every redraw
-  - Hud.ts: DOM overlay (stats, action bar, tooltip, game over)
+  - MapScene.ts: draws hexes, roads, buildings, units, borders; selection, movement, modes, camera; autosaves after every redraw
+  - Hud.ts: DOM overlay (stats, mode bar, selection panel, tooltip, game over)
+  - Menu.ts: start screen (map size, rivals, free building, continue)
 - src/game/ and the other files in src/scenes/ are old unused stubs
 
 ## Behavior rules
@@ -24,16 +26,26 @@
 - Do one step at a time. Do not add features I didn't ask for.
 - Do not plan the full implementation in your head first. Write the files, then fix issues.
 - Keep world logic out of scenes. Scenes read from world, never the other way around.
-- Scenes change the world only through GameState.perform / endTurn.
-- If you add new state to GameState or Tile, add it to save.ts too.
+- Scenes change the world only through GameState methods (perform, recruit, moveUnit, doJob, endTurn).
+- If you add new state to GameState, Tile or Unit, add it to save.ts too.
 - After changes, tell me what changed in 1-3 lines and how to test it.
 
 ## Game rules (current)
-- Pointy-top hexes, 30x20 grid, odd rows shifted right (odd-r offset)
-- Random map each new game (seed shown in HUD), N starts a new map
+- Pointy-top hexes, odd rows shifted right (odd-r offset). Sizes: small 20x14, medium 30x20, large 44x30, huge 60x40
 - Height 0-5: 0 water, 1 sand, 2-3 grass, 4 hills, 5 mountain
-- 2 players: You (blue) vs Rival (red AI). Each starts with a capital.
-- Gold income per turn: tile yield (sand/grass 1, hills 2, mountain 0) + city 3 + capital 5
-- Actions: claim a tile bordering your land, raise/lower height (3g), found a city (10g + 10g per city owned, 2+ hexes from other cities)
-- Enemy tiles can be claimed at 3x cost; cities 30g, capital 60g
-- Win: hold 60% of land, capture enemy capital, or most tiles at turn 60
+- Players: You (blue) + 0-3 AI rivals. 0 rivals = sandbox (no win conditions)
+- Gold per turn: tile yield (sand/grass 1, hills 2, mountain 0) + city 3 + capital 5
+- Food is supply: capital 3, city 2, farm 3. Units use food (builder 1). Can't recruit past food made
+- Stone: mines give 2/turn (will pay for walls)
+- Builder (15g, 2 moves): one job per turn on own land: farm (grass/sand, 5g), mine (hills/mountain, 8g), road (2g), raise/lower its tile or a neighbor (3g)
+- Move costs: grass/sand 1, hills 2, mountain 3, road-to-road 0.5. Full-move units can always step 1 tile
+- Claim unowned land bordering yours with gold; found cities on own land (2+ hexes apart)
+- Enemy tiles still claimable at 3x cost for now (troops will replace this in step 3)
+- Win: take every rival capital or hold 60% of land
+
+## Roadmap
+1. DONE builders, food, stone, farms, mines, roads
+2. City HP + walls (builders build walls with stone)
+3. Troops: swordsman, archer, knight; combat; capture cities by destroying them; remove click-claim of enemy land
+4. AI uses builders and troops
+5. Balance pass

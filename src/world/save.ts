@@ -3,20 +3,26 @@ import { GameState, MAP_SIZES } from './game';
 import type { GameOptions } from './game';
 import { terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
+import type { Unit } from './units';
 
-const KEY = 'kingdom-save-v2';
+const KEY = 'kingdom-save-v3';
 const CITY = 1;
 const CAPITAL = 2;
+const ROAD = 4;
+const FARM = 8;
+const MINE = 16;
 
 interface SaveData {
-  version: 2;
+  version: 3;
   options: GameOptions;
   turn: number;
   current: PlayerId;
   winner: PlayerId | null;
   winReason: string;
   log: string[];
-  players: { gold: number; alive: boolean }[];
+  players: { gold: number; stone: number; alive: boolean }[];
+  units: Unit[];
+  nextUnitId: number;
   // per tile: [height, owner, flags]
   tiles: [number, PlayerId | null, number][];
 }
@@ -30,15 +36,25 @@ export interface SaveSummary {
 
 export function saveGame(state: GameState): void {
   const data: SaveData = {
-    version: 2,
+    version: 3,
     options: state.options,
     turn: state.turn,
     current: state.current,
     winner: state.winner,
     winReason: state.winReason,
     log: state.log,
-    players: state.players.map((p) => ({ gold: p.gold, alive: p.alive })),
-    tiles: state.map.tiles.map((t) => [t.height, t.owner, (t.city ? CITY : 0) | (t.capital ? CAPITAL : 0)]),
+    players: state.players.map((p) => ({ gold: p.gold, stone: p.stone, alive: p.alive })),
+    units: state.units,
+    nextUnitId: state.nextUnitId,
+    tiles: state.map.tiles.map((t) => [
+      t.height,
+      t.owner,
+      (t.city ? CITY : 0) |
+        (t.capital ? CAPITAL : 0) |
+        (t.road ? ROAD : 0) |
+        (t.improvement === 'farm' ? FARM : 0) |
+        (t.improvement === 'mine' ? MINE : 0),
+    ]),
   };
   try {
     localStorage.setItem(KEY, JSON.stringify(data));
@@ -52,7 +68,7 @@ function readSave(): SaveData | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as SaveData;
-    if (data.version !== 2 || !MAP_SIZES[data.options.size]) return null;
+    if (data.version !== 3 || !MAP_SIZES[data.options.size]) return null;
     return data;
   } catch {
     return null;
@@ -83,11 +99,14 @@ export function loadGame(): GameState | null {
       t.owner = owner;
       t.city = (flags & CITY) !== 0;
       t.capital = (flags & CAPITAL) !== 0;
+      t.road = (flags & ROAD) !== 0;
+      t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : null;
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];
       if (saved) {
         p.gold = saved.gold;
+        p.stone = saved.stone ?? 0;
         p.alive = saved.alive;
       }
     });
@@ -96,6 +115,8 @@ export function loadGame(): GameState | null {
     state.winner = data.winner;
     state.winReason = data.winReason;
     state.log = data.log;
+    state.units = (data.units ?? []).map((u) => ({ ...u }));
+    state.nextUnitId = data.nextUnitId ?? state.units.length + 1;
     return state;
   } catch {
     return null;

@@ -1,10 +1,12 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { CLAIM_COST, MAX_HEIGHT, YIELD, isLand } from './tile';
+import { CLAIM_COST, MAX_HEIGHT, YIELD, improvementFits, isLand } from './tile';
 import type { PlayerId, Tile } from './tile';
+import { JOB_COST, UNIT_STATS, reachable } from './units';
+import type { Job, Unit, UnitType } from './units';
 
-export type Action = 'claim' | 'raise' | 'lower' | 'city';
+export type Action = 'claim' | 'city';
 
 export type MapSize = 'small' | 'medium' | 'large' | 'huge';
 
@@ -29,6 +31,7 @@ export interface Player {
   name: string;
   color: number;
   gold: number;
+  stone: number;
   isAI: boolean;
   alive: boolean;
 }
@@ -46,8 +49,11 @@ const PLAYER_INFO = [
   { name: 'Violet', color: 0xa855f7 },
 ];
 
-export const TERRAFORM_COST = 3;
 export const CITY_INCOME = 3;
+export const FARM_FOOD = 3;
+export const CITY_FOOD = 2;
+export const CAPITAL_FOOD = 3;
+export const MINE_STONE = 2;
 export const CAPITAL_INCOME = 5;
 export const CAPITAL_CAPTURE_COST = 60;
 export const CITY_CAPTURE_COST = 30;
@@ -73,6 +79,8 @@ export class GameState {
   winner: PlayerId | null = null;
   winReason = '';
   log: string[] = [];
+  units: Unit[] = [];
+  nextUnitId = 1;
 
   constructor(options: GameOptions) {
     this.options = { ...options, opponents: Math.max(0, Math.min(MAX_OPPONENTS, options.opponents)) };
@@ -85,6 +93,7 @@ export class GameState {
         name: PLAYER_INFO[i].name,
         color: PLAYER_INFO[i].color,
         gold: START_GOLD,
+        stone: 0,
         isAI: i !== 0,
         alive: true,
       });
@@ -125,6 +134,46 @@ export class GameState {
     return gold;
   }
 
+  // Food is supply: farms and cities produce it, units use it up.
+  foodMade(p: PlayerId): number {
+    let food = 0;
+    for (const t of this.ownedTiles(p)) {
+      if (t.capital) food += CAPITAL_FOOD;
+      else if (t.city) food += CITY_FOOD;
+      if (t.improvement === 'farm') food += FARM_FOOD;
+    }
+    return food;
+  }
+
+  foodUsed(p: PlayerId): number {
+    return this.unitsOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
+  }
+
+  stoneIncome(p: PlayerId): number {
+    return this.ownedTiles(p).filter((t) => t.improvement === 'mine').length * MINE_STONE;
+  }
+
+  unitsOf(p: PlayerId): Unit[] {
+    return this.units.filter((u) => u.owner === p);
+  }
+
+  unitAt(tile: Tile): Unit | undefined {
+    return this.units.find((u) => u.col === tile.col && u.row === tile.row);
+  }
+
+  unitById(id: number): Unit | undefined {
+    return this.units.find((u) => u.id === id);
+  }
+
+  tileOf(unit: Unit): Tile {
+    return this.map.get(unit.col, unit.row)!;
+  }
+
+  reachableFor(unit: Unit): Map<Tile, number> {
+    if (unit.owner !== this.current) return new Map();
+    return reachable(this.map, unit, (t) => this.unitAt(t) !== undefined);
+  }
+
   cityCost(p: PlayerId): number {
     return 10 + 10 * this.cityCount(p);
   }
@@ -152,20 +201,6 @@ export class GameState {
         if (tile.city) return withGold(CITY_CAPTURE_COST);
         const nearCity = this.map.neighbors(tile).some((n) => n.city && n.owner === tile.owner);
         return withGold(CLAIM_COST[tile.terrain] * 3 + (nearCity ? 6 : 0));
-      }
-      case 'raise': {
-        if (tile.height >= MAX_HEIGHT) return fail('Already a mountain');
-        if (tile.owner !== null && tile.owner !== p) return fail("Can't terraform enemy land");
-        if (tile.owner === null && !this.touches(tile, p)) return fail('Must border your land');
-        if (tile.city && tile.height + 1 >= MAX_HEIGHT) return fail("Cities can't sit on mountains");
-        return withGold(TERRAFORM_COST);
-      }
-      case 'lower': {
-        if (tile.height <= 0) return fail('Already water');
-        if (tile.owner !== null && tile.owner !== p) return fail("Can't terraform enemy land");
-        if (tile.owner === null && !this.touches(tile, p)) return fail('Must border your land');
-        if (tile.city && tile.height <= 1) return fail('That would flood the city');
-        return withGold(TERRAFORM_COST);
       }
       case 'city': {
         if (tile.owner !== p) return fail('Build on your own land');
@@ -198,14 +233,9 @@ export class GameState {
         }
         break;
       }
-      case 'raise':
-        this.map.raiseHeight(tile);
-        break;
-      case 'lower':
-        this.map.lowerHeight(tile);
-        break;
       case 'city': {
         tile.city = true;
+        tile.improvement = null;
         for (const n of this.map.neighbors(tile)) {
           if (n.owner === null && isLand(n)) n.owner = p;
         }
@@ -215,6 +245,111 @@ export class GameState {
     }
     this.checkWin();
     return result;
+  }
+
+  // ---------- units ----------
+
+  recruitCheck(type: UnitType, city: Tile, p: PlayerId = this.current): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (!city.city || city.owner !== p) return fail('Recruit from your own city');
+    const stats = UNIT_STATS[type];
+    if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
+    if (!this.spawnTile(city)) return fail('No room around the city');
+    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    const gold = this.players[p].gold;
+    return gold >= stats.cost ? { ok: true, cost: stats.cost, reason: '' } : fail(`Need ${stats.cost} gold`, stats.cost);
+  }
+
+  recruit(type: UnitType, city: Tile, p: PlayerId = this.current): Unit | null {
+    const c = this.recruitCheck(type, city, p);
+    if (!c.ok) return null;
+    const at = this.spawnTile(city)!;
+    this.players[p].gold -= c.cost;
+    const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true };
+    this.units.push(unit);
+    return unit;
+  }
+
+  private spawnTile(city: Tile): Tile | null {
+    if (!this.unitAt(city)) return city;
+    return this.map.neighbors(city).find((n) => isLand(n) && n.owner === city.owner && !this.unitAt(n)) ?? null;
+  }
+
+  moveUnit(unit: Unit, dest: Tile): boolean {
+    if (this.winner !== null) return false;
+    const left = this.reachableFor(unit).get(dest);
+    if (left === undefined) return false;
+    unit.col = dest.col;
+    unit.row = dest.row;
+    unit.moves = left;
+    return true;
+  }
+
+  jobCheck(unit: Unit, job: Job, target: Tile): Check {
+    if (this.winner !== null) return fail('Game over');
+    const p = unit.owner;
+    if (p !== this.current) return fail('Not your turn');
+    if (unit.type !== 'builder') return fail('Only builders can do that');
+    if (unit.acted) return fail('Already worked this turn');
+    const here = this.tileOf(unit);
+    const terraform = job === 'raise' || job === 'lower';
+    if (terraform) {
+      if (target !== here && !this.map.neighbors(here).includes(target)) return fail('Pick the builder tile or one next to it');
+      if (target.owner !== null && target.owner !== p) return fail("Can't change enemy land");
+    } else {
+      if (target !== here) return fail('Builders work the tile they stand on');
+      if (target.owner !== p) return fail('Build on your own land');
+    }
+    switch (job) {
+      case 'farm':
+        if (target.improvement === 'farm') return fail('Already a farm');
+        if (!improvementFits(target, 'farm')) return fail('Farms need grass or sand');
+        break;
+      case 'mine':
+        if (target.improvement === 'mine') return fail('Already a mine');
+        if (!improvementFits(target, 'mine')) return fail('Mines need hills or mountains');
+        break;
+      case 'road':
+        if (target.city) return fail('Cities already count as roads');
+        if (target.road) return fail('Already a road');
+        break;
+      case 'raise':
+        if (target.height >= MAX_HEIGHT) return fail('Already a mountain');
+        if (target.city && target.height + 1 >= MAX_HEIGHT) return fail("Cities can't sit on mountains");
+        break;
+      case 'lower':
+        if (target.height <= 0) return fail('Already water');
+        if (target.city && target.height <= 1) return fail('That would flood the city');
+        if (target.height === 1 && this.unitAt(target)) return fail('A unit would drown');
+        break;
+    }
+    const cost = JOB_COST[job];
+    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
+  }
+
+  doJob(unit: Unit, job: Job, target: Tile): Check {
+    const c = this.jobCheck(unit, job, target);
+    if (!c.ok) return c;
+    this.players[unit.owner].gold -= c.cost;
+    switch (job) {
+      case 'farm':
+      case 'mine':
+        target.improvement = job;
+        break;
+      case 'road':
+        target.road = true;
+        break;
+      case 'raise':
+        this.map.raiseHeight(target);
+        break;
+      case 'lower':
+        this.map.lowerHeight(target);
+        break;
+    }
+    unit.acted = true;
+    unit.moves = 0;
+    return c;
   }
 
   endTurn(): void {
@@ -238,6 +373,11 @@ export class GameState {
 
   private startTurn(p: PlayerId): void {
     this.players[p].gold += this.income(p);
+    this.players[p].stone += this.stoneIncome(p);
+    for (const u of this.unitsOf(p)) {
+      u.moves = UNIT_STATS[u.type].moves;
+      u.acted = false;
+    }
   }
 
   private addLog(msg: string): void {
@@ -250,6 +390,7 @@ export class GameState {
     const l = this.players[loser];
     const c = this.players[captor];
     l.alive = false;
+    this.units = this.units.filter((u) => u.owner !== loser);
     for (const t of this.map.tiles) {
       if (t.owner === loser) t.owner = captor;
     }

@@ -2,6 +2,7 @@
 
 export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
 export type PlayerId = number; // 0 is always the human player
+export type Improvement = 'farm' | 'mine';
 
 export interface Tile {
   col: number;
@@ -11,6 +12,8 @@ export interface Tile {
   owner: PlayerId | null;
   city: boolean;
   capital: boolean;
+  improvement: Improvement | null;
+  road: boolean;
 }
 
 export const MAX_HEIGHT = 5;
@@ -26,6 +29,24 @@ export function terrainFromHeight(height: number): Terrain {
 
 export function isLand(tile: Tile): boolean {
   return tile.terrain !== 'water';
+}
+
+// Farms need flat land, mines need high ground.
+export function improvementFits(tile: Tile, imp: Improvement): boolean {
+  if (tile.city) return false;
+  if (imp === 'farm') return tile.terrain === 'grass' || tile.terrain === 'sand';
+  return tile.terrain === 'hills' || tile.terrain === 'mountain';
+}
+
+// Drop anything that no longer fits after the terrain changed.
+export function fixAfterTerrainChange(tile: Tile): void {
+  if (tile.improvement && !improvementFits(tile, tile.improvement)) tile.improvement = null;
+  if (tile.terrain === 'water') {
+    tile.road = false;
+    tile.owner = null;
+    tile.city = false;
+    tile.capital = false;
+  }
 }
 
 // Gold per turn for owning a tile
@@ -55,5 +76,7 @@ export function makeTile(col: number, row: number, height: number): Tile {
     owner: null,
     city: false,
     capital: false,
+    improvement: null,
+    road: false,
   };
 }

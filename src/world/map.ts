@@ -1,5 +1,5 @@
 // Hex map: pointy-top hexes, "odd-r" offset layout (odd rows shifted right).
-import { MAX_HEIGHT, makeTile, terrainFromHeight } from './tile';
+import { MAX_HEIGHT, fixAfterTerrainChange, makeTile, terrainFromHeight } from './tile';
 import type { Tile } from './tile';
 
 export const MAP_WIDTH = 30;
@@ -45,19 +45,16 @@ export class WorldMap {
     if (tile.height >= MAX_HEIGHT) return false;
     tile.height += 1;
     tile.terrain = terrainFromHeight(tile.height);
+    fixAfterTerrainChange(tile);
     return true;
   }
 
-  // Returns true if the height changed. Flooded tiles lose their owner.
+  // Returns true if the height changed. Flooded tiles lose owner, road and buildings.
   lowerHeight(tile: Tile): boolean {
     if (tile.height <= 0) return false;
     tile.height -= 1;
     tile.terrain = terrainFromHeight(tile.height);
-    if (tile.terrain === 'water') {
-      tile.owner = null;
-      tile.city = false;
-      tile.capital = false;
-    }
+    fixAfterTerrainChange(tile);
     return true;
   }
 }
