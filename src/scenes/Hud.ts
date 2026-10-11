@@ -1,4 +1,4 @@
-// DOM overlay: stats, mode bar, selection panel, tooltip, idle-unit check and game-over screen.
+// DOM overlay: stats, mode bar, selection panel, tooltip and game-over screen.
 // Reads from the world, never writes to it: clicks go back through handlers.
 import type { GameState } from '../world/game';
 import { CLAIM_RADIUS, DIFFICULTY } from '../world/game';
@@ -55,7 +55,7 @@ const MODES: { id: BarMode; label: string; key: string }[] = [{ id: 'select', la
 const CSS = `
 .k-hud { position: fixed; inset: 0; pointer-events: none; font: 14px/1.35 system-ui, sans-serif; color: #eee; }
 .k-panel { position: absolute; background: rgba(15,15,20,0.9); border: 1px solid #333; border-radius: 8px; padding: 10px 12px; pointer-events: auto; }
-.k-stats { top: 12px; left: 12px; min-width: 240px; }
+.k-stats { top: 12px; left: 12px; min-width: 230px; }
 .k-stats b { color: #fff; }
 .k-row { display: flex; justify-content: space-between; gap: 12px; }
 .k-res { font-size: 12px; color: #ccc; }
@@ -69,7 +69,7 @@ const CSS = `
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-.k-sel { bottom: 70px; left: 12px; width: 250px; max-height: calc(100vh - 100px); overflow-y: auto; }
+.k-sel { bottom: 70px; left: 12px; width: 250px; }
 .k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 4px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
 .k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 6px; margin-top: 6px; }
@@ -84,7 +84,7 @@ const CSS = `
 .k-meter .k-fill { height: 100%; border-radius: 4px; }
 .k-meter span:last-child { width: 52px; text-align: right; }
 .k-sel .k-foot { font-size: 11px; color: #777; margin-top: 8px; }
-.k-stats h4, .k-help h4 { margin: 10px 0 3px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; }
+.k-stats h4, .k-help h4 { margin: 8px 0 3px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; }
 .k-help ul { margin: 0; padding-left: 16px; }
 .k-help li { margin: 2px 0; }
 .k-mode { font-weight: 400; font-size: 11px; color: #8b8b99; margin-left: 6px; }
@@ -121,11 +121,11 @@ const CSS = `
 .k-collapsed { padding: 6px 10px; }
 @media (max-width: 700px) {
   .k-hud { font-size: 12px; }
-  .k-stats { min-width: 0; max-width: 52vw; }
+  .k-stats { min-width: 0; max-width: 46vw; }
   .k-help { max-width: 46vw; }
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
-  .k-sel { bottom: 120px; width: 210px; max-height: calc(100vh - 150px); }
+  .k-sel { bottom: 120px; width: 210px; }
   .k-idle { bottom: 120px; }
 }
 `;
@@ -271,12 +271,11 @@ export class Hud {
       `<div class="k-resrow"><span class="k-ic">${icon}</span><span class="k-lab">${label}</span>` +
       `<b>${value}</b><span class="k-note${warn ? ' k-warn' : ''}">${note}</span></div>`;
     const foodPct = made > 0 ? Math.min(100, (used / made) * 100) : 100;
-    const foodColor = left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e';
     const mine =
       row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(0)} next turn`) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
-      `<div class="k-foodbar"><div style="width:${foodPct}%;background:${foodColor}"></div></div>` +
-      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(0) > 0 ? `+${state.stoneIncome(0)} next turn · for walls` : 'build mines for walls');
+      `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
+      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(0) > 0 ? `+${state.stoneIncome(0)} next turn` : 'build mines for walls');
 
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const rows = state.players
@@ -292,18 +291,16 @@ export class Hud {
     const table = state.sandbox
       ? `<div class="k-res" style="margin-top:6px">${plural(state.cityCount(0), 'city')} · ${plural(state.unitsOf(0).length, 'unit')}</div>`
       : `<h4>Kingdoms</h4><table class="k-tab"><tr><th></th><th>Land</th><th>Cities</th><th>Units</th></tr>${rows}</table>`;
-    // Newest first, "Turn 14 · ..." instead of "T14: ..."
     const recent = state.log.slice(-4).reverse().map((l) => escape(l.replace(/^T(\d+): /, 'Turn $1 · ')));
     this.stats.innerHTML =
       mine + table + (recent.length ? `<h4>What happened</h4><div class="k-log">${recent.join('<br>')}</div>` : '');
 
     const uses = DIFFICULTY[state.options.difficulty].builderUses;
-    const goal = state.sandbox ? 'Sandbox: no rivals, build whatever you like.' : 'Take every rival capital, or hold 60% of the land.';
     this.help.innerHTML =
-      `<h4>Goal</h4>${goal}` +
       `<h4>Your turn</h4><ul>` +
       `<li>Click a <b>city</b> to train units, build walls (W), claim land (K) or rename it.</li>` +
-      `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect. N or Tab jumps to the next unit.</li>` +
+      `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect.</li>` +
+      `<li><b>Routes:</b> with a unit selected, tap a far hex to see the path and turns, tap it again to go. It walks there by itself each turn (X cancels).</li>` +
       `<li><b>End turn</b> (Space) when you're done.</li></ul>` +
       `<h4>Units</h4><ul>` +
       `<li><b>Builder</b> (hammer): farms, mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
