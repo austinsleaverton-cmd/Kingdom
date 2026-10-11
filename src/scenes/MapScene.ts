@@ -251,10 +251,16 @@ export class MapScene extends Phaser.Scene {
       if (this.playing) this.setHover(null, 0, 0);
     });
 
-    this.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+    // Smooth zoom: scale by how far the wheel/trackpad actually moved, so
+    // trackpads (many tiny events) and mouse wheels (few big ones) feel the same.
+    this.input.on('wheel', (p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
       if (!this.playing) return;
+      const ev = p.event as WheelEvent;
+      const pinch = ev.ctrlKey; // macOS trackpad pinch arrives as ctrl+wheel
+      const delta = Phaser.Math.Clamp(dy, -60, 60);
+      const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
       const cam = this.cameras.main;
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dy > 0 ? 0.9 : 1.1), 0.3, 3));
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, 0.3, 3));
     });
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
