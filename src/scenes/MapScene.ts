@@ -49,6 +49,7 @@ export class MapScene extends Phaser.Scene {
   private hoverGfx!: Phaser.GameObjects.Graphics;
   private selGfx!: Phaser.GameObjects.Graphics;
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
+  private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
 
   private pressed = false;
   private dragging = false;
@@ -823,6 +824,7 @@ export class MapScene extends Phaser.Scene {
     const g = this.ownerGfx;
     g.clear();
     const map = state.map;
+    let names = 0;
     for (const t of map.tiles) {
       if (t.owner === null) continue;
       const color = state.players[t.owner].color;
@@ -855,8 +857,24 @@ export class MapScene extends Phaser.Scene {
         }
         this.drawCity(g, x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
+        this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital);
       }
     }
+    for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
+  }
+
+  // Name tag under each city, drawn above units so it never gets covered.
+  private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean): void {
+    let label = this.cityLabels[i];
+    if (!label) {
+      label = this.add
+        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#ffffff', padding: { x: 4, y: 1 } })
+        .setOrigin(0.5)
+        .setDepth(4.2);
+      this.cityLabels.push(label);
+    }
+    const bg = `#${color.toString(16).padStart(6, '0')}`;
+    label.setText(capital ? `\u2605 ${name}` : name).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
 
   // Health bar (only when damaged) with the wall shield bar above it.
