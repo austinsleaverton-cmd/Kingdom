@@ -797,16 +797,37 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Show every tile you could buy right now
+      // Claim zone: hexes within CLAIM_RADIUS of one of your cities. Dim everything else.
+      const zone = new Set(state.map.tiles.filter((t) => state.inClaimRange(t, 0)));
+      g.fillStyle(0x000000, 0.35);
+      for (const t of state.map.tiles) {
+        if (zone.has(t)) continue;
+        const { x, y } = tileCenter(t);
+        g.fillPoints(hexCorners(x, y, SIZE), true);
+      }
+      // Green = you can buy it right now
       g.fillStyle(0x22c55e, 0.3);
       g.lineStyle(2, 0x4ade80, 0.9);
-      for (const t of state.map.tiles) {
+      for (const t of zone) {
         if (t.owner === 0 || t.terrain === 'water') continue;
         if (!state.check('claim', t, 0).ok) continue;
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
         g.fillPoints(pts, true);
         g.strokePoints(pts, true);
+      }
+      // Yellow line around the edge of the zone
+      g.lineStyle(3, 0xfacc15, 0.95);
+      for (const t of zone) {
+        const { x, y } = tileCenter(t);
+        const pts = hexCorners(x, y, SIZE);
+        for (let i = 0; i < 6; i++) {
+          const n = state.map.neighborAt(t, EDGE_TO_DIR[i]);
+          if (n && zone.has(n)) continue;
+          const a = pts[i];
+          const b = pts[(i + 1) % 6];
+          g.lineBetween(a.x, a.y, b.x, b.y);
+        }
       }
     }
     if ((this.mode === 'raise' || this.mode === 'lower') && unit) {

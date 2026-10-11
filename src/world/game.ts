@@ -96,7 +96,7 @@ export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
 export const CAPITAL_INCOME = 5;
 export const WIN_SHARE = 0.6;
-export const CLAIM_RADIUS = 4; // can only buy land this close to one of your cities
+export const CLAIM_RADIUS = 3; // can only buy land this many hexes (or fewer) from one of your cities
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
 export const CITY_SPACING = 3; // cities must be at least this many hexes apart
@@ -278,6 +278,13 @@ export class GameState {
     return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
   }
 
+  // Hexes from this tile to the closest city you own.
+  cityDistance(tile: Tile, p: PlayerId): number {
+    let best = Infinity;
+    for (const c of this.cities()) if (c.owner === p) best = Math.min(best, hexDistance(c, tile));
+    return best;
+  }
+
   inClaimRange(tile: Tile, p: PlayerId): boolean {
     return this.cities().some((c) => c.owner === p && hexDistance(c, tile) <= CLAIM_RADIUS);
   }
@@ -318,7 +325,9 @@ export class GameState {
         if (tile.owner !== null) return fail(`${this.players[tile.owner].name}'s land: conquer their city to take it`);
         if (!isLand(tile)) return fail("Can't claim water");
         if (!this.touches(tile, p)) return fail('Must border your land');
-        if (!this.inClaimRange(tile, p)) return fail(`Too far from your cities (max ${CLAIM_RADIUS}): send a settler`);
+        if (!this.inClaimRange(tile, p)) {
+          return fail(`Too far: ${this.cityDistance(tile, p)} hexes from your nearest city (max ${CLAIM_RADIUS}). Send a settler`);
+        }
         return withGold(this.claimCost(tile, p));
       }
     }

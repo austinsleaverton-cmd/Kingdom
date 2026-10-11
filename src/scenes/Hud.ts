@@ -1,7 +1,7 @@
 // DOM overlay: stats, mode bar, selection panel, tooltip, idle-unit check and game-over screen.
 // Reads from the world, never writes to it: clicks go back through handlers.
 import type { GameState } from '../world/game';
-import { DIFFICULTY, WIN_SHARE } from '../world/game';
+import { CLAIM_RADIUS, DIFFICULTY, WIN_SHARE } from '../world/game';
 
 export type BarMode = 'select' | 'claim';
 
@@ -245,7 +245,7 @@ export class Hud {
       `Settlers found new cities 3+ hexes from any other city. Stand a builder on a city to build walls (stone from mines): the blue bar is a shield that takes damage before the city's health.<br><br>` +
       `<b>Troops</b> (square tokens) train in cities: Swordsman beats Archer, Archer (range 2, no return fire) beats Knight, Knight (fast) beats Swordsman. ` +
       `Select a troop, click a red hex to attack. Knock a city to 0 HP, then march a Swordsman or Knight in to capture it and the land around it. Cities stop healing while enemy troops are within 2 hexes.<br><br>` +
-      `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last.<br><br>` +
+      `Claim land up to ${CLAIM_RADIUS} hexes from one of your cities (yellow outline in Claim mode, green = buyable now); each tile costs a bit more than the last.<br><br>` +
       `Ending your turn warns you about units with no orders; press H (Hold position) on units you want to leave where they are. ` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 
