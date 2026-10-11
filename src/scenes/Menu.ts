@@ -265,14 +265,15 @@ export class Menu {
   show(save: SaveSummary | null): void {
     this.save = save;
     this.resetGo();
-    if (save) {
+    // A finished game (victory or defeat) can't be continued: only offer New kingdom
+    if (save && !save.finished) {
       const mode =
         save.people.length > 1
           ? save.people.map(esc).join(' vs ')
           : save.opponents === 0
             ? 'Sandbox'
             : `${save.opponents} rival${save.opponents > 1 ? 's' : ''} · ${DIFFICULTY[save.difficulty].label}`;
-      this.cont.innerHTML = `Continue <small>· Turn ${save.turn} · ${save.sizeLabel} · ${mode}${save.finished ? ' · finished' : ''}</small>`;
+      this.cont.innerHTML = `Continue <small>· Turn ${save.turn} · ${save.sizeLabel} · ${mode}</small>`;
       this.cont.style.display = 'block';
     } else {
       this.cont.style.display = 'none';
