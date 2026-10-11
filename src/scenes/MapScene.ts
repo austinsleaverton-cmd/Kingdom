@@ -6,7 +6,7 @@ import { loadGame, saveGame, saveSummary } from '../world/save';
 import { YIELD } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
 import { JOBS, UNIT_STATS } from '../world/units';
-import type { Job, Unit } from '../world/units';
+import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
 import type { BarMode, PanelButton, PanelModel } from './Hud';
 import { Menu } from './Menu';
@@ -26,7 +26,7 @@ const TERRAIN_NAME: Record<Terrain, string> = {
 // Hex edge i (between corner i and i+1) faces this neighbor direction.
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
-// select: click to select/move. claim/city: click to buy. raise/lower: builder picks a target.
+// select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
 export class MapScene extends Phaser.Scene {
@@ -124,7 +124,7 @@ export class MapScene extends Phaser.Scene {
 
   private setMode(m: Mode): void {
     this.mode = m;
-    if (m === 'claim' || m === 'city') this.clearSelection();
+    if (m === 'claim') this.clearSelection();
     this.redraw();
   }
 
@@ -150,8 +150,7 @@ export class MapScene extends Phaser.Scene {
     if (!state) return;
     switch (this.mode) {
       case 'claim':
-      case 'city':
-        if (state.perform(this.mode, tile).ok) break;
+        if (state.perform('claim', tile).ok) break;
         // Not a valid buy, but it's your city or unit: just select it.
         if (this.selectOwn(state, tile)) break;
         return this.fail();
@@ -218,13 +217,26 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  private recruitBuilder(): void {
+  private recruit(type: UnitType): void {
     const state = this.state;
     if (!state || !this.selected) return;
-    const unit = state.recruit('builder', this.selected);
-    if (!unit) return this.fail();
-    this.selectedUnitId = unit.id;
-    this.selected = state.tileOf(unit);
+    const res = state.recruit(type, this.selected);
+    if (!res) return this.fail();
+    if (res !== 'queued') {
+      this.selectedUnitId = res.id;
+      this.selected = state.tileOf(res);
+    }
+    this.redraw();
+  }
+
+  private foundCity(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit || unit.type !== 'settler') return;
+    const tile = state.tileOf(unit);
+    if (!state.foundCity(unit).ok) return this.fail();
+    this.selectedUnitId = null;
+    this.selected = tile;
     this.redraw();
   }
 
@@ -296,16 +308,21 @@ export class MapScene extends Phaser.Scene {
       }
       if (!this.playing) return;
       const key = e.key.toUpperCase();
+      const unit = this.selectedUnit;
       const job = JOBS.find((j) => j.key === key);
-      if (job && this.selectedUnit) {
+      if (job && unit && unit.type === 'builder') {
         this.doJob(job.id);
+        return;
+      }
+      if (key === 'C' && unit && unit.type === 'settler') {
+        this.foundCity();
         return;
       }
       switch (key) {
         case '1': this.setMode('select'); break;
         case '2': this.setMode('claim'); break;
-        case '3': this.setMode('city'); break;
-        case 'B': this.recruitBuilder(); break;
+        case 'B': if (!unit) this.recruit('builder'); break;
+        case 'S': if (!unit) this.recruit('settler'); break;
         case ' ':
         case 'ENTER': this.endTurn(); break;
       }
@@ -350,8 +367,6 @@ export class MapScene extends Phaser.Scene {
     switch (this.mode) {
       case 'claim':
         return { label: 'Claim', check: state.check('claim', tile, 0) };
-      case 'city':
-        return { label: 'City', check: state.check('city', tile, 0) };
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
@@ -413,9 +428,19 @@ export class MapScene extends Phaser.Scene {
       const stats = UNIT_STATS[unit.type];
       title = `${stats.name}`;
       lines.push(`Moves ${unit.moves}/${stats.moves}${unit.acted ? ' · done working this turn' : ''}`);
-      lines.push('Click a lit hex to move. One job per turn.');
       const here = state.tileOf(unit);
-      for (const j of JOBS) {
+      if (unit.type === 'settler') {
+        lines.push('Move to an open spot 3+ hexes from any city, then found it. The settler is used up.');
+        const c = state.foundCheck(unit);
+        buttons.push({
+          label: 'Found city here',
+          key: 'C',
+          enabled: c.ok,
+          hint: c.ok ? 'uses the settler' : c.reason,
+          onClick: () => this.foundCity(),
+        });
+      } else lines.push('Click a lit hex to move. One job per turn.');
+      for (const j of unit.type === 'builder' ? JOBS : []) {
         const terraform = j.id === 'raise' || j.id === 'lower';
         const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
         buttons.push({
@@ -430,16 +455,28 @@ export class MapScene extends Phaser.Scene {
     }
     if (tile.city && tile.owner === 0) {
       if (!unit) title = tile.capital ? 'Capital' : 'City';
-      const c = state.recruitCheck('builder', tile, 0);
-      const s = UNIT_STATS.builder;
-      buttons.push({
-        label: `Recruit ${s.name}`,
-        key: 'B',
-        enabled: c.ok,
-        hint: c.ok ? `${c.cost}g · ${s.food} food` : c.reason,
-        onClick: () => this.recruitBuilder(),
-      });
+      const recruitables: { type: UnitType; key: string }[] = [
+        { type: 'builder', key: 'B' },
+        { type: 'settler', key: 'S' },
+      ];
+      for (const r of recruitables) {
+        const c = state.recruitCheck(r.type, tile, 0);
+        const s = UNIT_STATS[r.type];
+        const time = s.train > 0 ? ` · ${s.train} turns` : '';
+        buttons.push({
+          label: `${s.train > 0 ? 'Train' : 'Recruit'} ${s.name}`,
+          key: unit ? undefined : r.key,
+          enabled: c.ok,
+          hint: c.ok ? `${c.cost}g · ${s.food} food${time}` : c.reason,
+          onClick: () => this.recruit(r.type),
+        });
+      }
       lines.push(`Food ${state.foodUsed(0)}/${state.foodMade(0)} used`);
+      const queued = state.trainingAt(tile);
+      if (queued) {
+        const left = queued.turnsLeft;
+        lines.push(`Training ${UNIT_STATS[queued.type].name}: ${left > 0 ? `${left} turn${left > 1 ? 's' : ''} left` : 'waiting for room'}`);
+      }
       const here = state.unitAt(tile);
       if (!unit && here && here.owner === 0) {
         buttons.push({

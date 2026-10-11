@@ -4,9 +4,9 @@ import type { WorldMap } from './map';
 import { CLAIM_COST, MAX_HEIGHT, YIELD, improvementFits, isLand } from './tile';
 import type { PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, reachable } from './units';
-import type { Job, Unit, UnitType } from './units';
+import type { Job, Training, Unit, UnitType } from './units';
 
-export type Action = 'claim' | 'city';
+export type Action = 'claim';
 
 export type MapSize = 'small' | 'medium' | 'large' | 'huge';
 
@@ -60,6 +60,7 @@ export const WIN_SHARE = 0.6;
 export const CLAIM_RADIUS = 4; // can only buy land this close to one of your cities
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
+export const CITY_SPACING = 3; // cities must be at least this many hexes apart
 
 const fail = (reason: string, cost = 0): Check => ({ ok: false, cost, reason });
 
@@ -82,6 +83,7 @@ export class GameState {
   log: string[] = [];
   units: Unit[] = [];
   nextUnitId = 1;
+  training: Training[] = [];
 
   constructor(options: GameOptions) {
     this.options = { ...options, opponents: Math.max(0, Math.min(MAX_OPPONENTS, options.opponents)) };
@@ -147,8 +149,19 @@ export class GameState {
     return food;
   }
 
+  // Units in training already reserve their food.
   foodUsed(p: PlayerId): number {
-    return this.unitsOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
+    const units = this.unitsOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
+    const queued = this.training.filter((t) => t.owner === p).reduce((sum, t) => sum + UNIT_STATS[t.type].food, 0);
+    return units + queued;
+  }
+
+  trainingAt(city: Tile): Training | undefined {
+    return this.training.find((t) => t.col === city.col && t.row === city.row);
+  }
+
+  unitCost(type: UnitType, p: PlayerId): number {
+    return type === 'settler' ? this.cityCost(p) : UNIT_STATS[type].cost;
   }
 
   stoneIncome(p: PlayerId): number {
@@ -220,16 +233,8 @@ export class GameState {
         if (tile.owner !== null) return fail(`${this.players[tile.owner].name}'s land: conquer their city to take it`);
         if (!isLand(tile)) return fail("Can't claim water");
         if (!this.touches(tile, p)) return fail('Must border your land');
-        if (!this.inClaimRange(tile, p)) return fail(`Too far from your cities (max ${CLAIM_RADIUS}): found a new city`);
+        if (!this.inClaimRange(tile, p)) return fail(`Too far from your cities (max ${CLAIM_RADIUS}): send a settler`);
         return withGold(this.claimCost(tile, p));
-      }
-      case 'city': {
-        if (tile.owner !== p) return fail('Build on your own land');
-        if (tile.city) return fail('Already a city');
-        if (tile.terrain === 'water' || tile.terrain === 'mountain') return fail("Can't build here");
-        const tooClose = this.map.neighbors(tile).some((n) => n.city || this.map.neighbors(n).some((m) => m.city));
-        if (tooClose) return fail('Too close to another city');
-        return withGold(this.cityCost(p));
       }
     }
   }
@@ -256,18 +261,43 @@ export class GameState {
         }
         break;
       }
-      case 'city': {
-        tile.city = true;
-        tile.improvement = null;
-        for (const n of this.map.neighbors(tile)) {
-          if (n.owner === null && isLand(n)) n.owner = p;
-        }
-        this.addLog(`${player.name} founded a city`);
-        break;
-      }
     }
     this.checkWin();
     return result;
+  }
+
+  // ---------- settlers ----------
+
+  foundCheck(unit: Unit): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (unit.type !== 'settler') return fail('Only settlers found cities');
+    if (unit.owner !== this.current) return fail('Not your turn');
+    const tile = this.tileOf(unit);
+    if (tile.owner !== null && tile.owner !== unit.owner) return fail("Can't settle on someone else's land");
+    if (tile.terrain === 'water' || tile.terrain === 'mountain') return fail("Can't settle here");
+    if (tile.city) return fail('Already a city');
+    if (this.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) {
+      return fail(`Too close to a city (need ${CITY_SPACING}+ hexes)`);
+    }
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  foundCity(unit: Unit): Check {
+    const c = this.foundCheck(unit);
+    if (!c.ok) return c;
+    const tile = this.tileOf(unit);
+    const p = unit.owner;
+    this.units = this.units.filter((u) => u !== unit);
+    tile.owner = p;
+    tile.city = true;
+    tile.improvement = null;
+    for (const n of this.map.neighbors(tile)) {
+      if (n.owner === null && isLand(n)) n.owner = p;
+    }
+    this.invalidate();
+    this.addLog(`${this.players[p].name} founded a city`);
+    this.checkWin();
+    return c;
   }
 
   // ---------- units ----------
@@ -276,21 +306,52 @@ export class GameState {
     if (this.winner !== null) return fail('Game over');
     if (!city.city || city.owner !== p) return fail('Recruit from your own city');
     const stats = UNIT_STATS[type];
+    if (stats.train > 0 && this.trainingAt(city)) return fail('City is already training');
     if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
-    if (!this.spawnTile(city)) return fail('No room around the city');
+    if (stats.train === 0 && !this.spawnTile(city)) return fail('No room around the city');
     if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    const cost = this.unitCost(type, p);
     const gold = this.players[p].gold;
-    return gold >= stats.cost ? { ok: true, cost: stats.cost, reason: '' } : fail(`Need ${stats.cost} gold`, stats.cost);
+    return gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
   }
 
-  recruit(type: UnitType, city: Tile, p: PlayerId = this.current): Unit | null {
+  // Returns the new unit, 'queued' if it needs training time, or null if not allowed.
+  recruit(type: UnitType, city: Tile, p: PlayerId = this.current): Unit | 'queued' | null {
     const c = this.recruitCheck(type, city, p);
     if (!c.ok) return null;
-    const at = this.spawnTile(city)!;
     this.players[p].gold -= c.cost;
+    const stats = UNIT_STATS[type];
+    if (stats.train > 0) {
+      this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: stats.train });
+      return 'queued';
+    }
+    const at = this.spawnTile(city)!;
     const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true };
     this.units.push(unit);
     return unit;
+  }
+
+  // Count down training at the start of the owner's turn; finished units appear ready to act.
+  private advanceTraining(p: PlayerId): void {
+    const keep: Training[] = [];
+    for (const t of this.training) {
+      if (t.owner !== p) {
+        keep.push(t);
+        continue;
+      }
+      const city = this.map.get(t.col, t.row);
+      if (!city || !city.city || city.owner !== p) continue; // city lost: training cancelled
+      t.turnsLeft -= 1;
+      const at = t.turnsLeft <= 0 ? this.spawnTile(city) : null;
+      if (!at) {
+        keep.push(t); // still training, or waiting for room
+        continue;
+      }
+      const stats = UNIT_STATS[t.type];
+      this.units.push({ id: this.nextUnitId++, type: t.type, owner: p, col: at.col, row: at.row, moves: stats.moves, acted: false });
+      if (p === 0) this.addLog(`${stats.name} ready`);
+    }
+    this.training = keep;
   }
 
   private spawnTile(city: Tile): Tile | null {
@@ -402,6 +463,7 @@ export class GameState {
       u.moves = UNIT_STATS[u.type].moves;
       u.acted = false;
     }
+    this.advanceTraining(p);
   }
 
   private addLog(msg: string): void {
@@ -415,6 +477,7 @@ export class GameState {
     const c = this.players[captor];
     l.alive = false;
     this.units = this.units.filter((u) => u.owner !== loser);
+    this.training = this.training.filter((t) => t.owner !== loser);
     for (const t of this.map.tiles) {
       if (t.owner === loser) t.owner = captor;
     }
@@ -494,53 +557,89 @@ export class GameState {
   }
 
   private runAI(p: PlayerId): void {
+    this.aiSettlers(p);
+    this.aiQueueSettler(p);
     for (let i = 0; i < 80 && this.winner === null && this.players[p].alive; i++) {
-      const move = this.pickAIMove(p);
-      if (!move) return;
-      this.perform(move.action, move.tile, p);
+      const tile = this.pickAIClaim(p);
+      if (!tile) return;
+      this.perform('claim', tile, p);
     }
   }
 
-  private pickAIMove(p: PlayerId): { action: Action; tile: Tile } | null {
-    const gold = this.players[p].gold;
-    const owned = this.ownedTiles(p).length;
-    const cities = this.cityCount(p);
+  private wantsSettler(p: PlayerId): boolean {
+    const busy = this.unitsOf(p).some((u) => u.type === 'settler') || this.training.some((t) => t.owner === p && t.type === 'settler');
+    return !busy && this.cityCount(p) < 15;
+  }
 
-    // Best city spot (on owned land, room to grow)
-    let citySpot: Tile | null = null;
-    let cityScore = -1;
-    if (owned >= cities * 7) {
+  private aiQueueSettler(p: PlayerId): void {
+    if (!this.wantsSettler(p)) return;
+    const city = this.cities().find((c) => c.owner === p && this.recruitCheck('settler', c, p).ok);
+    if (city) this.recruit('settler', city, p);
+  }
+
+  // How good a spot is for a new city (higher is better, -1 if not allowed).
+  private settleScore(tile: Tile, p: PlayerId): number {
+    if (tile.terrain === 'water' || tile.terrain === 'mountain' || tile.city) return -1;
+    if (tile.owner !== null && tile.owner !== p) return -1;
+    if (this.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) return -1;
+    let room = 0;
+    for (const n of this.map.neighbors(tile)) {
+      if (n.owner === null && isLand(n) && n.terrain !== 'mountain') room += 1;
+    }
+    return room;
+  }
+
+  private aiSettlers(p: PlayerId): void {
+    for (const unit of this.unitsOf(p).filter((u) => u.type === 'settler')) {
+      const here = this.tileOf(unit);
+      // Nearest good spot (ties broken by more room), measured from the settler.
+      let target: Tile | null = null;
+      let best = -Infinity;
       for (const t of this.map.tiles) {
-        if (t.owner !== p || t.city) continue;
-        const c = this.check('city', t, p);
-        if (!c.ok && c.reason !== `Need ${c.cost} gold`) continue;
-        const room = this.map.neighbors(t).filter((n) => n.owner === null && isLand(n)).length;
-        if (room > cityScore) {
-          cityScore = room;
-          citySpot = t;
+        const sc = this.settleScore(t, p);
+        if (sc < 2) continue;
+        const v = sc - hexDistance(here, t) * 0.8;
+        if (v > best) {
+          best = v;
+          target = t;
         }
       }
-      if (citySpot && cityScore >= 2 && gold >= this.cityCost(p)) return { action: 'city', tile: citySpot };
+      if (!target) {
+        if (this.foundCheck(unit).ok) this.foundCity(unit);
+        continue;
+      }
+      if (target !== here) {
+        const reach = this.reachableFor(unit);
+        let step: Tile | null = null;
+        let d = hexDistance(here, target);
+        for (const t of reach.keys()) {
+          const dt = hexDistance(t, target);
+          if (dt < d) {
+            d = dt;
+            step = t;
+          }
+        }
+        if (step) this.moveUnit(unit, step);
+      }
+      if (this.tileOf(unit) === target && this.foundCheck(unit).ok) this.foundCity(unit);
     }
-    const reserve = citySpot && cityScore >= 2 ? Math.floor(this.cityCost(p) / 2) : 0;
+  }
 
+  private pickAIClaim(p: PlayerId): Tile | null {
+    const gold = this.players[p].gold;
+    const reserve = this.wantsSettler(p) ? Math.floor(this.cityCost(p) / 2) : 0;
     let best: Tile | null = null;
     let bestScore = 0;
     for (const t of this.map.tiles) {
-      if (t.owner === p || !isLand(t)) continue;
+      if (t.owner !== null || !isLand(t)) continue;
       const c = this.check('claim', t, p);
-      if (!c.ok) continue;
-      let score: number;
-      if (t.capital) score = 1000;
-      else if (t.owner !== null && t.city) score = 50;
-      else if (t.owner !== null) score = gold > 40 ? ((YIELD[t.terrain] + 1) / c.cost) * 6 : 0;
-      else score = ((YIELD[t.terrain] + 0.5) / c.cost) * 10;
-      if (!t.capital && gold - c.cost < reserve) continue;
+      if (!c.ok || gold - c.cost < reserve) continue;
+      const score = ((YIELD[t.terrain] + 0.5) / c.cost) * 10;
       if (score > bestScore) {
         bestScore = score;
         best = t;
       }
     }
-    return best ? { action: 'claim', tile: best } : null;
+    return best;
   }
 }

@@ -3,7 +3,7 @@ import { GameState, MAP_SIZES } from './game';
 import type { GameOptions } from './game';
 import { terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
-import type { Unit } from './units';
+import type { Training, Unit } from './units';
 
 const KEY = 'kingdom-save-v3';
 const CITY = 1;
@@ -23,6 +23,7 @@ interface SaveData {
   players: { gold: number; stone: number; claims: number; alive: boolean }[];
   units: Unit[];
   nextUnitId: number;
+  training?: Training[];
   // per tile: [height, owner, flags]
   tiles: [number, PlayerId | null, number][];
 }
@@ -46,6 +47,7 @@ export function saveGame(state: GameState): void {
     players: state.players.map((p) => ({ gold: p.gold, stone: p.stone, claims: p.claims, alive: p.alive })),
     units: state.units,
     nextUnitId: state.nextUnitId,
+    training: state.training,
     tiles: state.map.tiles.map((t) => [
       t.height,
       t.owner,
@@ -118,6 +120,7 @@ export function loadGame(): GameState | null {
     state.log = data.log;
     state.units = (data.units ?? []).map((u) => ({ ...u }));
     state.nextUnitId = data.nextUnitId ?? state.units.length + 1;
+    state.training = (data.training ?? []).map((t) => ({ ...t }));
     state.invalidate();
     return state;
   } catch {

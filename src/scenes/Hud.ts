@@ -3,7 +3,7 @@
 import type { GameState } from '../world/game';
 import { WIN_SHARE } from '../world/game';
 
-export type BarMode = 'select' | 'claim' | 'city';
+export type BarMode = 'select' | 'claim';
 
 export interface HudHandlers {
   onMode(mode: BarMode): void;
@@ -29,7 +29,6 @@ export interface PanelModel {
 const MODES: { id: BarMode; label: string; key: string }[] = [
   { id: 'select', label: 'Select', key: '1' },
   { id: 'claim', label: 'Claim land', key: '2' },
-  { id: 'city', label: 'Found city', key: '3' },
 ];
 
 const CSS = `
@@ -224,9 +223,10 @@ export class Hud {
       : `<b>Goal:</b> take every rival capital or hold ${Math.round(WIN_SHARE * 100)}% of the land. Lose your capital and it's over.`;
     this.help.innerHTML =
       `${goal}<br><br>` +
-      `Click your city to recruit a <b>Builder</b>. Select a builder, click a lit hex to move, then pick a job: ` +
-      `farms (food), mines (stone), roads (faster moves), or raise/lower the land.<br><br>` +
-      `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last, so found new cities to expand.<br><br>` +
+      `Click your city to recruit a <b>Builder</b> or train a <b>Settler</b> (takes 3 turns). ` +
+      `Select a unit, click a lit hex to move. Builders do one job per turn: farms (food), mines (stone), roads, or raise/lower land. ` +
+      `Settlers found new cities 3+ hexes from any other city.<br><br>` +
+      `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last.<br><br>` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 
     for (const [id, b] of this.modeBtns) b.classList.toggle('k-on', id === mode);

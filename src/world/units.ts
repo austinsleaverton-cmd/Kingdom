@@ -2,18 +2,20 @@
 import type { WorldMap } from './map';
 import type { PlayerId, Terrain, Tile } from './tile';
 
-export type UnitType = 'builder';
+export type UnitType = 'builder' | 'settler';
 
 export interface UnitStats {
   name: string;
   letter: string; // shown on the map token
-  cost: number; // gold to recruit
+  cost: number; // gold to recruit (settlers use the scaling city cost instead)
   food: number; // food upkeep per turn
   moves: number;
+  train: number; // turns in the city before it appears (0 = right away)
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
-  builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2 },
+  builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0 },
+  settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3 },
 };
 
 export interface Unit {
@@ -24,6 +26,15 @@ export interface Unit {
   row: number;
   moves: number; // moves left this turn
   acted: boolean; // used its action this turn
+}
+
+// A unit being trained in a city.
+export interface Training {
+  type: UnitType;
+  owner: PlayerId;
+  col: number; // city tile
+  row: number;
+  turnsLeft: number;
 }
 
 export type Job = 'farm' | 'mine' | 'road' | 'raise' | 'lower';
