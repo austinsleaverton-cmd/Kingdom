@@ -1,7 +1,7 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { CITY_REGEN, CLAIM_COST, MAX_HEIGHT, MAX_WALLS, WALL_STONE, YIELD, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { CITY_REGEN, CLAIM_COST, GROWTH_NEED, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import type { PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, reachable } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
@@ -108,6 +108,8 @@ export const KNIGHT_VS_WALLS = 0.5; // knights are bad at breaking walls
 export const SIEGE_MULT = 1.5; // troops hit cities harder than units
 export const CAPTURE_HP = 0.5; // captured cities start at this share of max hp
 export const HOME_HEAL = 0.25; // units on their own land heal this share of max HP per turn
+export const BIG_CLAIM_RADIUS = 4; // claim range once a city reaches level 3
+export const GROWTH_SHARE_CAP = 3; // most spare food a single city can use for growth per turn
 
 const CITY_NAMES = [
   'Oakvale', 'Stonebridge', 'Riverford', 'Highmoor', 'Ashford', 'Brightwater', 'Eldermere', 'Foxhollow',
@@ -202,6 +204,7 @@ export class GameState {
       gold += YIELD[t.terrain];
       if (t.capital) gold += CAPITAL_INCOME;
       else if (t.city) gold += CITY_INCOME;
+      if (t.city) gold += cityLevel(t) - 1; // bigger cities pay more
     }
     return gold;
   }
@@ -212,6 +215,7 @@ export class GameState {
     for (const t of this.ownedTiles(p)) {
       if (t.capital) food += CAPITAL_FOOD;
       else if (t.city) food += CITY_FOOD;
+      if (t.city) food += cityLevel(t) - 1;
       if (t.improvement === 'farm') food += FARM_FOOD;
     }
     return food;
@@ -335,8 +339,42 @@ export class GameState {
     return this.map.tiles.filter((t) => t.home === i && t.owner === city.owner);
   }
 
+  // How far out a city can own land: 3 hexes, 4 once it reaches level 3
+  claimRadius(city: Tile): number {
+    return cityLevel(city) >= 3 ? BIG_CLAIM_RADIUS : CLAIM_RADIUS;
+  }
+
   inCityRange(tile: Tile, city: Tile): boolean {
-    return hexDistance(tile, city) <= CLAIM_RADIUS;
+    return hexDistance(tile, city) <= this.claimRadius(city);
+  }
+
+  // ---------- city growth ----------
+
+  // Growth a city gains next turn: 1 plus its share of your spare food (capped)
+  growthRate(city: Tile): number {
+    if (city.owner === null) return 0;
+    const mine = this.cities().filter((c) => c.owner === city.owner).length;
+    const spare = Math.max(0, this.foodMade(city.owner) - this.foodUsed(city.owner));
+    return 1 + Math.min(GROWTH_SHARE_CAP, mine > 0 ? spare / mine : 0);
+  }
+
+  growthNeed(city: Tile): number {
+    const lvl = cityLevel(city);
+    return lvl >= MAX_LEVEL ? 0 : GROWTH_NEED[lvl - 1];
+  }
+
+  private growCities(p: PlayerId): void {
+    for (const c of this.cities()) {
+      if (c.owner !== p || cityLevel(c) >= MAX_LEVEL || this.besieged(c)) continue;
+      c.level = cityLevel(c);
+      c.growth = Math.round((c.growth + this.growthRate(c)) * 10) / 10;
+      const need = this.growthNeed(c);
+      if (c.growth < need) continue;
+      c.growth = Math.round((c.growth - need) * 10) / 10;
+      c.level += 1;
+      c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
+      if (p === 0) this.addLog(`${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
+    }
   }
 
   // Which of p's cities would get this tile: the given city if it qualifies, else the nearest one
@@ -389,7 +427,7 @@ export class GameState {
   }
 
   inClaimRange(tile: Tile, p: PlayerId): boolean {
-    return this.cities().some((c) => c.owner === p && hexDistance(c, tile) <= CLAIM_RADIUS);
+    return this.cities().some((c) => c.owner === p && hexDistance(c, tile) <= this.claimRadius(c));
   }
 
   // Cached list of city tiles; cleared whenever something that can change cities happens.
@@ -430,7 +468,8 @@ export class GameState {
         if (!isLand(tile)) return fail("Can't claim water");
         if (city) {
           const d = hexDistance(tile, city);
-          if (d > CLAIM_RADIUS) return fail(`Too far: ${d} hexes from this city (max ${CLAIM_RADIUS}). Send a settler`);
+          const max = this.claimRadius(city);
+          if (d > max) return fail(`Too far: ${d} hexes from this city (max ${max}). Send a settler`);
           if (!this.claimingCity(tile, p, city)) return fail("Must touch this city's land");
           return withGold(this.claimCost(tile, p));
         }
@@ -491,6 +530,8 @@ export class GameState {
     tile.home = this.tileIndex(tile);
     tile.city = true;
     tile.improvement = null;
+    tile.level = 1;
+    tile.growth = 0;
     tile.hp = cityMaxHp(tile);
     tile.walls = 0;
     tile.shield = 0;
@@ -529,7 +570,9 @@ export class GameState {
     this.players[p].gold -= c.cost;
     const stats = UNIT_STATS[type];
     if (stats.train > 0) {
-      this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: stats.train });
+      // Metropolis (level 5) trains a turn faster
+      const turns = Math.max(1, stats.train - (cityLevel(city) >= MAX_LEVEL ? 1 : 0));
+      this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: turns });
       return 'queued';
     }
     const at = this.spawnTile(city)!;
@@ -673,6 +716,8 @@ export class GameState {
     const wasCapital = city.capital;
     city.owner = captor;
     city.capital = false;
+    city.level = Math.max(1, cityLevel(city) - 1); // war shrinks a city
+    city.growth = 0;
     city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
     city.shield = 0;
     this.invalidate();
@@ -821,6 +866,7 @@ export class GameState {
     const mult = this.players[p].isAI ? DIFFICULTY[this.options.difficulty].income : 1;
     this.players[p].gold += Math.round(this.income(p) * mult);
     this.players[p].stone += this.stoneIncome(p);
+    this.growCities(p);
     // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
       if (t.owner !== p || this.besieged(t)) continue;
@@ -922,6 +968,7 @@ export class GameState {
       best.home = this.tileIndex(best);
       best.city = true;
       best.capital = true;
+      best.level = 1;
       best.hp = cityMaxHp(best);
       for (const n of this.map.neighbors(best)) {
         if (n.terrain === 'water') {

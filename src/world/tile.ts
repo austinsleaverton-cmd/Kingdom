@@ -19,6 +19,8 @@ export interface Tile {
   hp: number;
   walls: number; // wall level 0-3
   shield: number; // current wall HP, absorbs damage before hp
+  level: number; // city size 1-5 (0 for non-cities)
+  growth: number; // progress toward the next level
 }
 
 export const MAX_HEIGHT = 5;
@@ -29,8 +31,18 @@ export const MAX_WALLS = 3;
 export const WALL_STONE = [10, 20, 30]; // stone for wall level 1, 2, 3
 export const CITY_REGEN = 10; // hp and shield regained per turn
 
+// City growth: spare food fills a bar, a full bar is a new level
+export const MAX_LEVEL = 5;
+export const GROWTH_NEED = [10, 25, 45, 70]; // growth needed to go from level 1->2, 2->3, 3->4, 4->5
+export const LEVEL_NAMES = ['Village', 'Town', 'City', 'Large City', 'Metropolis'];
+export const LEVEL_HP = 10; // extra max hp per level above 1
+
+export function cityLevel(tile: Tile): number {
+  return Math.max(1, tile.level);
+}
+
 export function cityMaxHp(tile: Tile): number {
-  return tile.capital ? CAPITAL_HP : CITY_HP;
+  return (tile.capital ? CAPITAL_HP : CITY_HP) + (cityLevel(tile) - 1) * LEVEL_HP;
 }
 
 export function shieldMax(tile: Tile): number {
@@ -69,6 +81,8 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.hp = 0;
     tile.walls = 0;
     tile.shield = 0;
+    tile.level = 0;
+    tile.growth = 0;
   }
 }
 
@@ -105,5 +119,7 @@ export function makeTile(col: number, row: number, height: number): Tile {
     hp: 0,
     walls: 0,
     shield: 0,
+    level: 0,
+    growth: 0,
   };
 }
