@@ -3,7 +3,7 @@ import Phaser from 'phaser';
 import { GameState } from '../world/game';
 import type { Check, GameOptions } from '../world/game';
 import { loadGame, saveGame, saveSummary } from '../world/save';
-import { YIELD } from '../world/tile';
+import { MAX_WALLS, YIELD, cityMaxHp, shieldMax } from '../world/tile';
 import type { Terrain, Tile } from '../world/tile';
 import { JOBS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
@@ -405,6 +405,7 @@ export class MapScene extends Phaser.Scene {
       `${owner}${extras ? ` · ${extras}` : ''}`,
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
+    if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
     if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name}`);
     let status = '';
     if (hc) {
@@ -447,7 +448,7 @@ export class MapScene extends Phaser.Scene {
           label: j.label,
           key: j.key,
           enabled: c.ok,
-          hint: c.ok ? (terraform ? 'pick a hex' : `${c.cost}g`) : c.reason,
+          hint: c.ok ? (terraform ? 'pick a hex' : j.id === 'walls' ? this.wallHint(state, here, c.cost) : `${c.cost}g`) : c.reason,
           active: this.mode === j.id,
           onClick: () => this.doJob(j.id),
         });
@@ -471,6 +472,12 @@ export class MapScene extends Phaser.Scene {
           onClick: () => this.recruit(r.type),
         });
       }
+      lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}`);
+      lines.push(
+        tile.walls
+          ? `Walls level ${tile.walls}/${MAX_WALLS}: shield ${tile.shield}/${shieldMax(tile)}`
+          : 'No walls: put a builder here to build them (needs stone)',
+      );
       lines.push(`Food ${state.foodUsed(0)}/${state.foodMade(0)} used`);
       const queued = state.trainingAt(tile);
       if (queued) {
@@ -495,6 +502,11 @@ export class MapScene extends Phaser.Scene {
       lines.push(owner, `Height ${tile.height}${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
     }
     return { title, lines, buttons };
+  }
+
+  private wallHint(state: GameState, city: Tile, gold: number): string {
+    const free = state.options.freeBuild;
+    return free ? 'free' : `${gold}g + ${state.wallStoneCost(city)} stone`;
   }
 
   // Raise/lower is valid if any target (builder tile or neighbor) works.
@@ -604,8 +616,33 @@ export class MapScene extends Phaser.Scene {
         g.lineBetween(a.x, a.y, b.x, b.y);
       }
 
-      if (t.city) this.drawCity(g, x, y, color, t.capital);
+      if (t.city) {
+        if (t.walls > 0) {
+          // stone ring, thicker per level
+          g.lineStyle(1.5 + t.walls * 1.5, 0x9ca3af, 1);
+          g.strokePoints(hexCorners(x, y, SIZE - 4), true);
+        }
+        this.drawCity(g, x, y, color, t.capital);
+        this.drawCityBars(g, t, x, y);
+      }
     }
+  }
+
+  // Health bar (only when damaged) with the wall shield bar above it.
+  private drawCityBars(g: Phaser.GameObjects.Graphics, t: Tile, x: number, y: number): void {
+    const w = 30;
+    const left = x - w / 2;
+    let barY = y + 18;
+    const bar = (value: number, max: number, color: number) => {
+      g.fillStyle(0x111111, 0.85);
+      g.fillRect(left - 1, barY - 1, w + 2, 5);
+      g.fillStyle(color, 1);
+      g.fillRect(left, barY, Math.max(0, (value / max) * w), 3);
+      barY -= 5;
+    };
+    const max = cityMaxHp(t);
+    if (t.hp < max) bar(t.hp, max, t.hp / max > 0.5 ? 0x22c55e : t.hp / max > 0.25 ? 0xeab308 : 0xef4444);
+    if (t.walls > 0) bar(t.shield, shieldMax(t), 0x60a5fa);
   }
 
   private drawOverlay(state: GameState): void {

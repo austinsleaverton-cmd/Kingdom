@@ -1,7 +1,7 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { CLAIM_COST, MAX_HEIGHT, YIELD, improvementFits, isLand } from './tile';
+import { CITY_REGEN, CLAIM_COST, MAX_HEIGHT, MAX_WALLS, WALL_STONE, YIELD, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import type { PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, reachable } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
@@ -291,6 +291,9 @@ export class GameState {
     tile.owner = p;
     tile.city = true;
     tile.improvement = null;
+    tile.hp = cityMaxHp(tile);
+    tile.walls = 0;
+    tile.shield = 0;
     for (const n of this.map.neighbors(tile)) {
       if (n.owner === null && isLand(n)) n.owner = p;
     }
@@ -397,6 +400,14 @@ export class GameState {
         if (target.city) return fail('Cities already count as roads');
         if (target.road) return fail('Already a road');
         break;
+      case 'walls': {
+        if (!target.city) return fail('Walls go on a city: stand the builder on it');
+        if (target.walls >= MAX_WALLS) return fail('Walls are maxed');
+        const stone = this.wallStoneCost(target);
+        const free = p === 0 && this.options.freeBuild;
+        if (!free && this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
+        break;
+      }
       case 'raise':
         if (target.height >= MAX_HEIGHT) return fail('Already a mountain');
         if (target.city && target.height + 1 >= MAX_HEIGHT) return fail("Cities can't sit on mountains");
@@ -412,6 +423,10 @@ export class GameState {
     return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
   }
 
+  wallStoneCost(city: Tile): number {
+    return WALL_STONE[Math.min(city.walls, MAX_WALLS - 1)];
+  }
+
   doJob(unit: Unit, job: Job, target: Tile): Check {
     const c = this.jobCheck(unit, job, target);
     if (!c.ok) return c;
@@ -424,6 +439,11 @@ export class GameState {
         break;
       case 'road':
         target.road = true;
+        break;
+      case 'walls':
+        if (!(unit.owner === 0 && this.options.freeBuild)) this.players[unit.owner].stone -= this.wallStoneCost(target);
+        target.walls += 1;
+        target.shield = shieldMax(target); // new walls go up at full strength
         break;
       case 'raise':
         this.map.raiseHeight(target);
@@ -459,6 +479,12 @@ export class GameState {
   private startTurn(p: PlayerId): void {
     this.players[p].gold += this.income(p);
     this.players[p].stone += this.stoneIncome(p);
+    // Cities heal and walls rebuild a little every turn.
+    for (const t of this.cities()) {
+      if (t.owner !== p) continue;
+      t.hp = Math.min(cityMaxHp(t), t.hp + CITY_REGEN);
+      t.shield = Math.min(shieldMax(t), t.shield + CITY_REGEN);
+    }
     for (const u of this.unitsOf(p)) {
       u.moves = UNIT_STATS[u.type].moves;
       u.acted = false;
@@ -545,6 +571,7 @@ export class GameState {
       best.owner = pl.id;
       best.city = true;
       best.capital = true;
+      best.hp = cityMaxHp(best);
       for (const n of this.map.neighbors(best)) {
         if (n.terrain === 'water') {
           n.height = 1;

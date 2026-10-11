@@ -14,9 +14,27 @@ export interface Tile {
   capital: boolean;
   improvement: Improvement | null;
   road: boolean;
+  // City only (0 elsewhere)
+  hp: number;
+  walls: number; // wall level 0-3
+  shield: number; // current wall HP, absorbs damage before hp
 }
 
 export const MAX_HEIGHT = 5;
+export const CITY_HP = 100;
+export const CAPITAL_HP = 150;
+export const WALL_SHIELD = 40; // shield per wall level
+export const MAX_WALLS = 3;
+export const WALL_STONE = [10, 20, 30]; // stone for wall level 1, 2, 3
+export const CITY_REGEN = 10; // hp and shield regained per turn
+
+export function cityMaxHp(tile: Tile): number {
+  return tile.capital ? CAPITAL_HP : CITY_HP;
+}
+
+export function shieldMax(tile: Tile): number {
+  return tile.walls * WALL_SHIELD;
+}
 
 // Height 0-5: 0 water, 1 sand, 2-3 grass, 4 hills, 5 mountain
 export function terrainFromHeight(height: number): Terrain {
@@ -46,6 +64,9 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.owner = null;
     tile.city = false;
     tile.capital = false;
+    tile.hp = 0;
+    tile.walls = 0;
+    tile.shield = 0;
   }
 }
 
@@ -78,5 +99,8 @@ export function makeTile(col: number, row: number, height: number): Tile {
     capital: false,
     improvement: null,
     road: false,
+    hp: 0,
+    walls: 0,
+    shield: 0,
   };
 }

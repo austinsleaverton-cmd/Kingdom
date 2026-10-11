@@ -37,17 +37,18 @@ export interface Training {
   turnsLeft: number;
 }
 
-export type Job = 'farm' | 'mine' | 'road' | 'raise' | 'lower';
+export type Job = 'farm' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm', key: 'F' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
+  { id: 'walls', label: 'Build walls', key: 'W' },
   { id: 'raise', label: 'Raise land', key: 'U' },
   { id: 'lower', label: 'Lower land', key: 'D' },
 ];
 
-export const JOB_COST: Record<Job, number> = { farm: 5, mine: 8, road: 2, raise: 3, lower: 3 };
+export const JOB_COST: Record<Job, number> = { farm: 5, mine: 8, road: 2, walls: 5, raise: 3, lower: 3 };
 
 const TERRAIN_MOVE: Record<Terrain, number> = {
   water: Infinity,

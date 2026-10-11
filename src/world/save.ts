@@ -1,7 +1,7 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
 import { GameState, MAP_SIZES } from './game';
 import type { GameOptions } from './game';
-import { terrainFromHeight } from './tile';
+import { cityMaxHp, shieldMax, terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
 import type { Training, Unit } from './units';
 
@@ -24,8 +24,8 @@ interface SaveData {
   units: Unit[];
   nextUnitId: number;
   training?: Training[];
-  // per tile: [height, owner, flags]
-  tiles: [number, PlayerId | null, number][];
+  // per tile: [height, owner, flags, hp, walls, shield] (last three only for cities)
+  tiles: [number, PlayerId | null, number, number?, number?, number?][];
 }
 
 export interface SaveSummary {
@@ -48,15 +48,15 @@ export function saveGame(state: GameState): void {
     units: state.units,
     nextUnitId: state.nextUnitId,
     training: state.training,
-    tiles: state.map.tiles.map((t) => [
-      t.height,
-      t.owner,
-      (t.city ? CITY : 0) |
+    tiles: state.map.tiles.map((t) => {
+      const flags =
+        (t.city ? CITY : 0) |
         (t.capital ? CAPITAL : 0) |
         (t.road ? ROAD : 0) |
         (t.improvement === 'farm' ? FARM : 0) |
-        (t.improvement === 'mine' ? MINE : 0),
-    ]),
+        (t.improvement === 'mine' ? MINE : 0);
+      return t.city ? [t.height, t.owner, flags, t.hp, t.walls, t.shield] : [t.height, t.owner, flags];
+    }),
   };
   try {
     localStorage.setItem(KEY, JSON.stringify(data));
@@ -95,7 +95,7 @@ export function loadGame(): GameState | null {
     const state = new GameState(data.options);
     if (data.tiles.length !== state.map.tiles.length) return null;
     state.map.tiles.forEach((t, i) => {
-      const [height, owner, flags] = data.tiles[i];
+      const [height, owner, flags, hp, walls, shield] = data.tiles[i];
       t.height = height;
       t.terrain = terrainFromHeight(height);
       t.owner = owner;
@@ -103,6 +103,9 @@ export function loadGame(): GameState | null {
       t.capital = (flags & CAPITAL) !== 0;
       t.road = (flags & ROAD) !== 0;
       t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : null;
+      t.walls = t.city ? (walls ?? 0) : 0;
+      t.hp = t.city ? (hp ?? cityMaxHp(t)) : 0;
+      t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];
