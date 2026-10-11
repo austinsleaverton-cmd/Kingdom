@@ -459,6 +459,14 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  private pillage(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit) return;
+    if (!state.pillage(unit).ok) return this.fail();
+    this.redraw();
+  }
+
   private foundCity(): void {
     const state = this.state;
     const unit = this.selectedUnit;
@@ -607,6 +615,10 @@ export class MapScene extends Phaser.Scene {
         this.foundCity();
         return;
       }
+      if (key === 'L' && unit && UNIT_STATS[unit.type].military) {
+        this.pillage();
+        return;
+      }
       switch (key) {
         case '1': this.setMode('select'); break;
         case 'N':
@@ -717,7 +729,7 @@ export class MapScene extends Phaser.Scene {
     const home = state.homeCity(tile);
     if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]})`);
     else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
-    if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
+    if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}${tile.wallTurns ? ` · walls going up (${tile.wallTurns})` : ''}`);
     if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
     let status = '';
     if (hc) {
@@ -801,6 +813,20 @@ export class MapScene extends Phaser.Scene {
       const c = state.foundCheck(unit);
       actions.push({ label: 'Found city here', key: 'C', enabled: c.ok, hint: c.ok ? 'uses the settler' : c.reason, onClick: () => this.foundCity() });
     }
+    if (stats.military && unit.owner === this.me) {
+      const c = state.pillageCheck(unit);
+      const loot = state.pillageTarget(here);
+      // Only worth showing on enemy land
+      if (here.owner !== null && here.owner !== unit.owner && !here.city) {
+        actions.push({
+          label: loot ? `Pillage ${loot.name}` : 'Pillage',
+          key: 'L',
+          enabled: c.ok,
+          hint: c.ok && loot ? `+${loot.gold}g, uses its attack` : c.reason,
+          onClick: () => this.pillage(),
+        });
+      }
+    }
     if (unit.type === 'builder') {
       for (const j of JOBS) {
         const terraform = j.id === 'raise' || j.id === 'lower';
@@ -866,20 +892,27 @@ export class MapScene extends Phaser.Scene {
 
     const wc = state.wallCheck(city, this.me);
     const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
+    const wt = state.wallTurnsFor(city);
+    const turnsTxt = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
+    const wallLines = [
+      city.walls
+        ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first`
+        : 'No walls yet. Walls cost stone (mines make it).',
+    ];
+    if (city.wallTurns > 0) wallLines.push(`Building walls level ${city.walls + 1}: ${turnsTxt(city.wallTurns)} left`);
     sections.push({
       heading: 'Defense',
-      summary: city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls',
-      lines: [
-        city.walls
-          ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first`
-          : 'No walls yet. Walls cost stone (mines make it).',
-      ],
+      summary: city.wallTurns > 0 ? `walls ${city.walls + 1} in ${city.wallTurns}` : city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls',
+      lines: wallLines,
       buttons: [
         {
-          label: city.walls >= MAX_WALLS ? 'Walls maxed' : city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
+          label:
+            city.walls >= MAX_WALLS ? 'Walls maxed' : city.wallTurns > 0 ? `Building walls ${city.walls + 1}` : city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
           key: 'W',
           enabled: wc.ok,
-          hint: wc.ok ? (state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`) : city.walls >= MAX_WALLS ? '' : wc.reason,
+          hint: wc.ok
+            ? `${state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`} · ${turnsTxt(wt)}`
+            : city.walls >= MAX_WALLS ? '' : wc.reason,
           onClick: () => this.buildWalls(city),
         },
       ],
