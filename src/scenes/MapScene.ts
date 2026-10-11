@@ -621,6 +621,7 @@ export class MapScene extends Phaser.Scene {
     const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
     sections.push({
       heading: 'Defense',
+      summary: city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls',
       lines: [
         city.walls
           ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first`
@@ -628,10 +629,10 @@ export class MapScene extends Phaser.Scene {
       ],
       buttons: [
         {
-          label: city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
+          label: city.walls >= MAX_WALLS ? 'Walls maxed' : city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
           key: 'W',
           enabled: wc.ok,
-          hint: wc.ok ? (state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`) : wc.reason,
+          hint: wc.ok ? (state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`) : city.walls >= MAX_WALLS ? '' : wc.reason,
           onClick: () => this.buildWalls(city),
         },
       ],
@@ -639,6 +640,7 @@ export class MapScene extends Phaser.Scene {
 
     sections.push({
       heading: 'Land',
+      summary: `${state.cityLand(city).length} tiles${open > 0 ? ` · ${open} open` : ''}`,
       lines: claiming
         ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
         : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'}`],
@@ -676,7 +678,14 @@ export class MapScene extends Phaser.Scene {
     const trainLines = queued
       ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
       : [`One unit at a time · food left: ${state.foodMade(0) - state.foodUsed(0)}`];
-    sections.push({ heading: 'Train', lines: trainLines, buttons: train });
+    // While training, only Builder (instant) is still possible, so the list shrinks to that
+    const trainButtons = queued ? train.filter((b) => b.enabled) : train;
+    sections.push({
+      heading: 'Train',
+      summary: queued ? `${UNIT_STATS[queued.type].name} · ${queued.turnsLeft}t` : 'ready',
+      lines: trainLines,
+      buttons: trainButtons,
+    });
 
     const here = state.unitAt(city);
     if (here && here.owner === 0) {

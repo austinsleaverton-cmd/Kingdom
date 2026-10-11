@@ -35,6 +35,7 @@ export interface PanelBar {
 
 export interface PanelSection {
   heading?: string;
+  summary?: string; // shown next to the heading when the section is folded
   bars?: PanelBar[];
   lines?: string[];
   buttons?: PanelButton[];
@@ -68,11 +69,14 @@ const CSS = `
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-.k-sel { bottom: 70px; left: 12px; width: 250px; }
+.k-sel { bottom: 70px; left: 12px; width: 250px; max-height: calc(100vh - 100px); overflow-y: auto; }
 .k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 4px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
 .k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 6px; margin-top: 6px; }
 .k-sel .k-sec:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+.k-sel h4.k-fold { display: flex; justify-content: space-between; cursor: pointer; user-select: none; }
+.k-sel h4.k-fold:hover { color: #cbd5e1; }
+.k-sel h4.k-fold small { text-transform: none; letter-spacing: 0; font-weight: 400; color: #9ca3af; }
 .k-sel h4 { margin: 0 0 4px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; font-weight: 600; }
 .k-meter { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #bbb; margin: 2px 0; }
 .k-meter span:first-child { width: 44px; }
@@ -121,7 +125,7 @@ const CSS = `
   .k-help { max-width: 46vw; }
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
-  .k-sel { bottom: 120px; width: 210px; }
+  .k-sel { bottom: 120px; width: 210px; max-height: calc(100vh - 150px); }
   .k-idle { bottom: 120px; }
 }
 `;
@@ -190,6 +194,7 @@ export class Hud {
   private selBox: Collapsible;
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
   private idle: HTMLDivElement;
+  private prefs: Record<string, boolean>; // collapsed panels and panel sections
 
   constructor(handlers: HudHandlers) {
     const style = document.createElement('style');
@@ -200,6 +205,7 @@ export class Hud {
     document.body.appendChild(this.root);
 
     const prefs = loadCollapsed();
+    this.prefs = prefs;
 
     this.statsBox = new Collapsible('k-panel k-stats', 'stats', false, prefs);
     this.stats = this.statsBox.body;
@@ -346,10 +352,23 @@ export class Hud {
     }
     for (const sec of model.sections) {
       const box = el('k-sec');
+      // Sections with a heading can be folded; the choice is remembered per heading
+      const key = sec.heading ? `sec:${sec.heading}` : '';
+      const folded = key !== '' && this.prefs[key] === true;
       if (sec.heading) {
         const h = document.createElement('h4');
-        h.textContent = sec.heading;
+        h.className = 'k-fold';
+        h.innerHTML = `<span>${folded ? '\u25B8' : '\u25BE'} ${escape(sec.heading)}</span>${folded && sec.summary ? `<small>${escape(sec.summary)}</small>` : ''}`;
+        h.onclick = () => {
+          this.prefs[key] = !folded;
+          saveCollapsed(this.prefs);
+          this.showPanel(model);
+        };
         box.appendChild(h);
+      }
+      if (folded) {
+        this.sel.appendChild(box);
+        continue;
       }
       for (const bar of sec.bars ?? []) {
         const row = el('k-meter');
