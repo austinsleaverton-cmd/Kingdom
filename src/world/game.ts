@@ -3,7 +3,7 @@ import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
 import { CITY_REGEN, CLAIM_COST, GROWTH_NEED, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import type { PlayerId, Tile } from './tile';
-import { JOB_COST, UNIT_STATS, reachable } from './units';
+import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { runAI } from './ai';
 
@@ -97,7 +97,7 @@ export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
 export const CAPITAL_INCOME = 5;
 export const WIN_SHARE = 0.6;
-export const CLAIM_RADIUS = 3; // a city can only own land this many hexes (or fewer) away
+export const CLAIM_RADIUS = 3; // can only buy land this many hexes (or fewer) from one of your cities
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
 export const CITY_SPACING = 3; // cities must be at least this many hexes apart
@@ -118,6 +118,17 @@ const CITY_NAMES = [
   'Amberlee', 'Bramblegate', 'Copperhill', 'Dunmore', 'Emberfall', 'Frostford', 'Goldenrod', 'Hawksmoor',
   'Ivyreach', 'Juniper', 'Kestrel Rock', 'Lindenholm', 'Marshgate', 'Nettlefield', 'Oxbow', 'Ravenhold',
 ];
+
+// A planned multi-turn move. turnAt[i] = which turn (0 = this one) the unit reaches path[i].
+export interface RoutePlan {
+  ok: boolean;
+  reason: string;
+  path: Tile[];
+  turnAt: number[];
+  turns: number; // how many turns of walking
+  nextTo: boolean; // ends next to the target (a unit or an enemy city) instead of on it
+  arrived: boolean; // already there
+}
 
 export interface AttackPreview {
   ok: boolean;
@@ -271,12 +282,13 @@ export class GameState {
   idleUnits(p: PlayerId): Unit[] {
     if (p !== this.current) return [];
     return this.unitsOf(p).filter(
-      (u) => !u.hold && !u.acted && u.moves === UNIT_STATS[u.type].moves && this.reachableFor(u).size > 0,
+      (u) => !u.hold && !u.goal && !u.acted && u.moves === UNIT_STATS[u.type].moves && this.reachableFor(u).size > 0,
     );
   }
 
   setHold(unit: Unit, hold: boolean): void {
     unit.hold = hold;
+    if (hold) this.clearRoute(unit);
   }
 
   besieged(city: Tile): boolean {
@@ -611,10 +623,12 @@ export class GameState {
     return this.map.neighbors(city).find((n) => isLand(n) && n.owner === city.owner && !this.unitAt(n)) ?? null;
   }
 
-  moveUnit(unit: Unit, dest: Tile): boolean {
+  // keepRoute: a step of a planned route (a manual move cancels the route)
+  moveUnit(unit: Unit, dest: Tile, keepRoute = false): boolean {
     if (this.winner !== null) return false;
     const left = this.reachableFor(unit).get(dest);
     if (left === undefined) return false;
+    if (!keepRoute) this.clearRoute(unit);
     unit.col = dest.col;
     unit.row = dest.row;
     unit.moves = left;
@@ -622,6 +636,125 @@ export class GameState {
     // Walking into a destroyed enemy city takes it.
     if (dest.city && this.isEnemy(dest.owner, unit.owner) && dest.hp <= 0) this.captureCity(dest, unit.owner);
     return true;
+  }
+
+  // ---------- multi-turn routes ----------
+  // A unit with a goal walks there by itself at the start of each of your turns.
+  // The path is re-planned every turn, so it reacts to whatever moved in the way.
+
+  // Enemy units and standing enemy cities block planning. Your own units are ignored
+  // (they usually move on) unless ownBlock is set, which is used after waiting too long.
+  private routeBlocker(unit: Unit, ownBlock: boolean): (t: Tile) => boolean {
+    const canCapture = UNIT_STATS[unit.type].canCapture === true;
+    return (t) => {
+      const u = this.unitAt(t);
+      if (u && u !== unit && (ownBlock || u.owner !== unit.owner)) return true;
+      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture;
+      return false;
+    };
+  }
+
+  planRoute(unit: Unit, dest: Tile, ownBlock = false): RoutePlan {
+    const fail = (reason: string, arrived = false): RoutePlan => ({ ok: false, reason, path: [], turnAt: [], turns: 0, nextTo: false, arrived });
+    const from = this.tileOf(unit);
+    if (dest === from) return fail('Already here', true);
+    if (!isLand(dest)) return fail("Can't cross water");
+    const blocked = this.routeBlocker(unit, ownBlock);
+    const taken = (t: Tile) => {
+      const u = this.unitAt(t);
+      return !!u && u !== unit;
+    };
+    // Heading for a unit or an enemy city: stop on the best tile next to it (never attacks by itself)
+    const nextTo = taken(dest) || blocked(dest);
+    const goals = nextTo
+      ? new Set(this.map.neighbors(dest).filter((n) => n === from || (isLand(n) && !blocked(n) && !taken(n))))
+      : new Set([dest]);
+    const path = findPath(this.map, from, goals, blocked);
+    if (!path) return fail('No way to get there');
+    if (!path.length) return fail('Already next to it', true);
+    const turnAt = routeTurns(unit, path, from);
+    return { ok: true, reason: '', path, turnAt, turns: new Set(turnAt).size, nextTo, arrived: false };
+  }
+
+  // Give the unit a goal and walk the first part right away.
+  setRoute(unit: Unit, dest: Tile): RoutePlan {
+    const plan = this.planRoute(unit, dest);
+    if (!plan.ok || unit.owner !== this.current || this.winner !== null) return plan;
+    unit.goal = { col: dest.col, row: dest.row };
+    unit.waited = 0;
+    unit.hold = false;
+    this.followRoute(unit, true);
+    return plan;
+  }
+
+  clearRoute(unit: Unit): void {
+    unit.goal = undefined;
+    unit.waited = undefined;
+  }
+
+  // The rest of the unit's current route (null = none or no way through right now)
+  routeLeft(unit: Unit): RoutePlan | null {
+    if (!unit.goal) return null;
+    const dest = this.map.get(unit.goal.col, unit.goal.row);
+    if (!dest) return null;
+    const plan = this.planRoute(unit, dest, (unit.waited ?? 0) >= 2);
+    return plan.ok ? plan : null;
+  }
+
+  private enemiesNear(unit: Unit): Unit[] {
+    const here = this.tileOf(unit);
+    return this.units.filter(
+      (e) => UNIT_STATS[e.type].military && this.isEnemy(e.owner, unit.owner) && hexDistance(this.tileOf(e), here) <= 2,
+    );
+  }
+
+  // manual: just set by the player, so enemies already in sight don't stop it (only new ones)
+  private followRoute(unit: Unit, manual: boolean): 'moved' | 'blocked' | 'done' {
+    const g = unit.goal;
+    if (!g) return 'done';
+    const name = UNIT_STATS[unit.type].name;
+    const stop = (msg?: string): 'done' => {
+      this.clearRoute(unit);
+      if (msg && unit.owner === 0) this.addLog(msg);
+      return 'done';
+    };
+    const dest = this.map.get(g.col, g.row);
+    if (!dest) return stop();
+    const seen = new Set(this.enemiesNear(unit));
+    if (!manual && seen.size) return stop(`${name} stopped its route: enemy troops nearby`);
+    const plan = this.planRoute(unit, dest, (unit.waited ?? 0) >= 2);
+    if (!plan.ok) return plan.arrived ? stop(`${name} reached the end of its route`) : stop(`${name} stopped its route: no way through`);
+    let moved = false;
+    let blockedByUnit = false;
+    for (const step of plan.path) {
+      if (this.unitAt(step)) {
+        blockedByUnit = true; // one of your units is in the way: wait for it
+        break;
+      }
+      if (!this.reachableFor(unit).has(step)) break; // out of moves for this turn
+      this.moveUnit(unit, step, true);
+      moved = true;
+      if (this.enemiesNear(unit).some((e) => !seen.has(e))) return stop(`${name} stopped its route: enemy troops spotted`);
+    }
+    if (moved) unit.waited = 0;
+    const last = plan.path[plan.path.length - 1];
+    if (unit.col === last.col && unit.row === last.row) return stop(`${name} reached the end of its route`);
+    if (!moved && blockedByUnit) return 'blocked';
+    return 'moved';
+  }
+
+  // Start of turn: move every unit on a route. Units stuck behind another one get a second try
+  // once the others have moved, then count a wait (after 2 waits they route around your units).
+  private runRoutes(p: PlayerId): void {
+    let stuck = this.unitsOf(p).filter((u) => u.goal && this.followRoute(u, false) === 'blocked');
+    stuck = stuck.filter((u) => u.goal && this.followRoute(u, false) === 'blocked');
+    for (const u of stuck) {
+      u.waited = (u.waited ?? 0) + 1;
+      if (u.waited > 3) {
+        this.clearRoute(u);
+        if (p === 0) this.addLog(`${UNIT_STATS[u.type].name} stopped its route: stuck behind your units`);
+      }
+    }
   }
 
   // ---------- combat ----------
@@ -678,6 +811,7 @@ export class GameState {
     unit.acted = true;
     unit.moves = 0;
     unit.hold = false;
+    this.clearRoute(unit);
     if (pv.kind === 'unit') {
       const defender = this.unitAt(target)!;
       const dName = `${defender.owner === 0 ? 'your' : `a ${this.players[defender.owner].name}`} ${UNIT_STATS[defender.type].name}`;
@@ -811,6 +945,7 @@ export class GameState {
     this.players[unit.owner].gold -= c.cost;
     this.invalidate();
     unit.hold = false;
+    this.clearRoute(unit);
     switch (job) {
       case 'farm':
       case 'mine':
@@ -880,6 +1015,7 @@ export class GameState {
       // Units heal on their own land (25% of max HP per turn), not in the field
       if (this.tileOf(u).owner === p) u.hp = Math.min(stats.hp, u.hp + Math.ceil(stats.hp * HOME_HEAL));
     }
+    this.runRoutes(p);
     this.advanceTraining(p);
   }
 
@@ -892,7 +1028,7 @@ export class GameState {
     if (this.log.length > 6) this.log.shift();
   }
 
-  // Taking a capital knocks that player out; all their land (and cities) go to the captor.
+  // Taking a capital knocks that player out; their land goes to the captor.
   private eliminate(loser: PlayerId, captor: PlayerId): void {
     const l = this.players[loser];
     const c = this.players[captor];
@@ -908,9 +1044,7 @@ export class GameState {
   private checkWin(): void {
     if (this.winner !== null || this.sandbox) return;
     if (!this.players[0].alive) {
-      const top = this.players
-        .filter((p) => p.alive)
-        .sort((a, b) => this.ownedTiles(b.id).length - this.ownedTiles(a.id).length)[0];
+      const top = this.players.filter((p) => p.alive).sort((a, b) => this.ownedTiles(b.id).length - this.ownedTiles(a.id).length)[0];
       this.winner = top ? top.id : 1;
       this.winReason = 'Your capital fell';
       return;
@@ -923,12 +1057,11 @@ export class GameState {
     }
     const land = this.landCount();
     for (const pl of this.players) {
-      // On Easy, rivals can't win just by owning land
       if (!pl.alive || (pl.isAI && !DIFFICULTY[this.options.difficulty].landWin)) continue;
       const share = this.ownedTiles(pl.id).length / land;
       if (share >= WIN_SHARE) {
         this.winner = pl.id;
-        this.winReason = `${pl.id === 0 ? 'You control' : `${pl.name} controls`} ${Math.round(share * 100)}% of the land`;
+        this.winReason = `${pl.name === 'You' ? 'You control' : `${pl.name} controls`} ${Math.round(share * 100)}% of the land`;
         return;
       }
     }
@@ -985,7 +1118,6 @@ export class GameState {
     }
   }
 
-  // Rival turns live in ai.ts
   private runAI(p: PlayerId): void {
     runAI(this, p);
   }

@@ -6,7 +6,7 @@ export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight'
 
 export interface UnitStats {
   name: string;
-  letter: string; // short label (map tokens use drawn icons)
+  letter: string; // shown on the map token
   cost: number; // gold to recruit (settlers use the scaling city cost instead)
   food: number; // food upkeep per turn
   moves: number;
@@ -49,6 +49,8 @@ export interface Unit {
   hp: number;
   hold?: boolean; // player told it to stay put: skipped by the end-of-turn check
   uses?: number; // builders on Normal/Hard: jobs left before they retire (undefined = unlimited)
+  goal?: { col: number; row: number }; // multi-turn route target: moves itself at the start of each turn
+  waited?: number; // turns in a row it was stuck behind one of your units
 }
 
 // A unit being trained in a city.
@@ -60,7 +62,6 @@ export interface Training {
   turnsLeft: number;
 }
 
-// 'walls' is still a valid builder job for the AI, but players build walls from the city panel.
 export type Job = 'farm' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
@@ -118,6 +119,91 @@ export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boole
       out.set(n, after);
       queue.push(n);
     }
+  }
+  return out;
+}
+
+// ---------- multi-turn routes ----------
+
+// Cheapest path (by move cost) from the unit to the nearest goal tile. Excludes the start tile.
+// blocked tiles can't be entered. Returns null if no goal can be reached.
+export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (t: Tile) => boolean): Tile[] | null {
+  if (goals.has(from)) return [];
+  const dist = new Map<Tile, number>([[from, 0]]);
+  const prev = new Map<Tile, Tile>();
+  // tiny binary heap of [cost, tile]
+  const heap: [number, Tile][] = [[0, from]];
+  const push = (item: [number, Tile]) => {
+    heap.push(item);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heap[p][0] <= heap[i][0]) break;
+      [heap[p], heap[i]] = [heap[i], heap[p]];
+      i = p;
+    }
+  };
+  const pop = (): [number, Tile] => {
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length) {
+      heap[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+        if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+        if (m === i) break;
+        [heap[m], heap[i]] = [heap[i], heap[m]];
+        i = m;
+      }
+    }
+    return top;
+  };
+  while (heap.length) {
+    const [d, cur] = pop();
+    if (d > dist.get(cur)!) continue;
+    if (goals.has(cur)) {
+      const path: Tile[] = [];
+      for (let t: Tile | undefined = cur; t && t !== from; t = prev.get(t)) path.unshift(t);
+      return path;
+    }
+    for (const n of map.neighbors(cur)) {
+      if (blocked(n)) continue;
+      const c = moveCost(cur, n);
+      if (c === Infinity) continue;
+      const nd = d + c;
+      if (nd >= (dist.get(n) ?? Infinity)) continue;
+      dist.set(n, nd);
+      prev.set(n, cur);
+      push([nd, n]);
+    }
+  }
+  return null;
+}
+
+// Which turn the unit reaches each step (0 = this turn), using the same rules as reachable():
+// a unit with full moves can always take one step, even onto costly terrain.
+export function routeTurns(unit: Unit, path: Tile[], from: Tile): number[] {
+  const full = UNIT_STATS[unit.type].moves;
+  let left = unit.moves;
+  let turn = 0;
+  let cur = from;
+  const out: number[] = [];
+  for (const t of path) {
+    const c = moveCost(cur, t);
+    if (c <= left) left -= c;
+    else if (left === full) left = 0;
+    else {
+      turn += 1;
+      left = full;
+      if (c <= left) left -= c;
+      else left = 0;
+    }
+    out.push(turn);
+    cur = t;
   }
   return out;
 }
