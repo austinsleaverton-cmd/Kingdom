@@ -1149,7 +1149,17 @@ export class GameState {
       if (this.tileOf(u).owner === p) u.hp = Math.min(stats.hp, u.hp + Math.ceil(stats.hp * HOME_HEAL));
     }
     this.runRoutes(p);
+    this.wakeHolders(p);
     this.advanceTraining(p);
+  }
+
+  // Units on Hold wake up when enemy troops come within 2 hexes, so they don't get picked off unnoticed
+  private wakeHolders(p: PlayerId): void {
+    for (const u of this.unitsOf(p)) {
+      if (!u.hold || !this.enemiesNear(u).length) continue;
+      u.hold = false;
+      this.tell(p, `${UNIT_STATS[u.type].name} stopped holding: enemy troops nearby`);
+    }
   }
 
   // "your" only when one person plays against the computer; with several people, names
