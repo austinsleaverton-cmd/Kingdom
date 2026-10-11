@@ -6,7 +6,7 @@ export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight'
 
 export interface UnitStats {
   name: string;
-  letter: string; // shown on the map token
+  letter: string; // short label (map tokens use drawn icons)
   cost: number; // gold to recruit (settlers use the scaling city cost instead)
   food: number; // food upkeep per turn
   moves: number;
@@ -47,6 +47,7 @@ export interface Unit {
   moves: number; // moves left this turn
   acted: boolean; // used its action this turn (job or attack)
   hp: number;
+  hold?: boolean; // player told it to stay put: skipped by the end-of-turn check
 }
 
 // A unit being trained in a city.

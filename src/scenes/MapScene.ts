@@ -47,7 +47,6 @@ export class MapScene extends Phaser.Scene {
   private unitGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
   private selGfx!: Phaser.GameObjects.Graphics;
-  private unitLabels: Phaser.GameObjects.Text[] = [];
 
   private pressed = false;
   private dragging = false;
@@ -140,10 +139,48 @@ export class MapScene extends Phaser.Scene {
     this.targets = new Map();
   }
 
-  private endTurn(): void {
-    if (!this.state || !this.playing || this.state.winner !== null) return;
-    this.state.endTurn();
+  // Before ending the turn, catch units that were forgotten (unless they're set to hold).
+  private endTurn(force = false): void {
+    const state = this.state;
+    if (!state || !this.playing || state.winner !== null) return;
+    if (this.hud.idleVisible) force = true; // second press of End turn / Space
+    const idle = state.idleUnits(0);
+    if (!force && idle.length > 0) {
+      const counts = new Map<string, number>();
+      for (const u of idle) counts.set(UNIT_STATS[u.type].name, (counts.get(UNIT_STATS[u.type].name) ?? 0) + 1);
+      const names = [...counts].map(([n, c]) => (c > 1 ? `${c} ${n}s` : n)).join(', ');
+      this.hud.showIdle(idle.length, names, {
+        onShow: () => this.focusUnit(idle[0]),
+        onHoldAll: () => {
+          for (const u of idle) state.setHold(u, true);
+          this.redraw();
+        },
+        onEndAnyway: () => this.endTurn(true),
+      });
+      return;
+    }
+    this.hud.hideIdle();
+    state.endTurn();
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
+    this.redraw();
+  }
+
+  private focusUnit(unit: Unit): void {
+    const state = this.state;
+    if (!state) return;
+    this.mode = 'select';
+    this.selectedUnitId = unit.id;
+    this.selected = state.tileOf(unit);
+    const { x, y } = tileCenter(this.selected);
+    this.cameras.main.pan(x, y, 300, 'Sine.easeInOut');
+    this.redraw();
+  }
+
+  private toggleHold(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit || unit.owner !== 0) return;
+    state.setHold(unit, !unit.hold);
     this.redraw();
   }
 
@@ -323,6 +360,10 @@ export class MapScene extends Phaser.Scene {
         this.doJob(job.id);
         return;
       }
+      if (key === 'H' && unit) {
+        this.toggleHold();
+        return;
+      }
       if (key === 'C' && unit && unit.type === 'settler') {
         this.foundCity();
         return;
@@ -462,6 +503,17 @@ export class MapScene extends Phaser.Scene {
         });
       } else lines.push('Click a lit hex to move. One job per turn.');
       if (stats.military) lines[0] = `Moves ${unit.moves}/${stats.moves}`;
+      if (unit.owner === 0) {
+        if (unit.hold) lines.push('Holding: skipped by the end-of-turn check until you move it');
+        buttons.push({
+          label: unit.hold ? 'Stop holding' : 'Hold position',
+          key: 'H',
+          enabled: true,
+          hint: unit.hold ? 'holding' : 'skip end-turn check',
+          active: unit.hold === true,
+          onClick: () => this.toggleHold(),
+        });
+      }
       for (const j of unit.type === 'builder' ? JOBS : []) {
         const terraform = j.id === 'raise' || j.id === 'lower';
         const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
@@ -580,6 +632,7 @@ export class MapScene extends Phaser.Scene {
     this.drawOwners(state);
     this.drawOverlay(state);
     this.drawUnits(state);
+    this.hud.hideIdle();
     this.refreshHover();
     this.hud.update(state, this.mode);
     this.hud.showPanel(this.buildPanel(state));
@@ -800,7 +853,6 @@ export class MapScene extends Phaser.Scene {
   private drawUnits(state: GameState): void {
     const g = this.unitGfx;
     g.clear();
-    let i = 0;
     for (const u of state.units) {
       const t = state.tileOf(u);
       const { x, y } = unitPos(t);
@@ -830,27 +882,15 @@ export class MapScene extends Phaser.Scene {
         g.fillStyle(frac > 0.5 ? 0x22c55e : frac > 0.25 ? 0xeab308 : 0xef4444, 1);
         g.fillRect(x - 11, y + 14, 22 * frac, 2);
       }
-      // ready indicator for your units with moves or work left
+      drawUnitIcon(g, u.type, x, y);
+      // Status dot for your units: green = ready, gray = holding
       if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
-        g.fillStyle(0x4ade80, 1);
-        g.fillCircle(x + 9, y - 9, 3.5);
+        g.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
+        g.lineStyle(1, 0x000000, 0.6);
+        g.fillCircle(x + 10, y - 10, 3.5);
+        g.strokeCircle(x + 10, y - 10, 3.5);
       }
-      let label = this.unitLabels[i];
-      if (!label) {
-        label = this.add
-          .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '13px', fontStyle: 'bold', color: '#ffffff' })
-          .setOrigin(0.5)
-          .setDepth(4);
-        this.unitLabels.push(label);
-      }
-      label
-        .setText(stats.letter)
-        .setFontSize(stats.letter.length > 1 ? 11 : 13)
-        .setPosition(x, y)
-        .setVisible(true);
-      i++;
     }
-    for (; i < this.unitLabels.length; i++) this.unitLabels[i].setVisible(false);
   }
 
   private drawCity(g: Phaser.GameObjects.Graphics, x: number, y: number, color: number, capital: boolean): void {
@@ -867,6 +907,67 @@ export class MapScene extends Phaser.Scene {
       g.fillTriangle(x - 6, y - 17, x - 3, y - 22, x, y - 17);
       g.fillTriangle(x - 2, y - 17, x + 1, y - 24, x + 4, y - 17);
       g.fillTriangle(x + 2, y - 17, x + 5, y - 22, x + 8, y - 17);
+    }
+  }
+}
+
+// Little white pictures on unit tokens, drawn with shapes so they look the same on every device.
+function drawUnitIcon(g: Phaser.GameObjects.Graphics, type: UnitType, x: number, y: number): void {
+  const white = 0xffffff;
+  switch (type) {
+    case 'swordsman': {
+      // blade from hilt to tip, crossguard, grip, pommel
+      g.lineStyle(3, white, 1);
+      g.lineBetween(x - 3, y + 3, x + 7, y - 7);
+      g.lineStyle(2.5, white, 1);
+      g.lineBetween(x - 7, y, x, y + 7);
+      g.lineBetween(x - 3, y + 3, x - 6, y + 6);
+      g.fillStyle(white, 1);
+      g.fillCircle(x - 7, y + 7, 2);
+      break;
+    }
+    case 'archer': {
+      // bow (arc + string) with an arrow across it
+      g.lineStyle(2.5, white, 1);
+      g.beginPath();
+      g.arc(x + 4, y, 9, Phaser.Math.DegToRad(125), Phaser.Math.DegToRad(235), false);
+      g.strokePath();
+      const ex = x + 4 + 9 * Math.cos(Phaser.Math.DegToRad(125));
+      const ey = 9 * Math.sin(Phaser.Math.DegToRad(125));
+      g.lineStyle(1, white, 0.9);
+      g.lineBetween(ex, y - ey, ex, y + ey);
+      g.lineStyle(1.5, white, 1);
+      g.lineBetween(x - 7, y, x + 6, y);
+      g.fillStyle(white, 1);
+      g.fillTriangle(x + 9, y, x + 5, y - 3, x + 5, y + 3);
+      break;
+    }
+    case 'knight': {
+      // horse head facing right
+      const pts = [
+        [-5, 8], [-6, 1], [-4, -4], [-3, -9], [-1, -6], [2, -6], [6, -2], [8, 1], [6, 4], [1, 2], [2, 8],
+      ].map(([dx, dy]) => new Phaser.Math.Vector2(x + dx, y + dy));
+      g.fillStyle(white, 1);
+      g.fillPoints(pts, true);
+      g.fillStyle(0x111111, 1);
+      g.fillCircle(x + 1, y - 3, 1.2);
+      break;
+    }
+    case 'builder': {
+      // hammer
+      g.lineStyle(2.5, white, 1);
+      g.lineBetween(x - 5, y + 6, x + 2, y - 1);
+      g.lineStyle(4.5, white, 1);
+      g.lineBetween(x - 1, y - 6, x + 6, y + 1);
+      break;
+    }
+    case 'settler': {
+      // flag on a pole
+      g.lineStyle(2, white, 1);
+      g.lineBetween(x - 4, y + 7, x - 4, y - 7);
+      g.fillStyle(white, 1);
+      g.fillTriangle(x - 3, y - 7, x + 7, y - 4, x - 3, y - 1);
+      break;
     }
   }
 }

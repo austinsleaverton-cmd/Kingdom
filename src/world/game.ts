@@ -252,6 +252,18 @@ export class GameState {
     });
   }
 
+  // Your units that haven't done anything yet this turn and weren't told to hold.
+  idleUnits(p: PlayerId): Unit[] {
+    if (p !== this.current) return [];
+    return this.unitsOf(p).filter(
+      (u) => !u.hold && !u.acted && u.moves === UNIT_STATS[u.type].moves && this.reachableFor(u).size > 0,
+    );
+  }
+
+  setHold(unit: Unit, hold: boolean): void {
+    unit.hold = hold;
+  }
+
   besieged(city: Tile): boolean {
     return this.units.some(
       (u) => UNIT_STATS[u.type].military && city.owner !== null && this.isEnemy(u.owner, city.owner) && hexDistance(this.tileOf(u), city) <= 2,
@@ -435,6 +447,7 @@ export class GameState {
     unit.col = dest.col;
     unit.row = dest.row;
     unit.moves = left;
+    unit.hold = false;
     // Walking into a destroyed enemy city takes it.
     if (dest.city && this.isEnemy(dest.owner, unit.owner) && dest.hp <= 0) this.captureCity(dest, unit.owner);
     return true;
@@ -493,6 +506,7 @@ export class GameState {
     const a = this.players[unit.owner];
     unit.acted = true;
     unit.moves = 0;
+    unit.hold = false;
     if (pv.kind === 'unit') {
       const defender = this.unitAt(target)!;
       const dName = `${defender.owner === 0 ? 'your' : `a ${this.players[defender.owner].name}`} ${UNIT_STATS[defender.type].name}`;
@@ -612,6 +626,7 @@ export class GameState {
     if (!c.ok) return c;
     this.players[unit.owner].gold -= c.cost;
     this.invalidate();
+    unit.hold = false;
     switch (job) {
       case 'farm':
       case 'mine':

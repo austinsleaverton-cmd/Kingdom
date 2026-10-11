@@ -1,9 +1,15 @@
-// DOM overlay: stats, mode bar, selection panel, tooltip and game-over screen.
+// DOM overlay: stats, mode bar, selection panel, tooltip, idle-unit check and game-over screen.
 // Reads from the world, never writes to it: clicks go back through handlers.
 import type { GameState } from '../world/game';
 import { DIFFICULTY, WIN_SHARE } from '../world/game';
 
 export type BarMode = 'select' | 'claim';
+
+export interface IdleHandlers {
+  onShow(): void;
+  onHoldAll(): void;
+  onEndAnyway(): void;
+}
 
 export interface HudHandlers {
   onMode(mode: BarMode): void;
@@ -54,6 +60,9 @@ const CSS = `
 .k-sel button small { opacity: 0.7; margin-left: 8px; }
 .k-tip { position: fixed; pointer-events: none; background: rgba(0,0,0,0.85); border: 1px solid #555; border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: pre; display: none; }
 .k-tip .k-bad { color: #f87171; } .k-tip .k-good { color: #4ade80; }
+.k-idle { bottom: 70px; left: 50%; transform: translateX(-50%); display: none; text-align: center; border-color: #eab308; max-width: calc(100vw - 40px); box-sizing: border-box; }
+.k-idle .k-idle-btns { display: flex; gap: 6px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+.k-idle button.k-main { background: #2563eb; border-color: #60a5fa; }
 .k-over { inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); pointer-events: auto; position: absolute; }
 .k-over .k-panel { position: static; text-align: center; padding: 24px 32px; font-size: 16px; }
 .k-over h1 { margin: 0 0 8px; }
@@ -70,6 +79,7 @@ const CSS = `
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
   .k-sel { bottom: 120px; width: 210px; }
+  .k-idle { bottom: 120px; }
 }
 `;
 
@@ -136,6 +146,7 @@ export class Hud {
   private statsBox: Collapsible;
   private selBox: Collapsible;
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
+  private idle: HTMLDivElement;
 
   constructor(handlers: HudHandlers) {
     const style = document.createElement('style');
@@ -176,6 +187,9 @@ export class Hud {
 
     this.tip = el('k-tip');
     this.root.appendChild(this.tip);
+
+    this.idle = el('k-panel k-idle');
+    this.root.appendChild(this.idle);
 
     this.over = el('k-over');
     const box = el('k-panel');
@@ -232,6 +246,7 @@ export class Hud {
       `<b>Troops</b> (square tokens) train in cities: Swordsman beats Archer, Archer (range 2, no return fire) beats Knight, Knight (fast) beats Swordsman. ` +
       `Select a troop, click a red hex to attack. Knock a city to 0 HP, then march a Swordsman or Knight in to capture it and the land around it. Cities stop healing while enemy troops are within 2 hexes.<br><br>` +
       `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last.<br><br>` +
+      `Ending your turn warns you about units with no orders; press H (Hold position) on units you want to leave where they are. ` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 
     for (const [id, b] of this.modeBtns) b.classList.toggle('k-on', id === mode);
@@ -266,6 +281,27 @@ export class Hud {
       this.sel.appendChild(btn);
     }
     this.selBox.panel.style.display = 'block';
+  }
+
+  // End-of-turn check: some units still have nothing ordered.
+  showIdle(count: number, names: string, h: IdleHandlers): void {
+    this.idle.innerHTML = `<b>${count} unit${count > 1 ? 's' : ''} still waiting for orders</b><br><small>${escape(names)}</small>`;
+    const row = el('k-idle-btns');
+    const show = button('Show me', h.onShow);
+    show.className = 'k-main';
+    row.appendChild(show);
+    row.appendChild(button(count > 1 ? 'Hold them all' : 'Hold it', h.onHoldAll));
+    row.appendChild(button('<kbd>Space</kbd>End turn anyway', h.onEndAnyway));
+    this.idle.appendChild(row);
+    this.idle.style.display = 'block';
+  }
+
+  hideIdle(): void {
+    this.idle.style.display = 'none';
+  }
+
+  get idleVisible(): boolean {
+    return this.idle.style.display === 'block';
   }
 
   showTip(lines: string[], status: string, ok: boolean, x: number, y: number): void {
