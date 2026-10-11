@@ -241,6 +241,11 @@ export class GameState {
     return this.map.tiles.filter((t) => t.owner === p);
   }
 
+  // Owned land only (no water): what the land-share win and the scoreboard count
+  ownedLand(p: PlayerId): number {
+    return this.map.tiles.filter((t) => t.owner === p && isLand(t)).length;
+  }
+
   cityCount(p: PlayerId): number {
     return this.map.tiles.filter((t) => t.owner === p && t.city).length;
   }
@@ -490,7 +495,7 @@ export class GameState {
     if (city.owner === null) return 0;
     let n = 0;
     for (const t of this.map.tiles) {
-      if (t.owner !== null || !isLand(t) || !this.inCityRange(t, city)) continue;
+      if (t.owner !== null || !this.inCityRange(t, city)) continue;
       if (this.claimingCity(t, city.owner, city)) n++;
     }
     return n;
@@ -542,7 +547,6 @@ export class GameState {
         if (tile.owner === p) return fail('Already yours');
         // Owned land belongs to that player's cities: the only way to take it is to conquer the city.
         if (tile.owner !== null) return fail(`${this.players[tile.owner].name}'s land: conquer their city to take it`);
-        if (!isLand(tile)) return fail("Can't claim water");
         if (city) {
           const d = hexDistance(tile, city);
           const max = this.claimRadius(city);
@@ -1134,7 +1138,7 @@ export class GameState {
     if (this.winner !== null || this.sandbox) return;
     const alive = this.players.filter((p) => p.alive);
     if (this.humansAlive().length === 0) {
-      const top = alive.sort((a, b) => this.ownedTiles(b.id).length - this.ownedTiles(a.id).length)[0];
+      const top = alive.sort((a, b) => this.ownedLand(b.id) - this.ownedLand(a.id))[0];
       this.winner = top ? top.id : 1;
       this.winReason = this.hotseat ? 'Every player kingdom fell' : 'Your capital fell';
       return;
@@ -1147,7 +1151,7 @@ export class GameState {
     const land = this.landCount();
     for (const pl of this.players) {
       if (!pl.alive || (pl.isAI && !DIFFICULTY[this.options.difficulty].landWin)) continue;
-      const share = this.ownedTiles(pl.id).length / land;
+      const share = this.ownedLand(pl.id) / land;
       if (share >= WIN_SHARE) {
         this.winner = pl.id;
         const who = this.you(pl.id);

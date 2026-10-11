@@ -76,9 +76,8 @@ export const IMPROVEMENT_NAME: Record<Improvement, string> = { farm: 'farm', min
 export function fixAfterTerrainChange(tile: Tile): void {
   if (tile.improvement && !improvementFits(tile, tile.improvement)) tile.improvement = null;
   if (tile.terrain === 'water') {
+    // Water can be owned, so the land keeps its owner when it floods
     tile.road = false;
-    tile.owner = null;
-    tile.home = null;
     tile.city = false;
     tile.capital = false;
     tile.hp = 0;
@@ -98,9 +97,9 @@ export const YIELD: Record<Terrain, number> = {
   mountain: 0,
 };
 
-// Gold to claim an unowned tile
+// Gold to claim an unowned tile (water is cheap: no gold yet, fish coming)
 export const CLAIM_COST: Record<Terrain, number> = {
-  water: 0,
+  water: 2,
   sand: 3,
   grass: 4,
   hills: 6,
