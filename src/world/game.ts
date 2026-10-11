@@ -37,23 +37,24 @@ export interface DifficultyConfig {
   aggression: number; // chance it takes an attack it can make (smart AIs always do)
   focusHuman: boolean; // only marches on you
   landWin: boolean; // rivals can win by holding most of the land
+  builderUses: number; // jobs a builder can do before it retires (0 = unlimited)
 }
 
 export const DIFFICULTY: Record<Difficulty, DifficultyConfig> = {
   easy: {
     label: 'Easy', note: 'Rivals grow slowly, keep small armies and rarely attack.',
     income: 0.7, troopsPerCity: 0.5, maxArmy: 3, attackTurn: 45, attackArmy: 3, garrison: 2,
-    builders: 1, maxWalls: 1, smart: false, aggression: 0.5, focusHuman: false, landWin: false,
+    builders: 1, maxWalls: 1, smart: false, aggression: 0.5, focusHuman: false, landWin: false, builderUses: 0,
   },
   normal: {
     label: 'Normal', note: 'Rivals build up, defend, and attack once they have an army.',
     income: 1, troopsPerCity: 1, maxArmy: 8, attackTurn: 22, attackArmy: 4, garrison: 1,
-    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true,
+    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true, builderUses: 3,
   },
   hard: {
     label: 'Hard', note: 'Rivals earn more, counter your troops, and come for you early.',
     income: 1.25, troopsPerCity: 1.5, maxArmy: 14, attackTurn: 14, attackArmy: 4, garrison: 1,
-    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true,
+    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true, builderUses: 3,
   },
 };
 
@@ -106,6 +107,15 @@ export const CITY_COUNTER = 4; // cities hit melee attackers back for this (+2 p
 export const KNIGHT_VS_WALLS = 0.5; // knights are bad at breaking walls
 export const SIEGE_MULT = 1.5; // troops hit cities harder than units
 export const CAPTURE_HP = 0.5; // captured cities start at this share of max hp
+export const HOME_HEAL = 0.25; // units on their own land heal this share of max HP per turn
+
+const CITY_NAMES = [
+  'Oakvale', 'Stonebridge', 'Riverford', 'Highmoor', 'Ashford', 'Brightwater', 'Eldermere', 'Foxhollow',
+  'Greywatch', 'Hollowmere', 'Ironwood', 'Kingsreach', 'Larkspur', 'Mistvale', 'Northwind', 'Oldcastle',
+  'Pinecrest', 'Queensport', 'Redcliff', 'Silverbrook', 'Thornbury', 'Umberfield', 'Westmarch', 'Willowdale',
+  'Amberlee', 'Bramblegate', 'Copperhill', 'Dunmore', 'Emberfall', 'Frostford', 'Goldenrod', 'Hawksmoor',
+  'Ivyreach', 'Juniper', 'Kestrel Rock', 'Lindenholm', 'Marshgate', 'Nettlefield', 'Oxbow', 'Ravenhold',
+];
 
 export interface AttackPreview {
   ok: boolean;
@@ -137,6 +147,7 @@ export class GameState {
   units: Unit[] = [];
   nextUnitId = 1;
   training: Training[] = [];
+  cityNames: Record<number, string> = {}; // tile index -> city name
 
   constructor(options: GameOptions) {
     this.options = {
@@ -276,6 +287,30 @@ export class GameState {
 
   claimCost(tile: Tile, p: PlayerId): number {
     return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
+  }
+
+  // ---------- city names ----------
+
+  cityName(city: Tile): string {
+    return this.cityNames[this.tileIndex(city)] ?? (city.capital ? 'Capital' : 'City');
+  }
+
+  renameCity(city: Tile, name: string): void {
+    const clean = name.trim().slice(0, 24);
+    if (!city.city || !clean) return;
+    this.cityNames[this.tileIndex(city)] = clean;
+  }
+
+  private nameNewCity(city: Tile): void {
+    const used = new Set(Object.values(this.cityNames));
+    const free = CITY_NAMES.filter((n) => !used.has(n));
+    const name = free.length ? free[Math.floor(Math.random() * free.length)] : `New Town ${Object.keys(this.cityNames).length + 1}`;
+    this.cityNames[this.tileIndex(city)] = name;
+  }
+
+  // Old saves: give every city a name.
+  nameMissingCities(): void {
+    for (const c of this.cities()) if (!this.cityNames[this.tileIndex(c)]) this.nameNewCity(c);
   }
 
   // ---------- city land ----------
@@ -466,7 +501,8 @@ export class GameState {
       }
     }
     this.invalidate();
-    this.addLog(`${this.players[p].name} founded a city`);
+    this.nameNewCity(tile);
+    this.addLog(`${this.players[p].name} founded ${this.cityName(tile)}`);
     this.checkWin();
     return c;
   }
@@ -498,6 +534,8 @@ export class GameState {
     }
     const at = this.spawnTile(city)!;
     const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true, hp: stats.hp };
+    const uses = DIFFICULTY[this.options.difficulty].builderUses;
+    if (type === 'builder' && uses > 0) unit.uses = uses;
     this.units.push(unit);
     return unit;
   }
@@ -609,7 +647,7 @@ export class GameState {
       const absorbed = Math.min(target.shield, pv.dmg);
       target.shield -= absorbed;
       target.hp = Math.max(0, target.hp - (pv.dmg - absorbed));
-      if (target.hp === 0) this.addLog(`${a.name} broke ${this.whose(target.owner!)} ${target.capital ? 'capital' : 'city'}`);
+      if (target.hp === 0) this.addLog(`${a.name} broke ${this.whose(target.owner!)} ${target.capital ? 'capital' : 'city'} ${this.cityName(target)}`);
     }
     unit.hp -= pv.counter;
     if (unit.hp <= 0) {
@@ -639,7 +677,7 @@ export class GameState {
     city.shield = 0;
     this.invalidate();
     if (wasCapital) this.eliminate(prev, captor);
-    else this.addLog(`${this.players[captor].name} captured ${this.whose(prev)} city`);
+    else this.addLog(`${this.players[captor].name} captured ${this.cityName(city)} from ${prev === 0 ? 'you' : this.players[prev].name}`);
     this.checkWin();
   }
 
@@ -726,6 +764,13 @@ export class GameState {
     }
     unit.acted = true;
     unit.moves = 0;
+    if (unit.uses !== undefined) {
+      unit.uses -= 1;
+      if (unit.uses <= 0) {
+        this.units = this.units.filter((u) => u !== unit);
+        if (unit.owner === 0) this.addLog('A builder finished its last job and retired');
+      }
+    }
     return c;
   }
 
@@ -762,9 +807,8 @@ export class GameState {
       const stats = UNIT_STATS[u.type];
       u.moves = stats.moves;
       u.acted = false;
-      // Units heal faster at home
-      const home = this.tileOf(u).owner === p;
-      u.hp = Math.min(stats.hp, u.hp + (home ? 5 : 2));
+      // Units heal on their own land (25% of max HP per turn), not in the field
+      if (this.tileOf(u).owner === p) u.hp = Math.min(stats.hp, u.hp + Math.ceil(stats.hp * HOME_HEAL));
     }
     this.advanceTraining(p);
   }
@@ -865,6 +909,7 @@ export class GameState {
           n.home = best.home;
         }
       }
+      this.nameNewCity(best);
       capitals.push(best);
     }
   }

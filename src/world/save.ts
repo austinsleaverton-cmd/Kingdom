@@ -26,6 +26,7 @@ interface SaveData {
   nextUnitId: number;
   training?: Training[];
   homes?: (number | null)[]; // per tile: index of the city it belongs to
+  names?: Record<number, string>; // city tile index -> name
   // per tile: [height, owner, flags, hp, walls, shield] (last three only for cities)
   tiles: [number, PlayerId | null, number, number?, number?, number?][];
 }
@@ -52,6 +53,7 @@ export function saveGame(state: GameState): void {
     nextUnitId: state.nextUnitId,
     training: state.training,
     homes: state.map.tiles.map((t) => t.home),
+    names: state.cityNames,
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -132,6 +134,8 @@ export function loadGame(): GameState | null {
     state.training = (data.training ?? []).map((t) => ({ ...t }));
     state.invalidate();
     state.assignMissingHomes();
+    state.cityNames = { ...(data.names ?? {}) };
+    state.nameMissingCities();
     return state;
   } catch {
     return null;

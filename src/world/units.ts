@@ -48,6 +48,7 @@ export interface Unit {
   acted: boolean; // used its action this turn (job or attack)
   hp: number;
   hold?: boolean; // player told it to stay put: skipped by the end-of-turn check
+  uses?: number; // builders on Normal/Hard: jobs left before they retire (undefined = unlimited)
 }
 
 // A unit being trained in a city.

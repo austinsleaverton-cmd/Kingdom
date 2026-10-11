@@ -8,7 +8,7 @@ import type { Terrain, Tile } from '../world/tile';
 import { JOBS, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
-import type { BarMode, PanelButton, PanelModel } from './Hud';
+import type { BarMode, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
 import { Menu } from './Menu';
 
 const SIZE = 28; // hex radius in px
@@ -48,6 +48,7 @@ export class MapScene extends Phaser.Scene {
   private unitGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
   private selGfx!: Phaser.GameObjects.Graphics;
+  private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
 
   private pressed = false;
   private dragging = false;
@@ -500,6 +501,9 @@ export class MapScene extends Phaser.Scene {
       `${owner}${extras ? ` · ${extras}` : ''}`,
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
+    const home = state.homeCity(tile);
+    if (tile.city) lines.unshift(state.cityName(tile));
+    else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
     if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
     if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
     let status = '';
@@ -512,52 +516,60 @@ export class MapScene extends Phaser.Scene {
 
   // ---------- selection panel ----------
 
+  private renameCity(city: Tile): void {
+    const state = this.state;
+    if (!state || city.owner !== 0) return;
+    const name = window.prompt('Name this city', state.cityName(city));
+    if (name) state.renameCity(city, name);
+    this.redraw();
+  }
+
+  private hpColor(frac: number): string {
+    return frac > 0.5 ? '#22c55e' : frac > 0.25 ? '#eab308' : '#ef4444';
+  }
+
   private buildPanel(state: GameState): PanelModel | null {
     const tile = this.selected;
     if (!tile) return null;
     const unit = this.selectedUnit;
-    const buttons: PanelButton[] = [];
-    const lines: string[] = [];
-    let title = TERRAIN_NAME[tile.terrain];
+    if (unit) return this.unitPanel(state, unit);
+    if (tile.city && tile.owner === 0) return this.cityPanel(state, tile);
+    return this.tilePanel(state, tile);
+  }
 
-    if (unit) {
-      const stats = UNIT_STATS[unit.type];
-      const onCity = state.tileOf(unit).city;
-      title = `${stats.name}${onCity ? ' (in city: click city again to switch)' : ''}`;
-      lines.push(`Moves ${unit.moves}/${stats.moves}${unit.acted ? ' · done working this turn' : ''}`);
-      const here = state.tileOf(unit);
-      if (stats.military) {
-        lines.push(`HP ${unit.hp}/${stats.hp} · Attack ${stats.atk} · Range ${stats.range}`);
-        if (stats.strongVs) lines.push(`Strong vs ${UNIT_STATS[stats.strongVs].name}s${stats.canCapture ? ' · can capture cities' : ''}`);
-        lines.push(unit.acted ? 'Already attacked this turn' : 'Click a red hex to attack. Break a city to 0 HP, then march in.');
-      } else if (unit.type === 'settler') {
-        lines.push('Move to an open spot 3+ hexes from any city, then found it. The settler is used up.');
-        const c = state.foundCheck(unit);
-        buttons.push({
-          label: 'Found city here',
-          key: 'C',
-          enabled: c.ok,
-          hint: c.ok ? 'uses the settler' : c.reason,
-          onClick: () => this.foundCity(),
-        });
-      } else lines.push('Click a lit hex to move. One job per turn.');
-      if (stats.military) lines[0] = `Moves ${unit.moves}/${stats.moves}`;
-      if (unit.owner === 0) {
-        lines.push('Click it again (or Esc) to deselect.');
-        if (unit.hold) lines.push('Holding: skipped by the end-of-turn check until you move it');
-        buttons.push({
-          label: unit.hold ? 'Stop holding' : 'Hold position',
-          key: 'H',
-          enabled: true,
-          hint: unit.hold ? 'holding' : 'skip end-turn check',
-          active: unit.hold === true,
-          onClick: () => this.toggleHold(),
-        });
-      }
-      for (const j of unit.type === 'builder' ? JOBS : []) {
+  private unitPanel(state: GameState, unit: Unit): PanelModel {
+    const stats = UNIT_STATS[unit.type];
+    const here = state.tileOf(unit);
+    const sections: PanelSection[] = [];
+    const lines: string[] = [];
+    if (stats.military) {
+      lines.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
+      lines.push(unit.acted ? 'Already attacked this turn' : 'Red hexes = attack. Break a city to 0 HP, then walk in.');
+    } else if (unit.type === 'builder') {
+      lines.push(unit.uses !== undefined ? `Jobs left: ${unit.uses}` : 'Unlimited jobs');
+      if (unit.acted) lines.push('Done working this turn');
+    } else {
+      lines.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
+    }
+    if (unit.hold) lines.push('Holding: skipped by the end-of-turn check');
+    sections.push({
+      bars: [
+        { label: 'Health', value: unit.hp, max: stats.hp, color: this.hpColor(unit.hp / stats.hp) },
+        { label: 'Moves', value: unit.moves, max: stats.moves, color: '#60a5fa' },
+      ],
+      lines,
+    });
+
+    const actions: PanelButton[] = [];
+    if (unit.type === 'settler') {
+      const c = state.foundCheck(unit);
+      actions.push({ label: 'Found city here', key: 'C', enabled: c.ok, hint: c.ok ? 'uses the settler' : c.reason, onClick: () => this.foundCity() });
+    }
+    if (unit.type === 'builder') {
+      for (const j of JOBS) {
         const terraform = j.id === 'raise' || j.id === 'lower';
         const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
-        buttons.push({
+        actions.push({
           label: j.label,
           key: j.key,
           enabled: c.ok,
@@ -567,82 +579,130 @@ export class MapScene extends Phaser.Scene {
         });
       }
     }
-    if (tile.city && tile.owner === 0) {
-      if (!unit) title = `${tile.capital ? 'Capital' : 'City'}${state.unitAt(tile)?.owner === 0 ? ' (click again for the unit)' : ''}`;
-      const claiming = this.mode === 'claim' && this.claimCity === tile;
-      const open = state.openClaims(tile);
-      if (claiming) {
-        title = `${tile.capital ? 'Capital' : 'City'}: claiming land`;
-        lines.push('Click green hexes to buy them for this city. K or right-click to stop.');
-      }
-      lines.push(`Land: ${state.cityLand(tile).length} tiles · ${open > 0 ? `${open} more in range` : 'area full: send a settler'}`);
-      if (!unit) {
-        buttons.push({
-          label: claiming ? 'Stop claiming' : 'Claim land',
+    if (unit.owner === 0) {
+      actions.push({
+        label: unit.hold ? 'Stop holding' : 'Hold position',
+        key: 'H',
+        enabled: true,
+        hint: unit.hold ? 'holding' : 'skip end-turn check',
+        active: unit.hold === true,
+        onClick: () => this.toggleHold(),
+      });
+    }
+    sections.push({ heading: 'Actions', buttons: actions });
+    const where = here.city ? ` · in ${state.cityName(here)}` : '';
+    return {
+      title: stats.name,
+      subtitle: `${state.players[unit.owner].name}${where}`,
+      sections,
+      footer: 'Click it again or Esc to deselect',
+    };
+  }
+
+  private cityPanel(state: GameState, city: Tile): PanelModel {
+    const claiming = this.mode === 'claim' && this.claimCity === city;
+    const open = state.openClaims(city);
+    const sections: PanelSection[] = [];
+
+    const bars: PanelBar[] = [{ label: 'Health', value: city.hp, max: cityMaxHp(city), color: this.hpColor(city.hp / cityMaxHp(city)) }];
+    if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
+    sections.push({
+      bars,
+      lines: city.walls ? [] : [`No walls yet: stand a builder here (needs stone, max level ${MAX_WALLS})`],
+    });
+
+    sections.push({
+      heading: 'Land',
+      lines: claiming
+        ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
+        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'}`],
+      buttons: [
+        {
+          label: claiming ? 'Done claiming' : 'Claim land',
           key: 'K',
           enabled: claiming || open > 0,
-          hint: claiming ? 'done' : open > 0 ? `${open} hexes open` : 'area full',
+          hint: claiming ? '' : open > 0 ? `${open} open` : 'full',
           active: claiming,
           onClick: () => this.toggleClaim(),
-        });
-      }
-      const recruitables: { type: UnitType; key?: string }[] = [
-        { type: 'builder', key: 'B' },
-        { type: 'settler', key: 'S' },
-        ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
-      ];
-      for (const r of recruitables) {
-        const c = state.recruitCheck(r.type, tile, 0);
-        const s = UNIT_STATS[r.type];
-        const time = s.train > 0 ? ` · ${s.train} turns` : '';
-        buttons.push({
-          label: `${s.train > 0 ? 'Train' : 'Recruit'} ${s.name}`,
-          key: unit ? undefined : r.key,
-          enabled: c.ok,
-          hint: c.ok ? `${c.cost}g · ${s.food} food${time}` : c.reason,
-          onClick: () => this.recruit(r.type),
-        });
-      }
-      lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}`);
-      lines.push(
-        tile.walls
-          ? `Walls level ${tile.walls}/${MAX_WALLS}: shield ${tile.shield}/${shieldMax(tile)}`
-          : 'No walls: put a builder here to build them (needs stone)',
-      );
-      lines.push(`Food ${state.foodUsed(0)}/${state.foodMade(0)} used`);
-      const queued = state.trainingAt(tile);
-      if (queued) {
-        const left = queued.turnsLeft;
-        lines.push(`Training ${UNIT_STATS[queued.type].name}: ${left > 0 ? `${left} turn${left > 1 ? 's' : ''} left` : 'waiting for room'}`);
-      }
-      const here = state.unitAt(tile);
-      if (!unit && here && here.owner === 0) {
-        buttons.push({
-          label: `Select ${UNIT_STATS[here.type].name} here`,
-          enabled: true,
-          hint: 'or click the city again',
-          onClick: () => {
-            this.mode = 'select';
-            this.claimCity = null;
-            this.selectedUnitId = here.id;
-            this.redraw();
+        },
+      ],
+    });
+
+    const train: PanelButton[] = [];
+    const recruitables: { type: UnitType; key?: string }[] = [
+      { type: 'builder', key: 'B' },
+      { type: 'settler', key: 'S' },
+      ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
+    ];
+    for (const r of recruitables) {
+      const c = state.recruitCheck(r.type, city, 0);
+      const s = UNIT_STATS[r.type];
+      const time = s.train > 0 ? ` · ${s.train}t` : '';
+      train.push({
+        label: s.name,
+        key: r.key,
+        enabled: c.ok,
+        hint: c.ok ? `${c.cost}g · ${s.food} food${time}` : c.reason,
+        onClick: () => this.recruit(r.type),
+      });
+    }
+    const queued = state.trainingAt(city);
+    const trainLines = queued
+      ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
+      : [`One unit at a time · food left: ${state.foodMade(0) - state.foodUsed(0)}`];
+    sections.push({ heading: 'Train', lines: trainLines, buttons: train });
+
+    const here = state.unitAt(city);
+    if (here && here.owner === 0) {
+      sections.push({
+        heading: 'In this city',
+        buttons: [
+          {
+            label: `Select ${UNIT_STATS[here.type].name}`,
+            enabled: true,
+            hint: 'or click the city again',
+            onClick: () => {
+              this.mode = 'select';
+              this.claimCity = null;
+              this.selectedUnitId = here.id;
+              this.redraw();
+            },
           },
-        });
-      }
+        ],
+      });
+    }
+    return {
+      title: state.cityName(city),
+      subtitle: city.capital ? 'Your capital' : 'Your city',
+      titleAction: { label: 'Rename', onClick: () => this.renameCity(city) },
+      sections,
+    };
+  }
+
+  private tilePanel(state: GameState, tile: Tile): PanelModel {
+    const lines: string[] = [];
+    const home = state.homeCity(tile);
+    if (tile.owner === null) lines.push('Unclaimed');
+    else lines.push(`${state.players[tile.owner].name}${home ? ` · land of ${state.cityName(home)}` : ''}`);
+    lines.push(`Height ${tile.height} · ${YIELD[tile.terrain]} gold/turn${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
+    const bars: PanelBar[] = [];
+    let title = TERRAIN_NAME[tile.terrain];
+    if (tile.city && tile.owner !== null) {
+      title = state.cityName(tile);
+      bars.push({ label: 'Health', value: tile.hp, max: cityMaxHp(tile), color: this.hpColor(tile.hp / cityMaxHp(tile)) });
+      if (tile.walls) bars.push({ label: `Walls ${tile.walls}`, value: tile.shield, max: shieldMax(tile), color: '#60a5fa' });
     }
     const other = state.unitAt(tile);
-    if (!unit && other && other.owner !== 0) {
-      lines.push(`${state.players[other.owner].name} ${UNIT_STATS[other.type].name}: ${other.hp}/${UNIT_STATS[other.type].hp} HP`);
+    if (other && other.owner !== 0) {
+      const s = UNIT_STATS[other.type];
+      lines.push(`${state.players[other.owner].name} ${s.name} here`);
+      bars.push({ label: 'Unit HP', value: other.hp, max: s.hp, color: this.hpColor(other.hp / s.hp) });
     }
-    if (tile.city && tile.owner !== null && tile.owner !== 0) {
-      title = `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'}`;
-      lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}`);
-    }
-    if (!unit && !tile.city) {
-      const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
-      lines.push(owner, `Height ${tile.height}${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
-    }
-    return { title, lines, buttons };
+    return {
+      title,
+      subtitle: tile.city && tile.owner !== null ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'}` : undefined,
+      sections: [{ bars, lines }],
+    };
   }
 
   private wallHint(state: GameState, city: Tile, gold: number): string {
@@ -816,9 +876,22 @@ export class MapScene extends Phaser.Scene {
     if (t.walls > 0) bar(t.shield, shieldMax(t), 0x60a5fa);
   }
 
+  private priceLabel(i: number, x: number, y: number, text: string, affordable: boolean): void {
+    let label = this.priceLabels[i];
+    if (!label) {
+      label = this.add
+        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '12px', fontStyle: 'bold', color: '#ffffff', stroke: '#000000', strokeThickness: 3 })
+        .setOrigin(0.5)
+        .setDepth(2.5);
+      this.priceLabels.push(label);
+    }
+    label.setText(text).setColor(affordable ? '#ffffff' : '#fca5a5').setPosition(x, y).setVisible(true);
+  }
+
   private drawOverlay(state: GameState): void {
     const g = this.overlayGfx;
     g.clear();
+    let labels = 0;
     const unit = this.selectedUnit;
 
     if (this.reach.size > 0 && unit) {
@@ -870,25 +943,31 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else.
+      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
       const city = this.claimCity;
       const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, 0))));
-      g.fillStyle(0x000000, 0.35);
+      g.fillStyle(0x000000, 0.55);
       for (const t of state.map.tiles) {
         if (zone.has(t)) continue;
         const { x, y } = tileCenter(t);
         g.fillPoints(hexCorners(x, y, SIZE), true);
       }
-      // Green = you can buy it right now
-      g.fillStyle(0x22c55e, 0.3);
-      g.lineStyle(2, 0x4ade80, 0.9);
+      // Inside the zone: green + price = buy now; darkened = not reachable yet (or water / someone else's)
       for (const t of zone) {
-        if (t.owner === 0 || t.terrain === 'water') continue;
-        if (!state.check('claim', t, 0, city).ok) continue;
+        if (t.owner === 0 && (!city || state.belongsTo(t, city))) continue; // already this city's
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
-        g.fillPoints(pts, true);
-        g.strokePoints(pts, true);
+        const c = state.check('claim', t, 0, city);
+        if (c.ok) {
+          g.fillStyle(0x22c55e, 0.5);
+          g.fillPoints(pts, true);
+          g.lineStyle(3, 0x86efac, 1);
+          g.strokePoints(pts, true);
+          this.priceLabel(labels++, x, y, c.cost > 0 ? `${c.cost}g` : 'free', c.cost <= state.players[0].gold || state.options.freeBuild);
+        } else {
+          g.fillStyle(0x000000, 0.3);
+          g.fillPoints(pts, true);
+        }
       }
       // Yellow line around the edge of the zone
       g.lineStyle(3, 0xfacc15, 0.95);
@@ -918,6 +997,7 @@ export class MapScene extends Phaser.Scene {
         }
       }
     }
+    for (let i = labels; i < this.priceLabels.length; i++) this.priceLabels[i].setVisible(false);
     this.drawSelection();
   }
 
