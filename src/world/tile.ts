@@ -2,7 +2,7 @@
 
 export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
 export type PlayerId = number; // 0 is always the human player
-export type Improvement = 'farm' | 'mine';
+export type Improvement = 'farm' | 'mine' | 'pasture' | 'forest';
 
 export interface Tile {
   col: number;
@@ -62,12 +62,15 @@ export function isLand(tile: Tile): boolean {
   return tile.terrain !== 'water';
 }
 
-// Farms need flat land, mines need high ground.
+// Farms need flat land, pastures (horses) and forests (bows) need grass, mines need high ground.
 export function improvementFits(tile: Tile, imp: Improvement): boolean {
   if (tile.city) return false;
   if (imp === 'farm') return tile.terrain === 'grass' || tile.terrain === 'sand';
+  if (imp === 'pasture' || imp === 'forest') return tile.terrain === 'grass';
   return tile.terrain === 'hills' || tile.terrain === 'mountain';
 }
+
+export const IMPROVEMENT_NAME: Record<Improvement, string> = { farm: 'farm', mine: 'mine', pasture: 'pasture', forest: 'forest' };
 
 // Drop anything that no longer fits after the terrain changed.
 export function fixAfterTerrainChange(tile: Tile): void {

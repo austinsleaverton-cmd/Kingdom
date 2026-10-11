@@ -6,7 +6,7 @@ import { hexDistance } from './map';
 import { MAX_WALLS, YIELD, improvementFits, isLand } from './tile';
 import type { PlayerId, Tile } from './tile';
 import { TROOPS, UNIT_STATS } from './units';
-import type { Unit, UnitType } from './units';
+import type { Job, Unit, UnitType } from './units';
 
 export function runAI(g: GameState, p: PlayerId): void {
   const cfg = DIFFICULTY[g.options.difficulty];
@@ -69,6 +69,9 @@ function wantsSettler(g: GameState, p: PlayerId): boolean {
 function pickTroopType(g: GameState, p: PlayerId): UnitType {
   const cfg = DIFFICULTY[g.options.difficulty];
   const mine = troops(g, p);
+  // Knights need horses (pastures), archers need bows (forests)
+  const canHave = (t: UnitType) =>
+    t === 'knight' ? g.horsesUsed(p) < g.horsesMade(p) : t === 'archer' ? g.bowsUsed(p) < g.bowsMade(p) : true;
   if (cfg.smart) {
     // Counter whatever enemy troops are most common nearby
     const counts: Record<string, number> = {};
@@ -76,14 +79,14 @@ function pickTroopType(g: GameState, p: PlayerId): UnitType {
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
     if (top && top[1] >= 2) {
       const counter = TROOPS.find((t) => UNIT_STATS[t].strongVs === top[0]);
-      if (counter) return counter;
+      if (counter && canHave(counter)) return counter;
     }
   }
   // Default mix: mostly swordsmen (they can capture), some archers, knights when rich
   const archers = mine.filter((u) => u.type === 'archer').length + queued(g, p, (t) => t === 'archer');
-  if (archers < Math.floor((mine.length + 1) / 3)) return 'archer';
+  if (archers < Math.floor((mine.length + 1) / 3) && canHave('archer')) return 'archer';
   const knights = mine.filter((u) => u.type === 'knight').length + queued(g, p, (t) => t === 'knight');
-  if (g.players[p].gold >= 60 && mine.length >= 2 && knights < Math.floor((mine.length + 1) / 4)) return 'knight';
+  if (g.players[p].gold >= 60 && mine.length >= 2 && knights < Math.floor((mine.length + 1) / 4) && canHave('knight')) return 'knight';
   return 'swordsman';
 }
 
@@ -138,7 +141,7 @@ function stepToward(g: GameState, unit: Unit, goal: Tile, keep = 0): void {
 
 // ---------- builders ----------
 
-function builderJob(g: GameState, p: PlayerId, t: Tile): 'farm' | 'mine' | 'walls' | null {
+function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   if (t.owner !== p) return null;
   const cfg = DIFFICULTY[g.options.difficulty];
   if (t.city) {
@@ -149,7 +152,13 @@ function builderJob(g: GameState, p: PlayerId, t: Tile): 'farm' | 'mine' | 'wall
   const hungry = g.foodUsed(p) + 3 > g.foodMade(p);
   const mines = g.ownedTiles(p).filter((x) => x.improvement === 'mine').length;
   if (improvementFits(t, 'mine') && mines < 1 + Math.floor(myCities(g, p).length / 2) && cfg.maxWalls > 0) return 'mine';
-  if (improvementFits(t, 'farm') && (hungry || t.terrain === 'grass')) return 'farm';
+  if (improvementFits(t, 'farm') && hungry) return 'farm';
+  // A few pastures and forests so it can field knights and archers
+  const want = 1 + Math.floor(myCities(g, p).length / 3);
+  const count = (imp: string) => g.ownedTiles(p).filter((x) => x.improvement === imp).length;
+  if (improvementFits(t, 'pasture') && count('pasture') < want) return 'pasture';
+  if (improvementFits(t, 'forest') && count('forest') < want) return 'forest';
+  if (improvementFits(t, 'farm') && t.terrain === 'grass') return 'farm';
   return null;
 }
 
@@ -296,7 +305,7 @@ function nearest(from: Tile, tiles: Tile[]): Tile | null {
 // ---------- settlers ----------
 
 function settleScore(g: GameState, tile: Tile, p: PlayerId): number {
-  if (tile.terrain === 'water' || tile.terrain === 'mountain' || tile.city) return -1;
+  if (tile.terrain !== 'grass' || tile.city) return -1; // cities need grass
   if (tile.owner !== null && tile.owner !== p) return -1;
   if (g.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) return -1;
   let room = 0;

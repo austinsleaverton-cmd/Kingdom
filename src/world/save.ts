@@ -12,6 +12,8 @@ const CAPITAL = 2;
 const ROAD = 4;
 const FARM = 8;
 const MINE = 16;
+const PASTURE = 32;
+const FOREST = 64;
 
 interface SaveData {
   version: 3;
@@ -61,7 +63,9 @@ export function saveGame(state: GameState): void {
         (t.capital ? CAPITAL : 0) |
         (t.road ? ROAD : 0) |
         (t.improvement === 'farm' ? FARM : 0) |
-        (t.improvement === 'mine' ? MINE : 0);
+        (t.improvement === 'mine' ? MINE : 0) |
+        (t.improvement === 'pasture' ? PASTURE : 0) |
+        (t.improvement === 'forest' ? FOREST : 0);
       return t.city ? [t.height, t.owner, flags, t.hp, t.walls, t.shield, t.level, t.growth] : [t.height, t.owner, flags];
     }),
   };
@@ -111,7 +115,7 @@ export function loadGame(): GameState | null {
       t.city = (flags & CITY) !== 0;
       t.capital = (flags & CAPITAL) !== 0;
       t.road = (flags & ROAD) !== 0;
-      t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : null;
+      t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : flags & PASTURE ? 'pasture' : flags & FOREST ? 'forest' : null;
       t.walls = t.city ? (walls ?? 0) : 0;
       t.level = t.city ? (level ?? 1) : 0; // old saves: every city starts as a Village
       t.growth = t.city ? (growth ?? 0) : 0;

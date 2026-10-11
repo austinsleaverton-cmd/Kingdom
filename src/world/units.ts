@@ -20,18 +20,19 @@ export interface UnitStats {
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
+  // food = upkeep: troops eat more than workers
   builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0, hp: 10, atk: 0, range: 0, military: false },
   settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3, hp: 10, atk: 0, range: 0, military: false },
   swordsman: {
-    name: 'Swordsman', letter: 'Sw', cost: 25, food: 1, moves: 2, train: 2,
+    name: 'Swordsman', letter: 'Sw', cost: 25, food: 2, moves: 2, train: 2,
     hp: 30, atk: 8, range: 1, military: true, strongVs: 'archer', canCapture: true,
   },
   archer: {
-    name: 'Archer', letter: 'Ar', cost: 30, food: 1, moves: 2, train: 2,
+    name: 'Archer', letter: 'Ar', cost: 30, food: 2, moves: 2, train: 2,
     hp: 20, atk: 7, range: 2, military: true, strongVs: 'knight',
   },
   knight: {
-    name: 'Knight', letter: 'Kn', cost: 45, food: 2, moves: 4, train: 3,
+    name: 'Knight', letter: 'Kn', cost: 45, food: 3, moves: 4, train: 3,
     hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true,
   },
 };
@@ -62,17 +63,19 @@ export interface Training {
   turnsLeft: number;
 }
 
-export type Job = 'farm' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
+export type Job = 'farm' | 'pasture' | 'forest' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
-  { id: 'farm', label: 'Farm', key: 'F' },
+  { id: 'farm', label: 'Farm (food)', key: 'F' },
+  { id: 'pasture', label: 'Pasture (horses)', key: 'P' },
+  { id: 'forest', label: 'Plant forest (bows)', key: 'T' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
   { id: 'raise', label: 'Raise land', key: 'U' },
   { id: 'lower', label: 'Lower land', key: 'D' },
 ];
 
-export const JOB_COST: Record<Job, number> = { farm: 5, mine: 8, road: 2, walls: 5, raise: 3, lower: 3 };
+export const JOB_COST: Record<Job, number> = { farm: 5, pasture: 6, forest: 4, mine: 8, road: 2, walls: 5, raise: 3, lower: 3 };
 
 const TERRAIN_MOVE: Record<Terrain, number> = {
   water: Infinity,
@@ -84,9 +87,12 @@ const TERRAIN_MOVE: Record<Terrain, number> = {
 
 const hasRoad = (t: Tile) => t.road || t.city;
 
+export const FOREST_MOVE = 2; // forests are slow to walk through (roads still cut through)
+
 export function moveCost(from: Tile, to: Tile): number {
   if (to.terrain === 'water') return Infinity;
   if (hasRoad(from) && hasRoad(to)) return 0.5;
+  if (to.improvement === 'forest' && !to.road) return Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]);
   return TERRAIN_MOVE[to.terrain];
 }
 
