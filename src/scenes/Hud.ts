@@ -32,10 +32,8 @@ export interface PanelModel {
   buttons: PanelButton[];
 }
 
-const MODES: { id: BarMode; label: string; key: string }[] = [
-  { id: 'select', label: 'Select', key: '1' },
-  { id: 'claim', label: 'Claim land', key: '2' },
-];
+// Claiming land is a city action now (city panel), so the bar only needs Select.
+const MODES: { id: BarMode; label: string; key: string }[] = [{ id: 'select', label: 'Select', key: '1' }];
 
 const CSS = `
 .k-hud { position: fixed; inset: 0; pointer-events: none; font: 14px/1.35 system-ui, sans-serif; color: #eee; }
@@ -245,7 +243,7 @@ export class Hud {
       `Settlers found new cities 3+ hexes from any other city. Stand a builder on a city to build walls (stone from mines): the blue bar is a shield that takes damage before the city's health.<br><br>` +
       `<b>Troops</b> (square tokens) train in cities: Swordsman beats Archer, Archer (range 2, no return fire) beats Knight, Knight (fast) beats Swordsman. ` +
       `Select a troop, click a red hex to attack. Knock a city to 0 HP, then march a Swordsman or Knight in to capture it and the land around it. Cities stop healing while enemy troops are within 2 hexes.<br><br>` +
-      `Claim land up to ${CLAIM_RADIUS} hexes from one of your cities (yellow outline in Claim mode, green = buyable now); each tile costs a bit more than the last.<br><br>` +
+      `<b>Land</b> belongs to a city. Select a city and press <b>Claim land</b> (K): its ${CLAIM_RADIUS}-hex area gets a yellow outline and green hexes are buyable now. Each tile costs a bit more than the last. Capturing a city takes all of its land.<br><br>` +
       `Ending your turn warns you about units with no orders; press H (Hold position) on units you want to leave where they are. ` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 

@@ -26,7 +26,7 @@ const TERRAIN_NAME: Record<Terrain, string> = {
 // Hex edge i (between corner i and i+1) faces this neighbor direction.
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
-// select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
+// select: click to select/move. claim: a city buys land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
 export class MapScene extends Phaser.Scene {
@@ -39,6 +39,7 @@ export class MapScene extends Phaser.Scene {
   private selectedUnitId: number | null = null;
   private reach = new Map<Tile, number>();
   private targets = new Map<Tile, AttackPreview>();
+  private claimCity: Tile | null = null; // city buying land in claim mode
   private lastPointer = { x: 0, y: 0 };
 
   private terrainGfx!: Phaser.GameObjects.Graphics;
@@ -128,7 +129,21 @@ export class MapScene extends Phaser.Scene {
 
   private setMode(m: Mode): void {
     this.mode = m;
-    if (m === 'claim') this.clearSelection();
+    if (m !== 'claim') this.claimCity = null;
+    this.redraw();
+  }
+
+  // Claim land is a city action: toggle claim mode for the selected city.
+  private toggleClaim(): void {
+    const city = this.selected;
+    if (!this.state || !city || !city.city || city.owner !== 0) return;
+    if (this.mode === 'claim' && this.claimCity === city) {
+      this.setMode('select');
+      return;
+    }
+    this.selectedUnitId = null;
+    this.claimCity = city;
+    this.mode = 'claim';
     this.redraw();
   }
 
@@ -137,6 +152,8 @@ export class MapScene extends Phaser.Scene {
     this.selectedUnitId = null;
     this.reach = new Map();
     this.targets = new Map();
+    this.claimCity = null;
+    if (this.mode === 'claim') this.mode = 'select';
   }
 
   // Before ending the turn, catch units that were forgotten (unless they're set to hold).
@@ -169,6 +186,7 @@ export class MapScene extends Phaser.Scene {
     const state = this.state;
     if (!state) return;
     this.mode = 'select';
+    this.claimCity = null;
     this.selectedUnitId = unit.id;
     this.selected = state.tileOf(unit);
     const { x, y } = tileCenter(this.selected);
@@ -193,8 +211,14 @@ export class MapScene extends Phaser.Scene {
     if (!state) return;
     switch (this.mode) {
       case 'claim':
-        if (state.perform('claim', tile).ok) break;
-        // Not a valid buy, but it's your city or unit: just select it.
+        if (state.perform('claim', tile, 0, this.claimCity).ok) break;
+        // Clicked another of your cities: claim for that one instead
+        if (tile.city && tile.owner === 0 && tile !== this.claimCity) {
+          this.claimCity = tile;
+          this.selected = tile;
+          break;
+        }
+        // Your own unit: just select it.
         if (this.selectOwn(state, tile)) break;
         return this.fail();
       case 'raise':
@@ -244,6 +268,7 @@ export class MapScene extends Phaser.Scene {
     const ownCity = tile.city && tile.owner === 0;
     if (!ownCity && !(here && here.owner === 0)) return false;
     this.mode = 'select';
+    this.claimCity = null;
     this.selected = null;
     this.selectedUnitId = null;
     this.selectTile(state, tile);
@@ -269,6 +294,8 @@ export class MapScene extends Phaser.Scene {
     const res = state.recruit(type, this.selected);
     if (!res) return this.fail();
     if (res !== 'queued') {
+      this.mode = 'select';
+      this.claimCity = null;
       this.selectedUnitId = res.id;
       this.selected = state.tileOf(res);
     }
@@ -370,7 +397,7 @@ export class MapScene extends Phaser.Scene {
       }
       switch (key) {
         case '1': this.setMode('select'); break;
-        case '2': this.setMode('claim'); break;
+        case 'K': this.toggleClaim(); break;
         case 'B': if (!unit) this.recruit('builder'); break;
         case 'S': if (!unit) this.recruit('settler'); break;
         case ' ':
@@ -380,8 +407,10 @@ export class MapScene extends Phaser.Scene {
   }
 
   private cancel(): void {
-    if (this.mode !== 'select') this.mode = 'select';
-    else this.clearSelection();
+    if (this.mode !== 'select') {
+      this.mode = 'select';
+      this.claimCity = null;
+    } else this.clearSelection();
     this.redraw();
   }
 
@@ -416,7 +445,7 @@ export class MapScene extends Phaser.Scene {
   private hoverCheck(state: GameState, tile: Tile): { label: string; check: Check } | null {
     switch (this.mode) {
       case 'claim':
-        return { label: 'Claim', check: state.check('claim', tile, 0) };
+        return { label: 'Claim', check: state.check('claim', tile, 0, this.claimCity) };
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
@@ -529,6 +558,23 @@ export class MapScene extends Phaser.Scene {
     }
     if (tile.city && tile.owner === 0) {
       if (!unit) title = `${tile.capital ? 'Capital' : 'City'}${state.unitAt(tile)?.owner === 0 ? ' (click again for the unit)' : ''}`;
+      const claiming = this.mode === 'claim' && this.claimCity === tile;
+      const open = state.openClaims(tile);
+      if (claiming) {
+        title = `${tile.capital ? 'Capital' : 'City'}: claiming land`;
+        lines.push('Click green hexes to buy them for this city. K or right-click to stop.');
+      }
+      lines.push(`Land: ${state.cityLand(tile).length} tiles · ${open > 0 ? `${open} more in range` : 'area full: send a settler'}`);
+      if (!unit) {
+        buttons.push({
+          label: claiming ? 'Stop claiming' : 'Claim land',
+          key: 'K',
+          enabled: claiming || open > 0,
+          hint: claiming ? 'done' : open > 0 ? `${open} hexes open` : 'area full',
+          active: claiming,
+          onClick: () => this.toggleClaim(),
+        });
+      }
       const recruitables: { type: UnitType; key?: string }[] = [
         { type: 'builder', key: 'B' },
         { type: 'settler', key: 'S' },
@@ -565,6 +611,8 @@ export class MapScene extends Phaser.Scene {
           enabled: true,
           hint: 'or click the city again',
           onClick: () => {
+            this.mode = 'select';
+            this.claimCity = null;
             this.selectedUnitId = here.id;
             this.redraw();
           },
@@ -625,6 +673,13 @@ export class MapScene extends Phaser.Scene {
     const unit = this.selectedUnit;
     if (this.selectedUnitId !== null && !unit) this.clearSelection();
     if (unit) this.selected = state.tileOf(unit);
+    if (this.mode === 'claim') {
+      // Stop if the city was lost
+      if (!this.claimCity || this.claimCity.owner !== 0) {
+        this.mode = 'select';
+        this.claimCity = null;
+      } else this.selected = this.claimCity;
+    }
     this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
     this.targets = unit && this.mode === 'select' ? this.findTargets(state, unit) : new Map();
 
@@ -705,12 +760,19 @@ export class MapScene extends Phaser.Scene {
       g.fillStyle(color, 0.22);
       g.fillPoints(pts, true);
 
-      g.lineStyle(3, color, 1);
       for (let i = 0; i < 6; i++) {
         const n = map.neighborAt(t, EDGE_TO_DIR[i]);
-        if (n && n.owner === t.owner) continue;
         const a = pts[i];
         const b = pts[(i + 1) % 6];
+        if (n && n.owner === t.owner) {
+          // Same kingdom, different city: faint divider
+          if (n.home !== t.home) {
+            g.lineStyle(1.5, 0xffffff, 0.35);
+            g.lineBetween(a.x, a.y, b.x, b.y);
+          }
+          continue;
+        }
+        g.lineStyle(3, color, 1);
         g.lineBetween(a.x, a.y, b.x, b.y);
       }
 
@@ -797,8 +859,9 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: hexes within CLAIM_RADIUS of one of your cities. Dim everything else.
-      const zone = new Set(state.map.tiles.filter((t) => state.inClaimRange(t, 0)));
+      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else.
+      const city = this.claimCity;
+      const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, 0))));
       g.fillStyle(0x000000, 0.35);
       for (const t of state.map.tiles) {
         if (zone.has(t)) continue;
@@ -810,7 +873,7 @@ export class MapScene extends Phaser.Scene {
       g.lineStyle(2, 0x4ade80, 0.9);
       for (const t of zone) {
         if (t.owner === 0 || t.terrain === 'water') continue;
-        if (!state.check('claim', t, 0).ok) continue;
+        if (!state.check('claim', t, 0, city).ok) continue;
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
         g.fillPoints(pts, true);

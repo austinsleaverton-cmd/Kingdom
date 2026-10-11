@@ -14,6 +14,7 @@ export interface Tile {
   capital: boolean;
   improvement: Improvement | null;
   road: boolean;
+  home: number | null; // owned land: index (row * width + col) of the city tile it belongs to
   // City only (0 elsewhere)
   hp: number;
   walls: number; // wall level 0-3
@@ -62,6 +63,7 @@ export function fixAfterTerrainChange(tile: Tile): void {
   if (tile.terrain === 'water') {
     tile.road = false;
     tile.owner = null;
+    tile.home = null;
     tile.city = false;
     tile.capital = false;
     tile.hp = 0;
@@ -99,6 +101,7 @@ export function makeTile(col: number, row: number, height: number): Tile {
     capital: false,
     improvement: null,
     road: false,
+    home: null,
     hp: 0,
     walls: 0,
     shield: 0,

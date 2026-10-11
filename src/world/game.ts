@@ -96,7 +96,7 @@ export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
 export const CAPITAL_INCOME = 5;
 export const WIN_SHARE = 0.6;
-export const CLAIM_RADIUS = 3; // can only buy land this many hexes (or fewer) from one of your cities
+export const CLAIM_RADIUS = 3; // a city can only own land this many hexes (or fewer) away
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
 export const CITY_SPACING = 3; // cities must be at least this many hexes apart
@@ -278,6 +278,74 @@ export class GameState {
     return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
   }
 
+  // ---------- city land ----------
+
+  tileIndex(t: Tile): number {
+    return t.row * this.map.width + t.col;
+  }
+
+  // The city a piece of owned land belongs to.
+  homeCity(t: Tile): Tile | null {
+    if (t.home === null) return null;
+    const c = this.map.tiles[t.home];
+    return c && c.city ? c : null;
+  }
+
+  belongsTo(t: Tile, city: Tile): boolean {
+    return t.home === this.tileIndex(city);
+  }
+
+  cityLand(city: Tile): Tile[] {
+    const i = this.tileIndex(city);
+    return this.map.tiles.filter((t) => t.home === i && t.owner === city.owner);
+  }
+
+  inCityRange(tile: Tile, city: Tile): boolean {
+    return hexDistance(tile, city) <= CLAIM_RADIUS;
+  }
+
+  // Which of p's cities would get this tile: the given city if it qualifies, else the nearest one
+  // in range whose land the tile touches.
+  claimingCity(tile: Tile, p: PlayerId, city?: Tile | null): Tile | null {
+    const ok = (c: Tile) =>
+      c.city && c.owner === p && this.inCityRange(tile, c) && this.map.neighbors(tile).some((n) => n.owner === p && this.belongsTo(n, c));
+    if (city) return ok(city) ? city : null;
+    let best: Tile | null = null;
+    for (const c of this.cities()) {
+      if (!ok(c)) continue;
+      if (!best || hexDistance(tile, c) < hexDistance(tile, best)) best = c;
+    }
+    return best;
+  }
+
+  // Old saves: give every owned tile without a home to its owner's nearest city.
+  assignMissingHomes(): void {
+    for (const t of this.map.tiles) {
+      if (t.owner === null || this.homeCity(t)?.owner === t.owner) continue;
+      if (t.city) {
+        t.home = this.tileIndex(t);
+        continue;
+      }
+      let best: Tile | null = null;
+      for (const c of this.cities()) {
+        if (c.owner !== t.owner) continue;
+        if (!best || hexDistance(t, c) < hexDistance(t, best)) best = c;
+      }
+      t.home = best ? this.tileIndex(best) : null;
+    }
+  }
+
+  // Unowned land a city could still buy (ignores gold).
+  openClaims(city: Tile): number {
+    if (city.owner === null) return 0;
+    let n = 0;
+    for (const t of this.map.tiles) {
+      if (t.owner !== null || !isLand(t) || !this.inCityRange(t, city)) continue;
+      if (this.claimingCity(t, city.owner, city)) n++;
+    }
+    return n;
+  }
+
   // Hexes from this tile to the closest city you own.
   cityDistance(tile: Tile, p: PlayerId): number {
     let best = Infinity;
@@ -309,7 +377,8 @@ export class GameState {
     return this.map.neighbors(tile).some((n) => n.owner === p);
   }
 
-  check(action: Action, tile: Tile, p: PlayerId = this.current): Check {
+  // For claims, pass the city doing the buying; without one (AI) the best nearby city is used.
+  check(action: Action, tile: Tile, p: PlayerId = this.current, city?: Tile | null): Check {
     if (this.winner !== null) return fail('Game over');
     const free = p === 0 && this.options.freeBuild;
     const gold = this.players[p].gold;
@@ -324,10 +393,17 @@ export class GameState {
         // Owned land belongs to that player's cities: the only way to take it is to conquer the city.
         if (tile.owner !== null) return fail(`${this.players[tile.owner].name}'s land: conquer their city to take it`);
         if (!isLand(tile)) return fail("Can't claim water");
+        if (city) {
+          const d = hexDistance(tile, city);
+          if (d > CLAIM_RADIUS) return fail(`Too far: ${d} hexes from this city (max ${CLAIM_RADIUS}). Send a settler`);
+          if (!this.claimingCity(tile, p, city)) return fail("Must touch this city's land");
+          return withGold(this.claimCost(tile, p));
+        }
         if (!this.touches(tile, p)) return fail('Must border your land');
         if (!this.inClaimRange(tile, p)) {
           return fail(`Too far: ${this.cityDistance(tile, p)} hexes from your nearest city (max ${CLAIM_RADIUS}). Send a settler`);
         }
+        if (!this.claimingCity(tile, p)) return fail('Must touch the land of a city within range');
         return withGold(this.claimCost(tile, p));
       }
     }
@@ -335,9 +411,9 @@ export class GameState {
 
   // ---------- actions ----------
 
-  // Claim only ever targets unowned land (see check), so this just buys the tile.
-  perform(action: Action, tile: Tile, p: PlayerId = this.current): Check {
-    const result = this.check(action, tile, p);
+  // Claim only ever targets unowned land (see check): the tile joins the buying city's land.
+  perform(action: Action, tile: Tile, p: PlayerId = this.current, city?: Tile | null): Check {
+    const result = this.check(action, tile, p, city);
     if (!result.ok) return result;
     const player = this.players[p];
     player.gold -= result.cost;
@@ -346,6 +422,7 @@ export class GameState {
     switch (action) {
       case 'claim':
         tile.owner = p;
+        tile.home = this.tileIndex(this.claimingCity(tile, p, city)!);
         player.claims += 1;
         break;
     }
@@ -376,13 +453,17 @@ export class GameState {
     const p = unit.owner;
     this.units = this.units.filter((u) => u !== unit);
     tile.owner = p;
+    tile.home = this.tileIndex(tile);
     tile.city = true;
     tile.improvement = null;
     tile.hp = cityMaxHp(tile);
     tile.walls = 0;
     tile.shield = 0;
     for (const n of this.map.neighbors(tile)) {
-      if (n.owner === null && isLand(n)) n.owner = p;
+      if (n.owner === null && isLand(n)) {
+        n.owner = p;
+        n.home = tile.home;
+      }
     }
     this.invalidate();
     this.addLog(`${this.players[p].name} founded a city`);
@@ -545,25 +626,12 @@ export class GameState {
     return pv;
   }
 
-  // The captor gets the city plus the loser's land that is closer to it than to their other cities.
+  // The captor gets the city plus all the land that belongs to it.
   // Taking a capital knocks the owner out entirely.
   private captureCity(city: Tile, captor: PlayerId): void {
     const prev = city.owner;
     if (prev === null) return;
-    const theirCities = this.cities().filter((c) => c.owner === prev);
-    for (const t of this.map.tiles) {
-      if (t.owner !== prev || t === city) continue;
-      let nearest = city;
-      let best = hexDistance(t, city);
-      for (const c of theirCities) {
-        const d = hexDistance(t, c);
-        if (d < best) {
-          best = d;
-          nearest = c;
-        }
-      }
-      if (nearest === city) t.owner = captor;
-    }
+    for (const t of this.cityLand(city)) t.owner = captor;
     const wasCapital = city.capital;
     city.owner = captor;
     city.capital = false;
@@ -710,7 +778,7 @@ export class GameState {
     if (this.log.length > 6) this.log.shift();
   }
 
-  // Taking a capital knocks that player out; their land goes to the captor.
+  // Taking a capital knocks that player out; all their land (and cities) go to the captor.
   private eliminate(loser: PlayerId, captor: PlayerId): void {
     const l = this.players[loser];
     const c = this.players[captor];
@@ -783,6 +851,7 @@ export class GameState {
         best.terrain = 'grass';
       }
       best.owner = pl.id;
+      best.home = this.tileIndex(best);
       best.city = true;
       best.capital = true;
       best.hp = cityMaxHp(best);
@@ -791,7 +860,10 @@ export class GameState {
           n.height = 1;
           n.terrain = 'sand';
         }
-        if (n.owner === null) n.owner = pl.id;
+        if (n.owner === null) {
+          n.owner = pl.id;
+          n.home = best.home;
+        }
       }
       capitals.push(best);
     }

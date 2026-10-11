@@ -9,15 +9,15 @@
 ## Structure (do not explore to confirm this, trust it)
 - src/main.ts: Phaser game config and boot (loads MapScene)
 - src/world/: game data and logic only, no Phaser imports
-  - tile.ts: Tile type (terrain, owner, city, improvement, road, city hp/walls/shield), terrain rules, yields, claim costs
+  - tile.ts: Tile type (terrain, owner, home city, city, improvement, road, city hp/walls/shield), terrain rules, yields, claim costs
   - map.ts: WorldMap, map generation, neighbors, raiseHeight/lowerHeight
   - units.ts: unit types/stats (builder, settler, swordsman, archer, knight), training, builder jobs, movement costs, reachable()
-  - game.ts: GameState: players, gold/food/stone, turns, claim, recruit/train/move/jobs, settlers, combat (attackPreview/attack), city capture, idle-unit check/hold, win checks, DIFFICULTY table
+  - game.ts: GameState: players, gold/food/stone, turns, city land (home/cityLand/claimingCity/openClaims), claim, recruit/train/move/jobs, settlers, combat (attackPreview/attack), city capture, idle-unit check/hold, win checks, DIFFICULTY table
   - ai.ts: rival AI (troops, builders, settlers, recruiting, land). Uses only public GameState methods, same rules as the human
-  - save.ts: autosave/load to localStorage (key kingdom-save-v3)
+  - save.ts: autosave/load to localStorage (key kingdom-save-v3). Old saves without `homes` get land assigned to the nearest city on load
 - src/scenes/: rendering and input only
-  - MapScene.ts: draws hexes, roads, buildings, unit tokens with drawn icons, borders, city bars, claim zone; selection, movement, attack targets, modes, camera, end-of-turn idle check; autosaves after every redraw
-  - Hud.ts: DOM overlay (collapsible stats/help/selection panels, mode bar, tooltip, idle-unit prompt, game over)
+  - MapScene.ts: draws hexes, roads, buildings, unit tokens with drawn icons, kingdom borders + faint city dividers, city bars, claim zone; selection, movement, attack targets, city claim mode, camera, end-of-turn idle check; autosaves after every redraw
+  - Hud.ts: DOM overlay (collapsible stats/help/selection panels, Select/End turn/Menu bar, tooltip, idle-unit prompt, game over)
   - Menu.ts: start screen (map size, rivals, difficulty, free building, continue)
 - src/game/ and the other files in src/scenes/ are old unused stubs
 
@@ -44,12 +44,12 @@
 - Food is supply: capital 3, city 2, farm 3. Units (and units in training) use food
 - Stone: mines give 2/turn, pays for walls
 - Builder (15g, instant, 2 moves): one job per turn on own land: farm, mine, road, walls (on a city: 10/20/30 stone + 5g, +40 shield per level, max 3), raise/lower its tile or a neighbor
-- Settler (10g + 10g per city owned, 3 turns): founds a city on unclaimed or own land, 3+ hexes from any city; consumed. Settlers are the only way to found cities
-- Claim: buy UNOWNED land only, bordering yours, within 3 hexes (CLAIM_RADIUS) of one of your cities. Claim mode dims everything outside the zone and outlines it in yellow. Price +8% per tile bought. Owned land can never be claimed: the only way to take it is to capture the city
+- Settler (10g + 10g per city owned, 3 turns): founds a city on unclaimed or own land, 3+ hexes from any city; consumed. Settlers are the only way to found cities. New city gets its 6 neighbors
+- Land belongs to a city (tile.home = index of the city tile). Claim land is a city action: select a city, press Claim land (K). Only unowned land within 3 hexes (CLAIM_RADIUS) of THAT city that touches THAT city's land. Zone is outlined yellow, the rest dimmed, green = buyable now. Price +8% per tile bought. Owned land can never be claimed
 - City HP 100, capital 150. Shield absorbs damage first. Both regen 10/turn unless enemy troops within 2 hexes
 - Troops: Swordsman (25g, 2 turns, 30hp, atk 8, beats Archer), Archer (30g, 2 turns, 20hp, atk 7, range 2, no return fire, beats Knight), Knight (45g, 3 turns, 2 food, 35hp, atk 10, 4 moves, beats Swordsman, half damage vs walls)
 - Combat: one attack per turn, ends movement. Strong-vs = 1.5x. Hills 0.8 / mountain 0.7 / own city 0.75 damage taken. Melee defenders hit back at 50%. Cities hit melee attackers back (4 + 2 per wall level). Troops deal 1.5x to cities
-- Capture: city at 0 HP + Swordsman/Knight moves in. Captor gets the city and the loser's land closer to it than to their other cities. Capturing a capital eliminates that player (all their land to captor)
+- Capture: city at 0 HP + Swordsman/Knight moves in. Captor gets the city and exactly the land that belongs to it. Capturing a capital eliminates that player (all their land and cities to captor)
 - Units heal 5/turn at home, 2 elsewhere
 - End turn: if any of your units haven't moved/acted (and aren't on Hold), a prompt offers Show me / Hold them all / End turn anyway. H toggles Hold on a unit; moving or acting clears it
 - Move costs: grass/sand 1, hills 2, mountain 3, road-to-road 0.5. Enemy cities block movement until destroyed
@@ -61,7 +61,8 @@
 3. DONE troops, combat, capture
 4. DONE AI uses builders (farms, mines, walls), troops (defend, attack, capture), settlers; Easy/Normal/Hard
 5. DONE first balance pass (AI troop mix, Easy has no AI land win)
-6. DONE unit icons, end-of-turn idle check, claim radius 3 with zone outline
+6. DONE unit icons, end-of-turn idle check, claim radius 3
+7. DONE land belongs to cities, Claim land is a city action
 
 ## Open ideas (not started)
 - Terraforming: 2-hex builder reach and/or a "Shape land" brush in sandbox/free-build
