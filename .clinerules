@@ -3,31 +3,34 @@
 ## Stack
 - Vite + TypeScript + Phaser 3, browser only, no backend
 - Run: `npm run dev`. Deploys to GitHub Pages via .github/workflows/deploy.yml (`npx vite build`)
+- PWA: public/manifest.webmanifest + public/sw.js (network-first offline cache). Icons are drawn in scripts/icons.mjs and emitted by a plugin in vite.config.ts (no image files in the repo)
 
 ## Structure (trust this, don't explore to confirm)
-- src/main.ts: Phaser config, boots MapScene
+- src/main.ts: Phaser config, boots MapScene, registers the service worker (production only)
 - src/world/: pure game logic, no Phaser imports
   - tile.ts: Tile type, terrain from height, yields, claim costs, walls, city levels (growth)
   - map.ts: WorldMap, generation, neighbors, hexDistance, raise/lower
   - units.ts: unit stats, jobs, move costs, reachable(), findPath() + routeTurns() for routes
-  - game.ts: GameState: players, turns, economy, claims, cities, training, combat, capture, growth, routes, win checks, DIFFICULTY
+  - game.ts: GameState: seats/players, turns, economy, claims, cities, training, combat, capture, growth, routes, win checks, DIFFICULTY
   - ai.ts: rival AI, uses only public GameState methods
   - save.ts: localStorage save/load (key kingdom-save-v3), fills gaps from older saves
 - src/scenes/: rendering and input only
-  - MapScene.ts: hexes, borders, cities, units, overlays, routes, clicks, hover, camera, pinch zoom
-  - Hud.ts: DOM overlay (stats, bottom bar, selection panel sections, tooltip, idle prompt, help)
-  - Menu.ts: start menu (map size, rivals, difficulty)
+  - MapScene.ts: hexes, borders, cities, units, overlays, routes, clicks, hover, camera, pinch zoom, hot-seat hand-off
+  - Hud.ts: DOM overlay (stats, bottom bar, selection panel sections, tooltip, idle prompt, pass screen, help)
+  - Menu.ts: start menu (map size, players list, difficulty)
 - src/game/ and other files in src/scenes/ are old unused stubs (break `npm run build`, safe to delete)
 
 ## Behavior rules
 - Don't explore the project unless asked or a file is missing. Only touch files for the current request.
 - One step at a time. No features I didn't ask for.
 - World logic stays in src/world. Scenes read the world and call GameState methods.
+- Never assume player 0 is "the human". Scenes act as `state.current` (MapScene `this.me`); check `players[p].isAI`.
 - After changes, tell me what changed in 1-3 lines and how to test it.
 
 ## Game rules (current)
-- Pointy-top odd-r hexes. Map sizes small 20x14, medium 30x20, large 44x30, huge 60x40. You + 0-3 AI (0 = sandbox)
-- Difficulty Easy (default) / Normal / Hard: AI income 0.7/1/1.25x, max troops 3/8/14, attacks from turn 45/22/14, AI land win off on Easy, builder jobs unlimited/3/3. Hard counters your troops and retreats wounded units
+- Pointy-top odd-r hexes. Map sizes small 20x14, medium 30x20, large 44x30, huge 60x40
+- Players: 1-4 seats, each a named Person or AI (options.seats). Seat 1 is always a person. 1 seat = sandbox. 2+ people = hot-seat: pass-the-device screen between people, log/win text uses names
+- Difficulty (AI only) Easy (default) / Normal / Hard: AI income 0.7/1/1.25x, max troops 3/8/14, attacks from turn 45/22/14, AI land win off on Easy, builder jobs unlimited/3/3. Hard counters troops and retreats wounded units
 - Gold: tile yields + city 3 + capital 5 + city level bonus. Food: capital 3, city 2, farm 3. Mines: 2 stone
 - Land belongs to a city (tile.home). Claim land is a city action: unowned land within 3 hexes (4 at level 3+) touching that city's land, price +8% per tile bought
 - Builder 15g: farm, mine, road, raise/lower, one job per turn, retires after its last job on Normal/Hard
@@ -37,10 +40,10 @@
 - Cities regen 10/turn unless enemy troops within 2 hexes. A 0 HP city is captured by walking in. Capital capture eliminates the player
 - Units heal 25% max HP per turn on their own land only
 - City growth: spare food fills a growth bar (10/25/45/70), levels 1-5 Village..Metropolis: +gold, +food, +10 HP each, claim radius 4 at level 3, faster training at 5. Stalls under siege, capture drops a level
-- Routes: select a unit, tap a far hex = preview (path, numbered turn stops), tap again = go. Moves itself at the start of each turn, re-planned every turn. Waits behind your units, routes around them after 2 waits, stops if enemies come within 2 hexes, ends next to enemy units/cities and never attacks by itself. X or any manual move/attack cancels
+- Routes: select a unit, tap a far hex = preview (path, numbered turn stops), tap again = go. Moves itself at the start of each turn, re-planned every turn. Waits behind own units, routes around them after 2 waits, stops if enemies come within 2 hexes, ends next to enemy units/cities and never attacks by itself. X or any manual move/attack cancels
 - Auto-select jumps to the next unit with work; Space checks idle units first (Hold skips them)
-- Win: take every rival capital or hold 60% of the land
+- Win: last kingdom standing, or hold 60% of the land. All people out = AI wins
 
 ## Roadmap
-1-8 done (economy, builders, settlers, walls, troops, AI, difficulty, UI polish), 9 city growth done, 10 routes done
-- Next ideas: troop ranks (XP per troop), new troops (Catapult, Boat, Medic), terraforming tweaks
+1-10 done (economy, builders, settlers, walls, troops, AI, difficulty, UI polish, city growth, routes), 11 hot-seat + PWA done
+- Next ideas: per-player handicap (kids), troop ranks (XP per troop), new troops (Catapult, Boat, Medic), online play (Cloudflare Worker), terraforming tweaks

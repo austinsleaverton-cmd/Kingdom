@@ -119,15 +119,50 @@ export class MapScene extends Phaser.Scene {
     this.menu.hide();
     this.hud.setVisible(true);
     this.redraw();
-    const cap = state.map.tiles.find((t) => t.capital && t.owner === 0) ?? state.map.tiles.find((t) => t.owner === 0);
+    this.cameras.main.setZoom(1.2);
+    this.centerOnHome();
+    if (this.needsPass) this.handOff();
+  }
+
+  private centerOnHome(): void {
+    const state = this.state;
+    if (!state) return;
+    const cap = state.map.tiles.find((t) => t.capital && t.owner === this.me) ?? state.map.tiles.find((t) => t.owner === this.me);
     if (cap) {
       const { x, y } = tileCenter(cap);
-      this.cameras.main.setZoom(1.2).centerOn(x, y);
+      this.cameras.main.centerOn(x, y);
     }
   }
 
+  // Hot-seat: show the "pass the device" screen whenever it's a different person's turn
+  private get needsPass(): boolean {
+    const state = this.state;
+    return !!state && state.hotseat && state.winner === null && state.humansAlive().length > 1;
+  }
+
+  private handOff(): void {
+    const state = this.state;
+    if (!state) return;
+    this.clearSelection();
+    this.mode = 'select';
+    this.redraw();
+    const p = state.players[state.current];
+    const cities = state.cityCount(p.id);
+    const note = `${cities} ${cities === 1 ? 'city' : 'cities'} \u00b7 ${p.gold} gold`;
+    this.hud.showPass(p.name, p.color, state.turn, note, () => {
+      this.centerOnHome();
+      this.redraw();
+      this.autoAdvance(null);
+    });
+  }
+
   private get playing(): boolean {
-    return this.state !== null && !this.menu.visible;
+    return this.state !== null && !this.menu.visible && !this.hud.passVisible;
+  }
+
+  // Whose turn it is: with hot-seat play this is whichever person is holding the device
+  private get me(): number {
+    return this.state?.current ?? 0;
   }
 
   private get selectedUnit(): Unit | null {
@@ -146,7 +181,7 @@ export class MapScene extends Phaser.Scene {
   // Claim land is a city action: toggle claim mode for the selected city.
   private toggleClaim(): void {
     const city = this.selected;
-    if (!this.state || !city || !city.city || city.owner !== 0) return;
+    if (!this.state || !city || !city.city || city.owner !== this.me) return;
     if (this.mode === 'claim' && this.claimCity === city) {
       this.setMode('select');
       return;
@@ -172,7 +207,7 @@ export class MapScene extends Phaser.Scene {
     const state = this.state;
     if (!state || !this.playing || state.winner !== null) return;
     if (this.hud.idleVisible) force = true; // second press of End turn / Space
-    const idle = state.idleUnits(0);
+    const idle = state.idleUnits(this.me);
     if (!force && idle.length > 0) {
       // Jump to the nearest waiting unit, then ask (Space again ends the turn anyway)
       const cur = this.selectedUnit;
@@ -197,6 +232,7 @@ export class MapScene extends Phaser.Scene {
     this.hud.hideIdle();
     state.endTurn();
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
+    if (this.needsPass) return this.handOff();
     this.redraw();
     // New turn: start on the unit nearest to where you left off
     this.autoAdvance(this.selected);
@@ -216,7 +252,7 @@ export class MapScene extends Phaser.Scene {
   private toggleHold(): void {
     const state = this.state;
     const unit = this.selectedUnit;
-    if (!state || !unit || unit.owner !== 0) return;
+    if (!state || !unit || unit.owner !== this.me) return;
     state.setHold(unit, !unit.hold);
     this.redraw();
   }
@@ -225,7 +261,7 @@ export class MapScene extends Phaser.Scene {
   // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
   // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
-    if (u.owner !== 0 || u.hold || u.goal || state.current !== 0) return false;
+    if (u.owner !== this.me || u.hold || u.goal || state.players[state.current].isAI) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
@@ -234,13 +270,13 @@ export class MapScene extends Phaser.Scene {
   private autoAdvance(from: Tile | null): void {
     const state = this.state;
     if (!state || state.winner !== null || this.mode !== 'select') return;
-    from = from ?? state.map.tiles.find((t) => t.capital && t.owner === 0) ?? null;
+    from = from ?? state.map.tiles.find((t) => t.capital && t.owner === this.me) ?? null;
     if (!from) return;
     const cur = this.selectedUnit;
     if (cur && this.hasWork(state, cur)) return;
     let best: Unit | null = null;
     let bestD = Infinity;
-    for (const u of state.unitsOf(0)) {
+    for (const u of state.unitsOf(this.me)) {
       if (u === cur || !this.hasWork(state, u)) continue;
       const d = hexDistance(state.tileOf(u), from);
       if (d < bestD) {
@@ -255,7 +291,7 @@ export class MapScene extends Phaser.Scene {
   private nextUnit(): void {
     const state = this.state;
     if (!state) return;
-    const ready = state.unitsOf(0).filter((u) => this.hasWork(state, u)).sort((a, b) => a.id - b.id);
+    const ready = state.unitsOf(this.me).filter((u) => this.hasWork(state, u)).sort((a, b) => a.id - b.id);
     if (!ready.length) return this.fail();
     const cur = this.selectedUnitId ?? -1;
     this.focusUnit(ready.find((u) => u.id > cur) ?? ready[0]);
@@ -271,9 +307,9 @@ export class MapScene extends Phaser.Scene {
     let acted = false; // a unit used moves or its action: maybe jump to the next one
     switch (this.mode) {
       case 'claim':
-        if (state.perform('claim', tile, 0, this.claimCity).ok) break;
+        if (state.perform('claim', tile, this.me, this.claimCity).ok) break;
         // Clicked another of your cities: claim for that one instead
-        if (tile.city && tile.owner === 0 && tile !== this.claimCity) {
+        if (tile.city && tile.owner === this.me && tile !== this.claimCity) {
           this.claimCity = tile;
           this.selected = tile;
           break;
@@ -336,10 +372,10 @@ export class MapScene extends Phaser.Scene {
 
   // Tapping a far hex with your unit selected plans a route, unless it's your own unit or city (that selects it).
   private canRoute(state: GameState, unit: Unit, tile: Tile): boolean {
-    if (unit.owner !== 0 || state.current !== 0 || state.winner !== null) return false;
+    if (unit.owner !== this.me || state.players[state.current].isAI || state.winner !== null) return false;
     const here = state.unitAt(tile);
-    if (here && here.owner === 0) return false;
-    if (tile.city && tile.owner === 0) return false;
+    if (here && here.owner === this.me) return false;
+    if (tile.city && tile.owner === this.me) return false;
     return true;
   }
 
@@ -357,15 +393,15 @@ export class MapScene extends Phaser.Scene {
     const state = this.state;
     const unit = this.selectedUnit;
     this.routePreview = null;
-    if (state && unit && unit.owner === 0) state.clearRoute(unit);
+    if (state && unit && unit.owner === this.me) state.clearRoute(unit);
     this.redraw();
   }
 
   // City first (it's the main thing on a tile); click the same city again to get the unit on it.
   private selectTile(state: GameState, tile: Tile): void {
     const here = state.unitAt(tile);
-    const mine = here && here.owner === 0 ? here : null;
-    const ownCity = tile.city && tile.owner === 0;
+    const mine = here && here.owner === this.me ? here : null;
+    const ownCity = tile.city && tile.owner === this.me;
     if (ownCity && mine) {
       const cityAlreadySelected = this.selected === tile && this.selectedUnitId === null;
       this.selectedUnitId = cityAlreadySelected ? mine.id : null;
@@ -377,8 +413,8 @@ export class MapScene extends Phaser.Scene {
 
   private selectOwn(state: GameState, tile: Tile): boolean {
     const here = state.unitAt(tile);
-    const ownCity = tile.city && tile.owner === 0;
-    if (!ownCity && !(here && here.owner === 0)) return false;
+    const ownCity = tile.city && tile.owner === this.me;
+    if (!ownCity && !(here && here.owner === this.me)) return false;
     this.mode = 'select';
     this.claimCity = null;
     this.selected = null;
@@ -419,7 +455,7 @@ export class MapScene extends Phaser.Scene {
   private buildWalls(city: Tile): void {
     const state = this.state;
     if (!state) return;
-    if (!state.buildWalls(city, 0).ok) return this.fail();
+    if (!state.buildWalls(city, this.me).ok) return this.fail();
     this.redraw();
   }
 
@@ -536,6 +572,11 @@ export class MapScene extends Phaser.Scene {
     });
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
+      if (this.hud.passVisible && !this.menu.visible) {
+        if (e.key === ' ' || e.key === 'Enter') this.hud.startPass();
+        else if (e.key === 'Escape') this.openMenu();
+        return;
+      }
       if (e.key === 'Escape') {
         if (!this.playing) this.continueGame();
         else if (this.selected || this.mode !== 'select') {
@@ -571,7 +612,7 @@ export class MapScene extends Phaser.Scene {
         case 'N':
         case 'TAB': e.preventDefault(); this.nextUnit(); break;
         case 'K': this.toggleClaim(); break;
-        case 'W': if (!unit && this.selected?.city && this.selected.owner === 0) this.buildWalls(this.selected); break;
+        case 'W': if (!unit && this.selected?.city && this.selected.owner === this.me) this.buildWalls(this.selected); break;
         case 'B': if (!unit) this.recruit('builder'); break;
         case 'S': if (!unit) this.recruit('settler'); break;
         case ' ':
@@ -619,7 +660,7 @@ export class MapScene extends Phaser.Scene {
   private hoverCheck(state: GameState, tile: Tile): { label: string; check: Check } | null {
     switch (this.mode) {
       case 'claim':
-        return { label: 'Claim', check: state.check('claim', tile, 0, this.claimCity) };
+        return { label: 'Claim', check: state.check('claim', tile, this.me, this.claimCity) };
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
@@ -643,7 +684,7 @@ export class MapScene extends Phaser.Scene {
           const t = `${plan.turns} turn${plan.turns === 1 ? '' : 's'}${plan.nextTo ? ', stops next to it' : ''}`;
           return { label: 'Route', check: { ok: true, cost: 0, reason: again ? `${t} \u00b7 click again to go` : `${t} \u00b7 click to see the path` } };
         }
-        if (tile.city && tile.owner !== null && tile.owner !== 0) return { label: 'Move in', check: { ok: true, cost: 0, reason: 'capture this city!' } };
+        if (tile.city && tile.owner !== null && tile.owner !== this.me) return { label: 'Move in', check: { ok: true, cost: 0, reason: 'capture this city!' } };
         return { label: 'Move', check: { ok: true, cost: 0, reason: `${left} moves left after` } };
       }
     }
@@ -690,7 +731,7 @@ export class MapScene extends Phaser.Scene {
 
   private renameCity(city: Tile): void {
     const state = this.state;
-    if (!state || city.owner !== 0) return;
+    if (!state || city.owner !== this.me) return;
     const name = window.prompt('Name this city', state.cityName(city));
     if (name) state.renameCity(city, name);
     this.redraw();
@@ -705,7 +746,7 @@ export class MapScene extends Phaser.Scene {
     if (!tile) return null;
     const unit = this.selectedUnit;
     if (unit) return this.unitPanel(state, unit);
-    if (tile.city && tile.owner === 0) return this.cityPanel(state, tile);
+    if (tile.city && tile.owner === this.me) return this.cityPanel(state, tile);
     return this.tilePanel(state, tile);
   }
 
@@ -733,7 +774,7 @@ export class MapScene extends Phaser.Scene {
     sections.push(status);
 
     // Route: what's planned, or how to plan one
-    if (unit.owner === 0) {
+    if (unit.owner === this.me) {
       const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview.plan : null;
       const active = unit.goal ? state.routeLeft(unit) : null;
       const lines: string[] = [];
@@ -774,7 +815,7 @@ export class MapScene extends Phaser.Scene {
         });
       }
     }
-    if (unit.owner === 0) {
+    if (unit.owner === this.me) {
       actions.push({
         label: unit.hold ? 'Stop holding' : 'Hold position',
         key: 'H',
@@ -823,7 +864,7 @@ export class MapScene extends Phaser.Scene {
       lines: growLines,
     });
 
-    const wc = state.wallCheck(city, 0);
+    const wc = state.wallCheck(city, this.me);
     const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
     sections.push({
       heading: 'Defense',
@@ -869,7 +910,7 @@ export class MapScene extends Phaser.Scene {
       ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
     ];
     for (const r of recruitables) {
-      const c = state.recruitCheck(r.type, city, 0);
+      const c = state.recruitCheck(r.type, city, this.me);
       const s = UNIT_STATS[r.type];
       const time = s.train > 0 ? ` · ${s.train}t` : '';
       train.push({
@@ -883,7 +924,7 @@ export class MapScene extends Phaser.Scene {
     const queued = state.trainingAt(city);
     const trainLines = queued
       ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
-      : [`One unit at a time \u00b7 food left: ${state.foodMade(0) - state.foodUsed(0)}`];
+      : [`One unit at a time \u00b7 food left: ${state.foodMade(this.me) - state.foodUsed(this.me)}`];
     // While training, only Builder (instant) is still possible, so the list shrinks to that
     const trainButtons = queued ? train.filter((b) => b.enabled) : train;
     sections.push({
@@ -894,7 +935,7 @@ export class MapScene extends Phaser.Scene {
     });
 
     const here = state.unitAt(city);
-    if (here && here.owner === 0) {
+    if (here && here.owner === this.me) {
       sections.push({
         heading: 'In this city',
         buttons: [
@@ -934,7 +975,7 @@ export class MapScene extends Phaser.Scene {
       if (tile.walls) bars.push({ label: `Walls ${tile.walls}`, value: tile.shield, max: shieldMax(tile), color: '#60a5fa' });
     }
     const other = state.unitAt(tile);
-    if (other && other.owner !== 0) {
+    if (other && other.owner !== this.me) {
       const s = UNIT_STATS[other.type];
       lines.push(`${state.players[other.owner].name} ${s.name} here`);
       bars.push({ label: 'Unit HP', value: other.hp, max: s.hp, color: this.hpColor(other.hp / s.hp) });
@@ -985,7 +1026,7 @@ export class MapScene extends Phaser.Scene {
     if (unit) this.selected = state.tileOf(unit);
     if (this.mode === 'claim') {
       // Stop if the city was lost
-      if (!this.claimCity || this.claimCity.owner !== 0) {
+      if (!this.claimCity || this.claimCity.owner !== this.me) {
         this.mode = 'select';
         this.claimCity = null;
       } else this.selected = this.claimCity;
@@ -1205,7 +1246,7 @@ export class MapScene extends Phaser.Scene {
     if (this.mode === 'claim') {
       // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
       const city = this.claimCity;
-      const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, 0))));
+      const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, this.me))));
       g.fillStyle(0x000000, 0.55);
       for (const t of state.map.tiles) {
         if (zone.has(t)) continue;
@@ -1214,16 +1255,16 @@ export class MapScene extends Phaser.Scene {
       }
       // Inside the zone: green + price = buy now; darkened = not reachable yet (or water / someone else's)
       for (const t of zone) {
-        if (t.owner === 0 && (!city || state.belongsTo(t, city))) continue; // already this city's
+        if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue; // already this city's
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
-        const c = state.check('claim', t, 0, city);
+        const c = state.check('claim', t, this.me, city);
         if (c.ok) {
           g.fillStyle(0x22c55e, 0.5);
           g.fillPoints(pts, true);
           g.lineStyle(3, 0x86efac, 1);
           g.strokePoints(pts, true);
-          this.priceLabel(labels++, x, y, c.cost > 0 ? `${c.cost}g` : 'free', c.cost <= state.players[0].gold || state.options.freeBuild);
+          this.priceLabel(labels++, x, y, c.cost > 0 ? `${c.cost}g` : 'free', c.cost <= state.players[this.me].gold || state.options.freeBuild);
         } else {
           g.fillStyle(0x000000, 0.3);
           g.fillPoints(pts, true);
@@ -1292,7 +1333,7 @@ export class MapScene extends Phaser.Scene {
   private drawRoute(g: Phaser.GameObjects.Graphics): void {
     const state = this.state;
     const unit = this.selectedUnit;
-    if (!state || !unit || unit.owner !== 0) return;
+    if (!state || !unit || unit.owner !== this.me) return;
     const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview : null;
     let plan: RoutePlan | null = pv ? pv.plan : null;
     let dest: Tile | null = pv ? pv.dest : null;
@@ -1381,13 +1422,13 @@ export class MapScene extends Phaser.Scene {
       }
       drawUnitIcon(g, u.type, x, y);
       // Status badge for your units: cyan arrow = on a route, green dot = ready, gray = holding
-      if (u.owner === 0 && u.goal) {
+      if (u.owner === this.me && u.goal) {
         g.fillStyle(0x22d3ee, 1);
         g.lineStyle(1, 0x000000, 0.7);
         const tri = [new Phaser.Math.Vector2(x + 6, y - 15), new Phaser.Math.Vector2(x + 15, y - 10), new Phaser.Math.Vector2(x + 6, y - 5)];
         g.fillPoints(tri, true);
         g.strokePoints(tri, true);
-      } else if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
+      } else if (u.owner === this.me && !state.players[state.current].isAI && (u.moves > 0 || !u.acted)) {
         g.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
         g.lineStyle(1, 0x000000, 0.6);
         g.fillCircle(x + 10, y - 10, 3.5);
