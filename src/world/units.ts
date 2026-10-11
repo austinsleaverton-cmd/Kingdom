@@ -60,13 +60,13 @@ export interface Training {
   turnsLeft: number;
 }
 
+// 'walls' is still a valid builder job for the AI, but players build walls from the city panel.
 export type Job = 'farm' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm', key: 'F' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
-  { id: 'walls', label: 'Build walls', key: 'W' },
   { id: 'raise', label: 'Raise land', key: 'U' },
   { id: 'lower', label: 'Lower land', key: 'D' },
 ];

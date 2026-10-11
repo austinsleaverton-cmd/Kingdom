@@ -732,6 +732,30 @@ export class GameState {
     return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
   }
 
+  // Walls are a city action: pay stone (from mines) plus a little gold, one level at a time.
+  wallCheck(city: Tile, p: PlayerId = this.current): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (p !== this.current) return fail('Not your turn');
+    if (!city.city || city.owner !== p) return fail('Build walls in your own city');
+    if (city.walls >= MAX_WALLS) return fail('Walls are maxed');
+    const stone = this.wallStoneCost(city);
+    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    if (this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
+    const cost = JOB_COST.walls;
+    return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
+  }
+
+  buildWalls(city: Tile, p: PlayerId = this.current): Check {
+    const c = this.wallCheck(city, p);
+    if (!c.ok) return c;
+    const player = this.players[p];
+    player.gold -= c.cost;
+    if (!(p === 0 && this.options.freeBuild)) player.stone -= this.wallStoneCost(city);
+    city.walls += 1;
+    city.shield = shieldMax(city); // new walls go up at full strength
+    return c;
+  }
+
   wallStoneCost(city: Tile): number {
     return WALL_STONE[Math.min(city.walls, MAX_WALLS - 1)];
   }
