@@ -45,6 +45,7 @@ export class MapScene extends Phaser.Scene {
   private overlayGfx!: Phaser.GameObjects.Graphics;
   private unitGfx!: Phaser.GameObjects.Graphics;
   private hoverGfx!: Phaser.GameObjects.Graphics;
+  private selGfx!: Phaser.GameObjects.Graphics;
   private unitLabels: Phaser.GameObjects.Text[] = [];
 
   private pressed = false;
@@ -61,7 +62,10 @@ export class MapScene extends Phaser.Scene {
     this.ownerGfx = this.add.graphics().setDepth(1);
     this.overlayGfx = this.add.graphics().setDepth(2);
     this.unitGfx = this.add.graphics().setDepth(3);
+    this.selGfx = this.add.graphics().setDepth(4.5);
     this.hoverGfx = this.add.graphics().setDepth(5);
+    // Gentle pulse so the current selection is easy to spot
+    this.tweens.add({ targets: this.selGfx, alpha: 0.45, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
 
     this.hud = new Hud({
       onMode: (m) => this.setMode(m),
@@ -427,7 +431,8 @@ export class MapScene extends Phaser.Scene {
 
     if (unit) {
       const stats = UNIT_STATS[unit.type];
-      title = `${stats.name}`;
+      const onCity = state.tileOf(unit).city;
+      title = `${stats.name}${onCity ? ' (in city: click city again to switch)' : ''}`;
       lines.push(`Moves ${unit.moves}/${stats.moves}${unit.acted ? ' · done working this turn' : ''}`);
       const here = state.tileOf(unit);
       if (unit.type === 'settler') {
@@ -455,7 +460,7 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (tile.city && tile.owner === 0) {
-      if (!unit) title = tile.capital ? 'Capital' : 'City';
+      if (!unit) title = `${tile.capital ? 'Capital' : 'City'}${state.unitAt(tile)?.owner === 0 ? ' (click again for the unit)' : ''}`;
       const recruitables: { type: UnitType; key: string }[] = [
         { type: 'builder', key: 'B' },
         { type: 'settler', key: 'S' },
@@ -648,35 +653,81 @@ export class MapScene extends Phaser.Scene {
   private drawOverlay(state: GameState): void {
     const g = this.overlayGfx;
     g.clear();
-    g.fillStyle(0xffffff, 0.2);
-    for (const t of this.reach.keys()) {
-      const { x, y } = tileCenter(t);
-      g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+    const unit = this.selectedUnit;
+
+    if (this.reach.size > 0 && unit) {
+      // Dim everything the unit can't reach so the lit hexes pop.
+      const home = state.tileOf(unit);
+      g.fillStyle(0x000000, 0.4);
+      for (const t of state.map.tiles) {
+        if (t === home || this.reach.has(t)) continue;
+        const { x, y } = tileCenter(t);
+        g.fillPoints(hexCorners(x, y, SIZE), true);
+      }
+      for (const t of this.reach.keys()) {
+        const { x, y } = tileCenter(t);
+        const pts = hexCorners(x, y, SIZE - 3);
+        g.fillStyle(0xffffff, 0.12);
+        g.fillPoints(pts, true);
+        g.lineStyle(2, 0xffffff, 0.85);
+        g.strokePoints(pts, true);
+        if (!state.unitAt(t)) {
+          g.fillStyle(0xffffff, 0.9);
+          g.fillCircle(x, y, 4);
+        }
+      }
     }
     if (this.mode === 'claim') {
       // Show every tile you could buy right now
-      g.fillStyle(0x22c55e, 0.25);
+      g.fillStyle(0x22c55e, 0.3);
+      g.lineStyle(2, 0x4ade80, 0.9);
       for (const t of state.map.tiles) {
         if (t.owner === 0 || t.terrain === 'water') continue;
         if (!state.check('claim', t, 0).ok) continue;
         const { x, y } = tileCenter(t);
-        g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+        const pts = hexCorners(x, y, SIZE - 3);
+        g.fillPoints(pts, true);
+        g.strokePoints(pts, true);
       }
     }
-    const unit = this.selectedUnit;
     if ((this.mode === 'raise' || this.mode === 'lower') && unit) {
       const here = state.tileOf(unit);
       for (const t of [here, ...state.map.neighbors(here)]) {
         const ok = state.jobCheck(unit, this.mode, t).ok;
-        g.fillStyle(ok ? 0x22c55e : 0xef4444, ok ? 0.3 : 0.15);
         const { x, y } = tileCenter(t);
-        g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+        const pts = hexCorners(x, y, SIZE - 3);
+        g.fillStyle(ok ? 0x22c55e : 0xef4444, ok ? 0.35 : 0.15);
+        g.fillPoints(pts, true);
+        if (ok) {
+          g.lineStyle(2, 0x4ade80, 0.95);
+          g.strokePoints(pts, true);
+        }
       }
     }
-    if (this.selected) {
-      const { x, y } = tileCenter(this.selected);
+    this.drawSelection();
+  }
+
+  // Yellow hex outline on the selected tile, plus a halo on whichever thing is
+  // actually selected: the city itself, or the unit standing on it.
+  private drawSelection(): void {
+    const g = this.selGfx;
+    g.clear();
+    const tile = this.selected;
+    if (!tile) return;
+    const { x, y } = tileCenter(tile);
+    const pts = hexCorners(x, y, SIZE - 2);
+    g.lineStyle(7, 0x000000, 0.45);
+    g.strokePoints(pts, true);
+    g.lineStyle(3.5, 0xfacc15, 1);
+    g.strokePoints(pts, true);
+    const unit = this.selectedUnit;
+    if (unit) {
+      const p = unitPos(tile);
       g.lineStyle(3, 0xfacc15, 1);
-      g.strokePoints(hexCorners(x, y, SIZE - 2), true);
+      g.strokeCircle(p.x, p.y, 15);
+    } else if (tile.city) {
+      g.lineStyle(3, 0xfacc15, 1);
+      g.strokeCircle(x, y - 2, tile.capital ? 21 : 18);
     }
   }
 
@@ -686,9 +737,7 @@ export class MapScene extends Phaser.Scene {
     let i = 0;
     for (const u of state.units) {
       const t = state.tileOf(u);
-      const c = tileCenter(t);
-      const x = t.city ? c.x + 10 : c.x;
-      const y = t.city ? c.y + 10 : c.y;
+      const { x, y } = unitPos(t);
       const color = state.players[u.owner].color;
       const isSel = u.id === this.selectedUnitId;
       g.fillStyle(0x000000, 0.35);
@@ -739,6 +788,12 @@ function tileCenter(t: Tile): { x: number; y: number } {
     x: SIZE * SQRT3 * (t.col + 0.5 * (t.row & 1)),
     y: SIZE * 1.5 * t.row,
   };
+}
+
+// Units on a city sit in its lower-right corner so both stay visible.
+function unitPos(t: Tile): { x: number; y: number } {
+  const c = tileCenter(t);
+  return t.city ? { x: c.x + 12, y: c.y + 11 } : c;
 }
 
 function hexCorners(cx: number, cy: number, r: number): Phaser.Math.Vector2[] {
