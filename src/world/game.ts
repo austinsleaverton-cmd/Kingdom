@@ -113,7 +113,9 @@ export const PLAYER_INFO = [
 ];
 
 export const CITY_INCOME = 3;
-export const FARM_FOOD = 3;
+export const FARM_FOOD = 2;
+export const KNIGHTS_PER_PASTURE = 2; // each pasture raises horses for this many knights
+export const ARCHERS_PER_FOREST = 2; // each forest gives bows for this many archers
 export const CITY_FOOD = 2;
 export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
@@ -283,6 +285,31 @@ export class GameState {
 
   unitCost(type: UnitType, p: PlayerId): number {
     return type === 'settler' ? this.cityCost(p) : UNIT_STATS[type].cost;
+  }
+
+  // Horses and bows work like food: a cap from your pastures/forests, used by living (and training) troops
+  private countImp(p: PlayerId, imp: 'pasture' | 'forest'): number {
+    return this.ownedTiles(p).filter((t) => t.improvement === imp).length;
+  }
+
+  private countTroop(p: PlayerId, type: UnitType): number {
+    return this.unitsOf(p).filter((u) => u.type === type).length + this.training.filter((t) => t.owner === p && t.type === type).length;
+  }
+
+  horsesMade(p: PlayerId): number {
+    return this.countImp(p, 'pasture') * KNIGHTS_PER_PASTURE;
+  }
+
+  horsesUsed(p: PlayerId): number {
+    return this.countTroop(p, 'knight');
+  }
+
+  bowsMade(p: PlayerId): number {
+    return this.countImp(p, 'forest') * ARCHERS_PER_FOREST;
+  }
+
+  bowsUsed(p: PlayerId): number {
+    return this.countTroop(p, 'archer');
   }
 
   stoneIncome(p: PlayerId): number {
@@ -562,7 +589,7 @@ export class GameState {
     if (unit.owner !== this.current) return fail('Not your turn');
     const tile = this.tileOf(unit);
     if (tile.owner !== null && tile.owner !== unit.owner) return fail("Can't settle on someone else's land");
-    if (tile.terrain === 'water' || tile.terrain === 'mountain') return fail("Can't settle here");
+    if (tile.terrain !== 'grass') return fail('Cities need grass');
     if (tile.city) return fail('Already a city');
     if (this.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) {
       return fail(`Too close to a city (need ${CITY_SPACING}+ hexes)`);
@@ -606,6 +633,8 @@ export class GameState {
     const stats = UNIT_STATS[type];
     if (stats.train > 0 && this.trainingAt(city)) return fail('City is already training');
     if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
+    if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: build a pasture');
+    if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: plant a forest');
     if (stats.train === 0 && !this.spawnTile(city)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
@@ -799,7 +828,7 @@ export class GameState {
 
   private defenseMult(tile: Tile, defender: PlayerId): number {
     let m = 1;
-    if (tile.terrain === 'hills') m *= 0.8;
+    if (tile.terrain === 'hills' || tile.improvement === 'forest') m *= 0.8;
     if (tile.terrain === 'mountain') m *= 0.7;
     if (tile.city && tile.owner === defender) m *= 0.75;
     return m;
@@ -913,10 +942,19 @@ export class GameState {
       if (target !== here) return fail('Builders work the tile they stand on');
       if (target.owner !== p) return fail('Build on your own land');
     }
+    if ((job === 'farm' || job === 'pasture' || job === 'forest' || job === 'mine') && target.city) return fail('Move off the city first');
     switch (job) {
       case 'farm':
         if (target.improvement === 'farm') return fail('Already a farm');
         if (!improvementFits(target, 'farm')) return fail('Farms need grass or sand');
+        break;
+      case 'pasture':
+        if (target.improvement === 'pasture') return fail('Already a pasture');
+        if (!improvementFits(target, 'pasture')) return fail('Pastures need grass');
+        break;
+      case 'forest':
+        if (target.improvement === 'forest') return fail('Already a forest');
+        if (!improvementFits(target, 'forest')) return fail('Forests need grass');
         break;
       case 'mine':
         if (target.improvement === 'mine') return fail('Already a mine');
@@ -986,8 +1024,10 @@ export class GameState {
     this.clearRoute(unit);
     switch (job) {
       case 'farm':
+      case 'pasture':
+      case 'forest':
       case 'mine':
-        target.improvement = job;
+        target.improvement = job; // replaces whatever was there (e.g. turn a farm into a pasture)
         break;
       case 'road':
         target.road = true;
