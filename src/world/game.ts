@@ -62,8 +62,30 @@ export interface GameOptions {
   seed: number;
   size: MapSize;
   opponents: number; // 0 = sandbox, no rivals and no win conditions
-  freeBuild: boolean; // your actions cost no gold
+  freeBuild: boolean; // human players' actions cost no gold
   difficulty: Difficulty;
+  seats?: Seat[]; // who plays each kingdom (first is always a person). Missing = you vs AI rivals
+}
+
+// One kingdom at the start screen: a person (hot-seat, passing the device) or the computer.
+export interface Seat {
+  name: string;
+  human: boolean;
+}
+
+export const MAX_NAME = 16;
+
+// The seats for a game: from the menu, or (older saves) you plus AI rivals.
+export function seatsFor(o: GameOptions): Seat[] {
+  const n = Math.max(1, Math.min(MAX_OPPONENTS + 1, o.seats?.length ? o.seats.length : o.opponents + 1));
+  const out: Seat[] = [];
+  for (let i = 0; i < n; i++) {
+    const s = o.seats?.[i];
+    const human = i === 0 ? true : s ? s.human : false;
+    const name = (s?.name ?? '').trim().slice(0, MAX_NAME) || (i === 0 && !o.seats ? 'You' : PLAYER_INFO[i].name);
+    out.push({ name, human });
+  }
+  return out;
 }
 
 export interface Player {
@@ -83,7 +105,7 @@ export interface Check {
   reason: string;
 }
 
-const PLAYER_INFO = [
+export const PLAYER_INFO = [
   { name: 'You', color: 0x3b82f6 },
   { name: 'Red', color: 0xef4444 },
   { name: 'Gold', color: 0xeab308 },
@@ -163,23 +185,25 @@ export class GameState {
   cityNames: Record<number, string> = {}; // tile index -> city name
 
   constructor(options: GameOptions) {
+    const seats = seatsFor(options);
     this.options = {
       ...options,
-      opponents: Math.max(0, Math.min(MAX_OPPONENTS, options.opponents)),
+      seats,
+      opponents: seats.length - 1,
       difficulty: DIFFICULTY[options.difficulty] ? options.difficulty : 'normal',
     };
     const { width, height } = MAP_SIZES[this.options.size];
     this.map = generateMap(this.options.seed, width, height);
     this.players = [];
-    for (let i = 0; i <= this.options.opponents; i++) {
+    for (let i = 0; i < seats.length; i++) {
       this.players.push({
         id: i,
-        name: PLAYER_INFO[i].name,
+        name: seats[i].name,
         color: PLAYER_INFO[i].color,
         gold: START_GOLD,
         stone: 0,
         claims: 0,
-        isAI: i !== 0,
+        isAI: !seats[i].human,
         alive: true,
       });
     }
@@ -193,6 +217,20 @@ export class GameState {
 
   get sandbox(): boolean {
     return this.options.opponents === 0;
+  }
+
+  // Two or more people sharing the device: messages use names instead of "you"
+  get hotseat(): boolean {
+    return this.players.filter((p) => !p.isAI).length > 1;
+  }
+
+  // People still in the game
+  humansAlive(): Player[] {
+    return this.players.filter((p) => !p.isAI && p.alive);
+  }
+
+  isFree(p: PlayerId): boolean {
+    return this.options.freeBuild && !this.players[p].isAI;
   }
 
   // ---------- queries ----------
@@ -385,7 +423,7 @@ export class GameState {
       c.growth = Math.round((c.growth - need) * 10) / 10;
       c.level += 1;
       c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
-      if (p === 0) this.addLog(`${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
+      this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
     }
   }
 
@@ -465,7 +503,7 @@ export class GameState {
   // For claims, pass the city doing the buying; without one (AI) the best nearby city is used.
   check(action: Action, tile: Tile, p: PlayerId = this.current, city?: Tile | null): Check {
     if (this.winner !== null) return fail('Game over');
-    const free = p === 0 && this.options.freeBuild;
+    const free = this.isFree(p);
     const gold = this.players[p].gold;
     const withGold = (cost: number): Check => {
       if (free) return { ok: true, cost: 0, reason: '' };
@@ -569,7 +607,7 @@ export class GameState {
     if (stats.train > 0 && this.trainingAt(city)) return fail('City is already training');
     if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
     if (stats.train === 0 && !this.spawnTile(city)) return fail('No room around the city');
-    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
     const gold = this.players[p].gold;
     return gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
@@ -613,7 +651,7 @@ export class GameState {
       }
       const stats = UNIT_STATS[t.type];
       this.units.push({ id: this.nextUnitId++, type: t.type, owner: p, col: at.col, row: at.row, moves: stats.moves, acted: false, hp: stats.hp });
-      if (p === 0) this.addLog(`${stats.name} ready`);
+      this.tell(p, `${stats.name} ready`);
     }
     this.training = keep;
   }
@@ -715,7 +753,7 @@ export class GameState {
     const name = UNIT_STATS[unit.type].name;
     const stop = (msg?: string): 'done' => {
       this.clearRoute(unit);
-      if (msg && unit.owner === 0) this.addLog(msg);
+      if (msg) this.tell(unit.owner, msg);
       return 'done';
     };
     const dest = this.map.get(g.col, g.row);
@@ -752,7 +790,7 @@ export class GameState {
       u.waited = (u.waited ?? 0) + 1;
       if (u.waited > 3) {
         this.clearRoute(u);
-        if (p === 0) this.addLog(`${UNIT_STATS[u.type].name} stopped its route: stuck behind your units`);
+        this.tell(p, `${UNIT_STATS[u.type].name} stopped its route: stuck behind your units`);
       }
     }
   }
@@ -814,7 +852,7 @@ export class GameState {
     this.clearRoute(unit);
     if (pv.kind === 'unit') {
       const defender = this.unitAt(target)!;
-      const dName = `${defender.owner === 0 ? 'your' : `a ${this.players[defender.owner].name}`} ${UNIT_STATS[defender.type].name}`;
+      const dName = `${this.whose(defender.owner)} ${UNIT_STATS[defender.type].name}`;
       defender.hp -= pv.dmg;
       if (defender.hp <= 0) {
         this.units = this.units.filter((u) => u !== defender);
@@ -856,7 +894,7 @@ export class GameState {
     city.shield = 0;
     this.invalidate();
     if (wasCapital) this.eliminate(prev, captor);
-    else this.addLog(`${this.players[captor].name} captured ${this.cityName(city)} from ${prev === 0 ? 'you' : this.players[prev].name}`);
+    else this.addLog(`${this.players[captor].name} captured ${this.cityName(city)} from ${this.you(prev)}`);
     this.checkWin();
   }
 
@@ -892,7 +930,7 @@ export class GameState {
         if (!target.city) return fail('Walls go on a city: stand the builder on it');
         if (target.walls >= MAX_WALLS) return fail('Walls are maxed');
         const stone = this.wallStoneCost(target);
-        const free = p === 0 && this.options.freeBuild;
+        const free = this.isFree(p);
         if (!free && this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
         break;
       }
@@ -907,7 +945,7 @@ export class GameState {
         break;
     }
     const cost = JOB_COST[job];
-    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
   }
 
@@ -918,7 +956,7 @@ export class GameState {
     if (!city.city || city.owner !== p) return fail('Build walls in your own city');
     if (city.walls >= MAX_WALLS) return fail('Walls are maxed');
     const stone = this.wallStoneCost(city);
-    if (p === 0 && this.options.freeBuild) return { ok: true, cost: 0, reason: '' };
+    if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     if (this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
     const cost = JOB_COST.walls;
     return this.players[p].gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
@@ -929,7 +967,7 @@ export class GameState {
     if (!c.ok) return c;
     const player = this.players[p];
     player.gold -= c.cost;
-    if (!(p === 0 && this.options.freeBuild)) player.stone -= this.wallStoneCost(city);
+    if (!this.isFree(p)) player.stone -= this.wallStoneCost(city);
     city.walls += 1;
     city.shield = shieldMax(city); // new walls go up at full strength
     return c;
@@ -955,7 +993,7 @@ export class GameState {
         target.road = true;
         break;
       case 'walls':
-        if (!(unit.owner === 0 && this.options.freeBuild)) this.players[unit.owner].stone -= this.wallStoneCost(target);
+        if (!this.isFree(unit.owner)) this.players[unit.owner].stone -= this.wallStoneCost(target);
         target.walls += 1;
         target.shield = shieldMax(target); // new walls go up at full strength
         break;
@@ -972,7 +1010,7 @@ export class GameState {
       unit.uses -= 1;
       if (unit.uses <= 0) {
         this.units = this.units.filter((u) => u !== unit);
-        if (unit.owner === 0) this.addLog('A builder finished its last job and retired');
+        this.tell(unit.owner, 'A builder finished its last job and retired');
       }
     }
     return c;
@@ -1019,8 +1057,19 @@ export class GameState {
     this.advanceTraining(p);
   }
 
+  // "your" only when one person plays against the computer; with several people, names
   private whose(p: PlayerId): string {
-    return p === 0 ? 'your' : `${this.players[p].name}'s`;
+    return !this.hotseat && !this.players[p].isAI ? 'your' : `${this.players[p].name}'s`;
+  }
+
+  private you(p: PlayerId): string {
+    return !this.hotseat && !this.players[p].isAI ? 'you' : this.players[p].name;
+  }
+
+  // News only people care about (the AI doesn't read the log)
+  private tell(p: PlayerId, msg: string): void {
+    if (this.players[p].isAI) return;
+    this.addLog(this.hotseat ? `${this.players[p].name}: ${msg}` : msg);
   }
 
   private addLog(msg: string): void {
@@ -1043,16 +1092,16 @@ export class GameState {
 
   private checkWin(): void {
     if (this.winner !== null || this.sandbox) return;
-    if (!this.players[0].alive) {
-      const top = this.players.filter((p) => p.alive).sort((a, b) => this.ownedTiles(b.id).length - this.ownedTiles(a.id).length)[0];
+    const alive = this.players.filter((p) => p.alive);
+    if (this.humansAlive().length === 0) {
+      const top = alive.sort((a, b) => this.ownedTiles(b.id).length - this.ownedTiles(a.id).length)[0];
       this.winner = top ? top.id : 1;
-      this.winReason = 'Your capital fell';
+      this.winReason = this.hotseat ? 'Every player kingdom fell' : 'Your capital fell';
       return;
     }
-    const rivalsLeft = this.players.some((p) => p.id !== 0 && p.alive);
-    if (!rivalsLeft) {
-      this.winner = 0;
-      this.winReason = 'Every rival capital is yours';
+    if (alive.length === 1) {
+      this.winner = alive[0].id;
+      this.winReason = this.hotseat ? `${alive[0].name} took every rival capital` : 'Every rival capital is yours';
       return;
     }
     const land = this.landCount();
@@ -1061,7 +1110,8 @@ export class GameState {
       const share = this.ownedTiles(pl.id).length / land;
       if (share >= WIN_SHARE) {
         this.winner = pl.id;
-        this.winReason = `${pl.name === 'You' ? 'You control' : `${pl.name} controls`} ${Math.round(share * 100)}% of the land`;
+        const who = this.you(pl.id);
+        this.winReason = `${who === 'you' ? 'You control' : `${who} controls`} ${Math.round(share * 100)}% of the land`;
         return;
       }
     }

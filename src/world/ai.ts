@@ -70,7 +70,7 @@ function pickTroopType(g: GameState, p: PlayerId): UnitType {
   const cfg = DIFFICULTY[g.options.difficulty];
   const mine = troops(g, p);
   if (cfg.smart) {
-    // Counter whatever enemy troops are most common
+    // Counter whatever enemy troops are most common nearby
     const counts: Record<string, number> = {};
     for (const e of enemyTroops(g, p)) counts[e.type] = (counts[e.type] ?? 0) + 1;
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
@@ -79,7 +79,7 @@ function pickTroopType(g: GameState, p: PlayerId): UnitType {
       if (counter) return counter;
     }
   }
-  // Default mix: mostly swordsmen (they can capture), about a third archers, some knights
+  // Default mix: mostly swordsmen (they can capture), some archers, knights when rich
   const archers = mine.filter((u) => u.type === 'archer').length + queued(g, p, (t) => t === 'archer');
   if (archers < Math.floor((mine.length + 1) / 3)) return 'archer';
   const knights = mine.filter((u) => u.type === 'knight').length + queued(g, p, (t) => t === 'knight');
@@ -98,7 +98,7 @@ function aiQueue(g: GameState, p: PlayerId): void {
     // Danger first: defend before expanding
     if ((threatened || army < armyWanted(g, p)) && army < cfg.maxArmy) {
       const type = pickTroopType(g, p);
-      if (g.recruitCheck(type, city, p).ok) {
+      if (g.recruitCheck(type, city, p).ok && (threatened || g.players[p].gold - g.unitCost(type, p) >= 0)) {
         g.recruit(type, city, p);
         continue;
       }
@@ -161,7 +161,7 @@ function aiBuilders(g: GameState, p: PlayerId): void {
       g.doJob(unit, job, here);
       continue;
     }
-    // Walk to the nearest tile that needs work (walls rank first, then mines, then farms)
+    // Walk to the nearest tile that needs work (walls rank first, then mines/farms)
     let target: Tile | null = null;
     let best = Infinity;
     for (const t of g.ownedTiles(p)) {
@@ -217,14 +217,14 @@ function aiTroops(g: GameState, p: PlayerId): void {
   // A city is under threat if enemy troops are close
   const threatened = cities.filter((c) => enemies.some((e) => hexDistance(g.tileOf(e), c) <= 3));
 
-  // Pick a war target: nearest enemy city (Hard also weighs how damaged it is)
+  // Pick a war target: nearest (easy/normal) or weakest-nearby (hard) enemy city
   let warTarget: Tile | null = null;
   const atWar = g.turn >= cfg.attackTurn && army.length >= cfg.attackArmy;
   if (atWar && cities.length > 0) {
     const home = cities.find((c) => c.capital) ?? cities[0];
     let best = Infinity;
     for (const c of enemyCities(g, p)) {
-      if (cfg.focusHuman && c.owner !== 0) continue;
+      if (cfg.focusHuman && (c.owner === null || g.players[c.owner].isAI)) continue;
       const d = hexDistance(home, c);
       const s = cfg.smart ? d + (c.hp + c.shield) / 25 : d;
       if (s < best) {
@@ -254,7 +254,7 @@ function aiTroops(g: GameState, p: PlayerId): void {
     if (hurt && cfg.smart && cities.length) {
       goal = nearest(g.tileOf(unit), cities);
     } else if (threatened.length) {
-      const c = nearest(g.tileOf(unit), threatened)!;
+      const c = nearest(g.tileOf(unit), threatened);
       goal = nearest(c, enemies.map((e) => g.tileOf(e))) ?? c;
     } else if (warTarget && kept >= garrison) {
       goal = warTarget;

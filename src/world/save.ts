@@ -1,5 +1,5 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
-import { DIFFICULTY, GameState, MAP_SIZES } from './game';
+import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
 import { cityMaxHp, shieldMax, terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
@@ -37,6 +37,7 @@ export interface SaveSummary {
   opponents: number;
   difficulty: Difficulty;
   finished: boolean;
+  people: string[]; // names of the human players
 }
 
 export function saveGame(state: GameState): void {
@@ -92,6 +93,7 @@ export function saveSummary(): SaveSummary | null {
     opponents: data.options.opponents,
     difficulty: DIFFICULTY[data.options.difficulty] ? data.options.difficulty : 'normal',
     finished: data.winner !== null,
+    people: seatsFor(data.options).filter((s) => s.human).map((s) => s.name),
   };
 }
 
