@@ -1,6 +1,7 @@
 // Start screen (DOM overlay): pick map size, players (people or AI), difficulty, free building, or continue a save.
 import { DIFFICULTY, MAP_SIZES, MAX_NAME, MAX_OPPONENTS, PLAYER_INFO, defaultOptions, randomSeed } from '../world/game';
 import type { Difficulty, GameOptions, MapSize, Seat } from '../world/game';
+import { clearSave } from '../world/save';
 import type { SaveSummary } from '../world/save';
 
 const CSS = `
@@ -28,8 +29,24 @@ const CSS = `
 .k-seat button:disabled { opacity: 0.35; cursor: default; }
 .k-add { margin-top: 8px; background: transparent; color: #93c5fd; border: 1px dashed #3b4a66; border-radius: 6px; padding: 7px; width: 100%; font: inherit; cursor: pointer; }
 .k-menu { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.k-menu button { touch-action: manipulation; }
+.k-menu-box { display: grid; grid-template-columns: 1fr; grid-template-areas: 'title' 'cont' 'size' 'players' 'diff' 'go'; }
+.k-a-title { grid-area: title; } .k-a-cont { grid-area: cont; } .k-a-size { grid-area: size; }
+.k-a-players { grid-area: players; } .k-a-diff { grid-area: diff; } .k-a-go { grid-area: go; align-self: end; }
+.k-menu .k-go.k-warn { background: #b45309; }
 @media (max-width: 480px) { .k-menu-box { width: calc(100vw - 32px); padding: 20px; box-sizing: border-box; } }
 @media (max-height: 760px), (max-width: 480px) { .k-menu { align-items: flex-start; padding: 16px 0; box-sizing: border-box; } }
+/* Phone sideways: two columns so everything fits without scrolling */
+@media (orientation: landscape) and (max-height: 600px) {
+  .k-menu { align-items: center; padding: 8px 0; }
+  .k-menu-box { width: min(760px, calc(100vw - 32px)); padding: 14px 20px; box-sizing: border-box; column-gap: 24px;
+    grid-template-columns: 1fr 1fr; grid-template-areas: 'title players' 'cont players' 'size players' 'diff go'; }
+  .k-menu h1 { font-size: 24px; }
+  .k-menu .k-sub { margin-bottom: 8px; }
+  .k-menu h3 { margin: 10px 0 4px; }
+  .k-menu .k-note { min-height: 0; }
+  .k-menu label { margin-top: 8px; }
+}
 `;
 
 const SEATS_KEY = 'kingdom-seats'; // remembers names between games
@@ -69,6 +86,10 @@ export class Menu {
   private free: HTMLInputElement;
   private note: HTMLDivElement;
   private cont: HTMLButtonElement;
+  private go!: HTMLButtonElement;
+  private save: SaveSummary | null = null;
+  private armed = false;
+  private armTimer = 0;
 
   constructor(onStart: (opts: GameOptions) => void, onContinue: () => void) {
     const style = document.createElement('style');
@@ -79,14 +100,22 @@ export class Menu {
     this.root.className = 'k-menu';
     const box = document.createElement('div');
     box.className = 'k-menu-box';
-    box.innerHTML = '<h1>KINGDOM</h1><div class="k-sub">Shape the land. Build your realm.</div>';
+    // Each block sits in a named grid area, so landscape phones can use two columns
+    const area = (name: string) => {
+      const d = document.createElement('div');
+      d.className = `k-a-${name}`;
+      box.appendChild(d);
+      return d;
+    };
+    area('title').innerHTML = '<h1>KINGDOM</h1><div class="k-sub">Shape the land. Build your realm.</div>';
 
     this.cont = document.createElement('button');
     this.cont.className = 'k-go k-cont';
     this.cont.onclick = () => onContinue();
-    box.appendChild(this.cont);
+    area('cont').appendChild(this.cont);
 
-    box.appendChild(heading('Map size'));
+    const sizeBox = area('size');
+    sizeBox.appendChild(heading('Map size'));
     const sizes = segment();
     for (const key of Object.keys(MAP_SIZES) as MapSize[]) {
       const b = segButton(MAP_SIZES[key].label, () => {
@@ -96,14 +125,16 @@ export class Menu {
       this.sizeBtns.set(key, b);
       sizes.appendChild(b);
     }
-    box.appendChild(sizes);
+    sizeBox.appendChild(sizes);
 
     // Players: one row per kingdom. People take turns on this device (hot-seat); AI plays itself.
-    box.appendChild(heading('Players'));
+    const playersBox = area('players');
+    playersBox.appendChild(heading('Players'));
     this.seatBox = document.createElement('div');
-    box.appendChild(this.seatBox);
+    playersBox.appendChild(this.seatBox);
 
-    box.appendChild(heading('Difficulty'));
+    const diffBox = area('diff');
+    diffBox.appendChild(heading('Difficulty'));
     const diffs = segment();
     for (const key of Object.keys(DIFFICULTY) as Difficulty[]) {
       const b = segButton(DIFFICULTY[key].label, () => {
@@ -113,7 +144,7 @@ export class Menu {
       this.diffBtns.set(key, b);
       diffs.appendChild(b);
     }
-    box.appendChild(diffs);
+    diffBox.appendChild(diffs);
 
     const label = document.createElement('label');
     this.free = document.createElement('input');
@@ -124,20 +155,34 @@ export class Menu {
     };
     label.appendChild(this.free);
     label.appendChild(document.createTextNode('Free building (people pay no gold)'));
-    box.appendChild(label);
+    diffBox.appendChild(label);
 
     this.note = document.createElement('div');
     this.note.className = 'k-note';
-    box.appendChild(this.note);
+    diffBox.appendChild(this.note);
 
+    // Replacing an unfinished save asks with a second tap on the button itself
+    // (the phone's pop-up confirm was unreliable, especially sideways / installed as an app)
     const go = document.createElement('button');
     go.className = 'k-go';
-    go.textContent = 'New kingdom';
+    this.go = go;
+    this.resetGo();
     go.onclick = () => {
+      go.blur();
+      const unfinished = this.save !== null && !this.save.finished;
+      if (unfinished && !this.armed) {
+        this.armed = true;
+        go.textContent = 'Replace your saved game? Tap again';
+        go.classList.add('k-warn');
+        this.armTimer = window.setTimeout(() => this.resetGo(), 4000);
+        return;
+      }
+      this.resetGo();
+      clearSave(); // already confirmed: don't ask again
       const seats = this.seats.map((s, i) => ({ name: s.name.trim() || defaultName(i, s.human), human: s.human }));
       onStart({ ...this.opts, opponents: seats.length - 1, seats, seed: randomSeed() });
     };
-    box.appendChild(go);
+    area('go').appendChild(go);
 
     this.root.appendChild(box);
     document.body.appendChild(this.root);
@@ -210,7 +255,16 @@ export class Menu {
     this.refresh();
   }
 
+  private resetGo(): void {
+    window.clearTimeout(this.armTimer);
+    this.armed = false;
+    this.go.textContent = 'New kingdom';
+    this.go.classList.remove('k-warn');
+  }
+
   show(save: SaveSummary | null): void {
+    this.save = save;
+    this.resetGo();
     if (save) {
       const mode =
         save.people.length > 1
