@@ -82,7 +82,7 @@ function guideHtml(): string {
       'Cities and land',
       `<ul><li>Settlers found cities on <b>grass</b>, at least ${CITY_SPACING} hexes from any other city.</li>` +
         `<li>Each city owns land around it. <b>Claim land</b> (city panel) buys more within ${CLAIM_RADIUS} hexes (${BIG_CLAIM_RADIUS} once it's a ${LEVEL_NAMES[2]}). ` +
-        `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, a little more each time.</li>` +
+        `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, water ${CLAIM_COST.water}g, a little more each time. Water counts as yours but not toward the land-share win.</li>` +
         `<li><b>Growth</b>: spare food fills a city's growth bar (${GROWTH_NEED.join(' / ')}). Levels: ${LEVEL_NAMES.join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
         `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone. Each level adds a ${WALL_SHIELD} point shield that soaks damage first.</li>` +
         `<li>Cities heal every turn unless enemy troops are within 2 hexes (a siege), and don't grow under siege.</li></ul>`,

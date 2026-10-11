@@ -299,7 +299,7 @@ export class Hud {
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const rows = state.players
       .map((p) => {
-        const tiles = state.ownedTiles(p.id).length;
+        const tiles = state.ownedLand(p.id);
         const color = `#${p.color.toString(16).padStart(6, '0')}`;
         const cells = p.alive
           ? `<td>${Math.round((tiles / land) * 100)}%</td><td>${state.cityCount(p.id)}</td><td>${state.unitsOf(p.id).length}</td>`
@@ -429,7 +429,7 @@ export class Hud {
     this.pass.innerHTML = '';
     const box = el('k-panel');
     box.style.borderColor = hex;
-    box.innerHTML = `<div class="k-sub2">Turn ${turn} \u00b7 pass the device to</div><h1 style="color:${hex}">${escape(name)}</h1><div class="k-sub2">${escape(note)}</div>`;
+    box.innerHTML = `<div class="k-sub2">Turn ${turn} · pass the device to</div><h1 style="color:${hex}">${escape(name)}</h1><div class="k-sub2">${escape(note)}</div>`;
     const go = button(`<kbd>Space</kbd>I'm ${escape(name)}, start my turn`, () => this.startPass());
     go.style.background = hex;
     box.appendChild(go);
