@@ -1,7 +1,7 @@
 // Rendering and input only. All rules live in src/world.
 import Phaser from 'phaser';
 import { GameState } from '../world/game';
-import type { AttackPreview, Check, GameOptions } from '../world/game';
+import type { AttackPreview, Check, GameOptions, RoutePlan } from '../world/game';
 import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { LEVEL_NAMES, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
@@ -27,7 +27,7 @@ const TERRAIN_NAME: Record<Terrain, string> = {
 // Hex edge i (between corner i and i+1) faces this neighbor direction.
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
-// select: click to select/move. claim: a city buys land. raise/lower: builder picks a target.
+// select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
 export class MapScene extends Phaser.Scene {
@@ -51,6 +51,9 @@ export class MapScene extends Phaser.Scene {
   private selGfx!: Phaser.GameObjects.Graphics;
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
   private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
+  private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
+  private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
+  private hoverPlan: { unitId: number; tile: Tile; plan: RoutePlan } | null = null; // cached for the tooltip
 
   private pressed = false;
   private dragging = false;
@@ -160,6 +163,7 @@ export class MapScene extends Phaser.Scene {
     this.reach = new Map();
     this.targets = new Map();
     this.claimCity = null;
+    this.routePreview = null;
     if (this.mode === 'claim') this.mode = 'select';
   }
 
@@ -202,7 +206,6 @@ export class MapScene extends Phaser.Scene {
     const state = this.state;
     if (!state) return;
     this.mode = 'select';
-    this.claimCity = null;
     this.selectedUnitId = unit.id;
     this.selected = state.tileOf(unit);
     const { x, y } = tileCenter(this.selected);
@@ -222,7 +225,7 @@ export class MapScene extends Phaser.Scene {
   // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
   // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
-    if (u.owner !== 0 || u.hold || state.current !== 0) return false;
+    if (u.owner !== 0 || u.hold || u.goal || state.current !== 0) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
@@ -296,14 +299,32 @@ export class MapScene extends Phaser.Scene {
           // Clicking the selected unit again deselects it
           this.clearSelection();
         } else if (unit && this.targets.has(tile)) {
+          this.routePreview = null;
           state.attack(unit, tile);
           this.cameras.main.shake(60, 0.003);
           acted = true;
         } else if (unit && this.reach.has(tile)) {
+          this.routePreview = null;
           state.moveUnit(unit, tile);
           this.selected = tile;
           acted = true;
+        } else if (unit && this.canRoute(state, unit, tile)) {
+          // Far hex: first tap previews the route, second tap on the same hex sends the unit
+          const pv = this.routePreview;
+          if (pv && pv.unitId === unit.id && pv.dest === tile) {
+            this.routePreview = null;
+            state.setRoute(unit, tile);
+            acted = true;
+          } else {
+            const plan = state.planRoute(unit, tile);
+            if (plan.ok) this.routePreview = { unitId: unit.id, dest: tile, plan };
+            else {
+              this.routePreview = null;
+              this.selectTile(state, tile);
+            }
+          }
         } else {
+          this.routePreview = null;
           this.selectTile(state, tile);
         }
         break;
@@ -311,6 +332,33 @@ export class MapScene extends Phaser.Scene {
     }
     this.redraw();
     if (acted) this.autoAdvance(tile);
+  }
+
+  // Tapping a far hex with your unit selected plans a route, unless it's your own unit or city (that selects it).
+  private canRoute(state: GameState, unit: Unit, tile: Tile): boolean {
+    if (unit.owner !== 0 || state.current !== 0 || state.winner !== null) return false;
+    const here = state.unitAt(tile);
+    if (here && here.owner === 0) return false;
+    if (tile.city && tile.owner === 0) return false;
+    return true;
+  }
+
+  private planFor(state: GameState, unit: Unit, tile: Tile): RoutePlan {
+    const pv = this.routePreview;
+    if (pv && pv.unitId === unit.id && pv.dest === tile) return pv.plan;
+    const hp = this.hoverPlan;
+    if (hp && hp.unitId === unit.id && hp.tile === tile) return hp.plan;
+    const plan = state.planRoute(unit, tile);
+    this.hoverPlan = { unitId: unit.id, tile, plan };
+    return plan;
+  }
+
+  private cancelRoute(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    this.routePreview = null;
+    if (state && unit && unit.owner === 0) state.clearRoute(unit);
+    this.redraw();
   }
 
   // City first (it's the main thing on a tile); click the same city again to get the unit on it.
@@ -510,6 +558,10 @@ export class MapScene extends Phaser.Scene {
         this.toggleHold();
         return;
       }
+      if (key === 'X' && unit && (unit.goal || this.routePreview)) {
+        this.cancelRoute();
+        return;
+      }
       if (key === 'C' && unit && unit.type === 'settler') {
         this.foundCity();
         return;
@@ -581,7 +633,16 @@ export class MapScene extends Phaser.Scene {
           return { label: 'Attack', check: { ok: true, cost: 0, reason: `deal ${pv.dmg}${kill}, take ${pv.counter}` } };
         }
         const left = this.reach.get(tile);
-        if (left === undefined) return null;
+        if (left === undefined) {
+          const unit = this.selectedUnit;
+          if (!unit || !this.canRoute(state, unit, tile) || state.tileOf(unit) === tile) return null;
+          const plan = this.planFor(state, unit, tile);
+          if (!plan.ok) return { label: 'Route', check: { ok: false, cost: 0, reason: plan.reason } };
+          const pv = this.routePreview;
+          const again = pv && pv.unitId === unit.id && pv.dest === tile;
+          const t = `${plan.turns} turn${plan.turns === 1 ? '' : 's'}${plan.nextTo ? ', stops next to it' : ''}`;
+          return { label: 'Route', check: { ok: true, cost: 0, reason: again ? `${t} \u00b7 click again to go` : `${t} \u00b7 click to see the path` } };
+        }
         if (tile.city && tile.owner !== null && tile.owner !== 0) return { label: 'Move in', check: { ok: true, cost: 0, reason: 'capture this city!' } };
         return { label: 'Move', check: { ok: true, cost: 0, reason: `${left} moves left after` } };
       }
@@ -652,24 +713,47 @@ export class MapScene extends Phaser.Scene {
     const stats = UNIT_STATS[unit.type];
     const here = state.tileOf(unit);
     const sections: PanelSection[] = [];
-    const lines: string[] = [];
-    if (stats.military) {
-      lines.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
-      lines.push(unit.acted ? 'Already attacked this turn' : 'Red hexes = attack. Break a city to 0 HP, then walk in.');
-    } else if (unit.type === 'builder') {
-      lines.push(unit.uses !== undefined ? `Jobs left: ${unit.uses}` : 'Unlimited jobs');
-      if (unit.acted) lines.push('Done working this turn');
-    } else {
-      lines.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
-    }
-    if (unit.hold) lines.push('Holding: skipped by the end-of-turn check');
-    sections.push({
+    const status: PanelSection = {
       bars: [
         { label: 'Health', value: unit.hp, max: stats.hp, color: this.hpColor(unit.hp / stats.hp) },
         { label: 'Moves', value: unit.moves, max: stats.moves, color: '#60a5fa' },
       ],
-      lines,
-    });
+      lines: [],
+    };
+    if (stats.military) {
+      status.lines!.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
+      status.lines!.push(unit.acted ? 'Already attacked this turn' : 'Red hexes = attack. Break a city to 0 HP, then walk in.');
+    } else if (unit.type === 'builder') {
+      status.lines!.push(unit.uses !== undefined ? `Jobs left: ${unit.uses}` : 'Unlimited jobs');
+      if (unit.acted) status.lines!.push('Done working this turn');
+    } else {
+      status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
+    }
+    if (unit.hold) status.lines!.push('Holding: skipped by the end-of-turn check');
+    sections.push(status);
+
+    // Route: what's planned, or how to plan one
+    if (unit.owner === 0) {
+      const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview.plan : null;
+      const active = unit.goal ? state.routeLeft(unit) : null;
+      const lines: string[] = [];
+      const buttons: PanelButton[] = [];
+      const turns = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
+      if (pv) {
+        lines.push(`Preview: ${turns(pv.turns)} to get there${pv.nextTo ? ' (stops next to it)' : ''}. Tap the same hex again to go.`);
+        lines.push('Dots show where it stops each turn.');
+      } else if (unit.goal) {
+        lines.push(active ? `On a route: about ${turns(active.turns)} left` : 'On a route');
+        lines.push('Moves by itself at the start of each turn. Stops if enemies show up.');
+        if (unit.waited) lines.push(`Waiting for one of your units to get out of the way (${unit.waited})`);
+      } else {
+        lines.push('Tap a far hex to plan a multi-turn route.');
+      }
+      if (unit.goal || pv) {
+        buttons.push({ label: pv ? 'Cancel preview' : 'Cancel route', key: 'X', enabled: true, hint: pv ? 'clear the path' : 'stop here', onClick: () => this.cancelRoute() });
+      }
+      sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : 'none', lines, buttons });
+    }
 
     const actions: PanelButton[] = [];
     if (unit.type === 'settler') {
@@ -706,7 +790,7 @@ export class MapScene extends Phaser.Scene {
       title: stats.name,
       subtitle: `${state.players[unit.owner].name}${where}`,
       sections,
-      footer: 'Click it again or Esc to deselect · N or Tab = next unit',
+      footer: 'Click it again or Esc to deselect \u00b7 N or Tab = next unit',
     };
   }
 
@@ -730,7 +814,7 @@ export class MapScene extends Phaser.Scene {
           ? 'Not growing: enemy troops nearby'
           : `+${state.growthRate(city).toFixed(1)} per turn (spare food speeds it up)`,
       );
-      growLines.push(`Next: ${LEVEL_NAMES[lvl]} · ${unlock(lvl + 1)}`);
+      growLines.push(`Next: ${LEVEL_NAMES[lvl]} \u00b7 ${unlock(lvl + 1)}`);
     } else growLines.push('Max size: troops train 1 turn faster');
     sections.push({
       heading: 'Growth',
@@ -762,7 +846,7 @@ export class MapScene extends Phaser.Scene {
 
     sections.push({
       heading: 'Land',
-      summary: `${state.cityLand(city).length} tiles${open > 0 ? ` · ${open} open` : ''}`,
+      summary: `${state.cityLand(city).length} tiles${open > 0 ? ` \u00b7 ${open} open` : ''}`,
       lines: claiming
         ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
         : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'}`],
@@ -799,12 +883,12 @@ export class MapScene extends Phaser.Scene {
     const queued = state.trainingAt(city);
     const trainLines = queued
       ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
-      : [`One unit at a time · food left: ${state.foodMade(0) - state.foodUsed(0)}`];
+      : [`One unit at a time \u00b7 food left: ${state.foodMade(0) - state.foodUsed(0)}`];
     // While training, only Builder (instant) is still possible, so the list shrinks to that
     const trainButtons = queued ? train.filter((b) => b.enabled) : train;
     sections.push({
       heading: 'Train',
-      summary: queued ? `${UNIT_STATS[queued.type].name} · ${queued.turnsLeft}t` : 'ready',
+      summary: queued ? `${UNIT_STATS[queued.type].name} \u00b7 ${queued.turnsLeft}t` : 'ready',
       lines: trainLines,
       buttons: trainButtons,
     });
@@ -830,7 +914,7 @@ export class MapScene extends Phaser.Scene {
     }
     return {
       title: state.cityName(city),
-      subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} · ${city.capital ? 'your capital' : 'your city'}`,
+      subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} \u00b7 ${city.capital ? 'your capital' : 'your city'}`,
       titleAction: { label: 'Rename', onClick: () => this.renameCity(city) },
       sections,
     };
@@ -859,7 +943,7 @@ export class MapScene extends Phaser.Scene {
       title,
       subtitle:
         tile.city && tile.owner !== null
-          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} · ${LEVEL_NAMES[cityLevel(tile) - 1]}`
+          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} \u00b7 ${LEVEL_NAMES[cityLevel(tile) - 1]}`
           : undefined,
       sections: [{ bars, lines }],
     };
@@ -906,6 +990,8 @@ export class MapScene extends Phaser.Scene {
         this.claimCity = null;
       } else this.selected = this.claimCity;
     }
+    if (this.routePreview && (this.routePreview.unitId !== this.selectedUnitId || this.mode !== 'select')) this.routePreview = null;
+    this.hoverPlan = null; // the board changed: re-plan hover routes
     this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
     this.targets = unit && this.mode === 'select' ? this.findTargets(state, unit) : new Map();
 
@@ -992,7 +1078,7 @@ export class MapScene extends Phaser.Scene {
         const a = pts[i];
         const b = pts[(i + 1) % 6];
         if (n && n.owner === t.owner) {
-          // Same kingdom, different city: faint divider
+          // Same kingdom, different city: faint dashed-looking divider
           if (n.home !== t.home) {
             g.lineStyle(1.5, 0xffffff, 0.35);
             g.lineBetween(a.x, a.y, b.x, b.y);
@@ -1017,7 +1103,7 @@ export class MapScene extends Phaser.Scene {
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
   }
 
-  // Name tag under each city, drawn above units so it never gets covered.
+  // Name tag under each city, above units so it never gets covered.
   // Dots after the name show the city's level (1 dot = Village ... 5 = Metropolis).
   private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean, level: number): void {
     let label = this.cityLabels[i];
@@ -1117,7 +1203,7 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: this city's area (hexes within its claim radius). Dim everything else hard.
+      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
       const city = this.claimCity;
       const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, 0))));
       g.fillStyle(0x000000, 0.55);
@@ -1180,6 +1266,7 @@ export class MapScene extends Phaser.Scene {
   private drawSelection(): void {
     const g = this.selGfx;
     g.clear();
+    for (const l of this.routeLabels) l.setVisible(false);
     const tile = this.selected;
     if (!tile) return;
     const { x, y } = tileCenter(tile);
@@ -1197,6 +1284,67 @@ export class MapScene extends Phaser.Scene {
       g.lineStyle(3, 0xfacc15, 1);
       g.strokeCircle(x, y - 2, tile.capital ? 21 : 18);
     }
+    this.drawRoute(g);
+  }
+
+  // The selected unit's route: the tapped preview (yellow) or its active route (cyan).
+  // A numbered dot marks where it stops at the end of each turn.
+  private drawRoute(g: Phaser.GameObjects.Graphics): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit || unit.owner !== 0) return;
+    const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview : null;
+    let plan: RoutePlan | null = pv ? pv.plan : null;
+    let dest: Tile | null = pv ? pv.dest : null;
+    if (!plan && unit.goal) {
+      plan = state.routeLeft(unit);
+      dest = state.map.get(unit.goal.col, unit.goal.row) ?? null;
+    }
+    if (!plan || !plan.path.length || !dest) return;
+    const color = pv ? 0xfacc15 : 0x22d3ee;
+    const pts = [unitPos(state.tileOf(unit)), ...plan.path.map((t) => tileCenter(t))];
+    g.lineStyle(6, 0x000000, 0.45);
+    g.strokePoints(pts, false);
+    g.lineStyle(3, color, 1);
+    g.strokePoints(pts, false);
+    // the hex it's heading for
+    const d = tileCenter(dest);
+    g.lineStyle(3, color, 1);
+    g.strokePoints(hexCorners(d.x, d.y, SIZE - 5), true);
+    const first = plan.turnAt[0];
+    let n = 0;
+    for (let i = 0; i < plan.path.length; i++) {
+      const endOfTurn = i === plan.path.length - 1 || plan.turnAt[i + 1] !== plan.turnAt[i];
+      if (!endOfTurn) continue;
+      const { x, y } = tileCenter(plan.path[i]);
+      g.fillStyle(0x000000, 0.6);
+      g.fillCircle(x, y, 9);
+      g.fillStyle(color, 1);
+      g.fillCircle(x, y, 7.5);
+      this.routeLabel(n++, x, y, String(plan.turnAt[i] - first + 1));
+    }
+    if (pv) {
+      const t = `${plan.turns} turn${plan.turns === 1 ? '' : 's'} \u00b7 tap again to go`;
+      this.routeLabel(n++, d.x, d.y - SIZE + 2, t, true);
+    }
+  }
+
+  private routeLabel(i: number, x: number, y: number, text: string, big = false): void {
+    let label = this.routeLabels[i];
+    if (!label) {
+      label = this.add
+        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#111111' })
+        .setOrigin(0.5)
+        .setDepth(5);
+      this.routeLabels.push(label);
+    }
+    label
+      .setText(text)
+      .setFontSize(big ? 13 : 11)
+      .setColor(big ? '#ffffff' : '#111111')
+      .setStroke('#000000', big ? 4 : 0)
+      .setPosition(x, y)
+      .setVisible(true);
   }
 
   private drawUnits(state: GameState): void {
@@ -1232,8 +1380,14 @@ export class MapScene extends Phaser.Scene {
         g.fillRect(x - 11, y + 14, 22 * frac, 2);
       }
       drawUnitIcon(g, u.type, x, y);
-      // Status dot for your units: green = ready, gray = holding
-      if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
+      // Status badge for your units: cyan arrow = on a route, green dot = ready, gray = holding
+      if (u.owner === 0 && u.goal) {
+        g.fillStyle(0x22d3ee, 1);
+        g.lineStyle(1, 0x000000, 0.7);
+        const tri = [new Phaser.Math.Vector2(x + 6, y - 15), new Phaser.Math.Vector2(x + 15, y - 10), new Phaser.Math.Vector2(x + 6, y - 5)];
+        g.fillPoints(tri, true);
+        g.strokePoints(tri, true);
+      } else if (u.owner === 0 && state.current === 0 && (u.moves > 0 || !u.acted)) {
         g.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
         g.lineStyle(1, 0x000000, 0.6);
         g.fillCircle(x + 10, y - 10, 3.5);
@@ -1265,14 +1419,14 @@ function drawUnitIcon(g: Phaser.GameObjects.Graphics, type: UnitType, x: number,
   const white = 0xffffff;
   switch (type) {
     case 'swordsman': {
-      // blade from hilt to tip, crossguard, grip, pommel
+      // blade from hilt to tip, crossguard, pommel
       g.lineStyle(3, white, 1);
       g.lineBetween(x - 3, y + 3, x + 7, y - 7);
       g.lineStyle(2.5, white, 1);
-      g.lineBetween(x - 7, y, x, y + 7);
-      g.lineBetween(x - 3, y + 3, x - 6, y + 6);
+      g.lineBetween(x - 7, y, x, y + 7); // guard
+      g.lineBetween(x - 3, y + 3, x - 6, y + 6); // grip
       g.fillStyle(white, 1);
-      g.fillCircle(x - 7, y + 7, 2);
+      g.fillCircle(x - 7, y + 7, 2); // pommel
       break;
     }
     case 'archer': {
@@ -1284,11 +1438,11 @@ function drawUnitIcon(g: Phaser.GameObjects.Graphics, type: UnitType, x: number,
       const ex = x + 4 + 9 * Math.cos(Phaser.Math.DegToRad(125));
       const ey = 9 * Math.sin(Phaser.Math.DegToRad(125));
       g.lineStyle(1, white, 0.9);
-      g.lineBetween(ex, y - ey, ex, y + ey);
+      g.lineBetween(ex, y - ey, ex, y + ey); // string
       g.lineStyle(1.5, white, 1);
-      g.lineBetween(x - 7, y, x + 6, y);
+      g.lineBetween(x - 7, y, x + 6, y); // arrow shaft
       g.fillStyle(white, 1);
-      g.fillTriangle(x + 9, y, x + 5, y - 3, x + 5, y + 3);
+      g.fillTriangle(x + 9, y, x + 5, y - 3, x + 5, y + 3); // arrowhead
       break;
     }
     case 'knight': {
@@ -1299,15 +1453,15 @@ function drawUnitIcon(g: Phaser.GameObjects.Graphics, type: UnitType, x: number,
       g.fillStyle(white, 1);
       g.fillPoints(pts, true);
       g.fillStyle(0x111111, 1);
-      g.fillCircle(x + 1, y - 3, 1.2);
+      g.fillCircle(x + 1, y - 3, 1.2); // eye
       break;
     }
     case 'builder': {
       // hammer
       g.lineStyle(2.5, white, 1);
-      g.lineBetween(x - 5, y + 6, x + 2, y - 1);
+      g.lineBetween(x - 5, y + 6, x + 2, y - 1); // handle
       g.lineStyle(4.5, white, 1);
-      g.lineBetween(x - 1, y - 6, x + 6, y + 1);
+      g.lineBetween(x - 1, y - 6, x + 6, y + 1); // head
       break;
     }
     case 'settler': {
