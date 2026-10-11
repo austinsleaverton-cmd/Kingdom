@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { MapScene } from './scenes/MapScene';
+import { installHelp } from './scenes/Help';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -16,6 +17,7 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 export const game = new Phaser.Game(config);
+installHelp(); // the "?" button and rules guide
 
 // iOS can leave the page scrolled or the canvas mis-sized after rotating, so taps land in the
 // wrong place. Snap back to the top and re-measure whenever the screen size changes.
