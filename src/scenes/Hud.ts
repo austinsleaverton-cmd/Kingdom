@@ -292,7 +292,9 @@ export class Hud {
       row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(cur)} next turn`) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
       `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
-      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(cur) > 0 ? `+${state.stoneIncome(cur)} next turn` : 'build mines for walls');
+      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(cur) > 0 ? `+${state.stoneIncome(cur)} next turn` : 'build mines for walls') +
+      row('\u{1F40E}', 'Horses', `${state.horsesUsed(cur)}/${state.horsesMade(cur)}`, state.horsesMade(cur) > 0 ? 'knights' : 'build a pasture for knights') +
+      row('\u{1F332}', 'Bows', `${state.bowsUsed(cur)}/${state.bowsMade(cur)}`, state.bowsMade(cur) > 0 ? 'archers' : 'plant a forest for archers');
 
     const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
     const rows = state.players
@@ -320,8 +322,10 @@ export class Hud {
       `<li><b>Routes:</b> with a unit selected, tap a far hex to see the path and turns, tap it again to go. It walks there by itself each turn (X cancels).</li>` +
       `<li><b>End turn</b> (Space) when you're done.</li></ul>` +
       `<h4>Units</h4><ul>` +
-      `<li><b>Builder</b> (hammer): farms, mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
-      `<li><b>Settler</b> (flag): founds a new city 3+ hexes from others.</li>` +
+      `<li><b>Builder</b> (hammer): farms (food), pastures (horses), forests (bows), mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
+      `<li>Each pasture lets you keep 2 Knights, each forest 2 Archers. Forests are slow to cross but good cover.</li>` +
+      `<li>Troops eat 2 food (Knights 3), workers 1. Farms make 2.</li>` +
+      `<li><b>Settler</b> (flag): founds a new city on grass, 3+ hexes from others.</li>` +
       `<li><b>Swordsman</b> beats Archer, <b>Archer</b> (shoots 2 hexes) beats Knight, <b>Knight</b> (fast) beats Swordsman.</li>` +
       `<li>Units heal 25% per turn on your land.</li></ul>` +
       `<h4>Land & war</h4><ul>` +
