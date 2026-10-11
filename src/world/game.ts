@@ -56,8 +56,6 @@ export const CITY_FOOD = 2;
 export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
 export const CAPITAL_INCOME = 5;
-export const CAPITAL_CAPTURE_COST = 60;
-export const CITY_CAPTURE_COST = 30;
 export const WIN_SHARE = 0.6;
 export const CLAIM_RADIUS = 4; // can only buy land this close to one of your cities
 export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
@@ -218,14 +216,12 @@ export class GameState {
     switch (action) {
       case 'claim': {
         if (tile.owner === p) return fail('Already yours');
+        // Owned land belongs to that player's cities: the only way to take it is to conquer the city.
+        if (tile.owner !== null) return fail(`${this.players[tile.owner].name}'s land: conquer their city to take it`);
         if (!isLand(tile)) return fail("Can't claim water");
         if (!this.touches(tile, p)) return fail('Must border your land');
         if (!this.inClaimRange(tile, p)) return fail(`Too far from your cities (max ${CLAIM_RADIUS}): found a new city`);
-        if (tile.owner === null) return withGold(this.claimCost(tile, p));
-        if (tile.capital) return withGold(CAPITAL_CAPTURE_COST);
-        if (tile.city) return withGold(CITY_CAPTURE_COST);
-        const nearCity = this.map.neighbors(tile).some((n) => n.city && n.owner === tile.owner);
-        return withGold(this.claimCost(tile, p) * 3 + (nearCity ? 6 : 0));
+        return withGold(this.claimCost(tile, p));
       }
       case 'city': {
         if (tile.owner !== p) return fail('Build on your own land');
