@@ -56,6 +56,8 @@ export class MapScene extends Phaser.Scene {
   private dragging = false;
   private downX = 0;
   private downY = 0;
+  private pinchDist = 0; // distance between two fingers last frame (0 = not pinching)
+  private pinching = false; // a pinch happened during this touch: don't treat release as a click
 
   constructor() {
     super('map');
@@ -386,10 +388,39 @@ export class MapScene extends Phaser.Scene {
 
   // ---------- input ----------
 
+  // Two-finger pinch on phones/tablets: zoom around the point between the fingers.
+  private handlePinch(): boolean {
+    const a = this.input.pointer1;
+    const b = this.input.pointer2;
+    if (!a?.isDown || !b?.isDown) {
+      this.pinchDist = 0;
+      return false;
+    }
+    this.pinching = true;
+    this.dragging = true;
+    this.hud.hideTip();
+    const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const cam = this.cameras.main;
+    if (this.pinchDist > 0 && dist > 0) {
+      const before = cam.getWorldPoint(mx, my);
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dist / this.pinchDist), 0.3, 3));
+      cam.preRender(); // refresh the camera matrix so the next lookup uses the new zoom
+      const after = cam.getWorldPoint(mx, my);
+      cam.scrollX += before.x - after.x;
+      cam.scrollY += before.y - after.y;
+    }
+    this.pinchDist = dist;
+    return true;
+  }
+
   private setupInput(): void {
     this.input.mouse?.disableContextMenu();
+    this.input.addPointer(1); // allow a second finger for pinch zoom
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.input.pointer1?.isDown && this.input.pointer2?.isDown) this.pinching = true;
       this.pressed = true;
       this.dragging = false;
       this.downX = p.x;
@@ -398,6 +429,8 @@ export class MapScene extends Phaser.Scene {
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       if (!this.playing) return;
+      if (this.handlePinch()) return;
+      if (this.pinching) return; // one finger lifted mid-pinch: wait until both are up
       if (this.pressed && p.isDown) {
         if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_THRESHOLD) {
           this.dragging = true;
@@ -414,6 +447,16 @@ export class MapScene extends Phaser.Scene {
     });
 
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.pinching) {
+        // Finish the pinch once every finger is up; never count it as a tap
+        if (!this.input.pointer1?.isDown && !this.input.pointer2?.isDown) {
+          this.pinching = false;
+          this.pinchDist = 0;
+          this.pressed = false;
+          this.dragging = false;
+        }
+        return;
+      }
       const wasClick = this.pressed && !this.dragging;
       this.pressed = false;
       this.dragging = false;

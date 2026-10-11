@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- No browser zoom: the game handles pinch-to-zoom itself -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Kingdom</title>
     <style>
       html,
@@ -13,10 +14,13 @@
         height: 100%;
         overflow: hidden;
         background: #000;
+        overscroll-behavior: none;
       }
 
+      #game,
       canvas {
         display: block;
+        touch-action: none;
       }
     </style>
   </head>
