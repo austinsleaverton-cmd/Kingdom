@@ -150,6 +150,7 @@ export class Hud {
       `${goal}<br><br>` +
       `Click your city to recruit a <b>Builder</b>. Select a builder, click a lit hex to move, then pick a job: ` +
       `farms (food), mines (stone), roads (faster moves), or raise/lower the land.<br><br>` +
+      `Claim land up to 4 hexes from a city (green in Claim mode); each tile costs a bit more than the last, so found new cities to expand.<br><br>` +
       `Food limits how many units you can keep. Right-click cancels. Drag to pan, scroll to zoom. Progress autosaves.`;
 
     for (const [id, b] of this.modeBtns) b.classList.toggle('k-on', id === mode);

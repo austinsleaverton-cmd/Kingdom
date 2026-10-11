@@ -32,6 +32,7 @@ export interface Player {
   color: number;
   gold: number;
   stone: number;
+  claims: number; // tiles bought with gold; each one makes the next pricier
   isAI: boolean;
   alive: boolean;
 }
@@ -58,6 +59,8 @@ export const CAPITAL_INCOME = 5;
 export const CAPITAL_CAPTURE_COST = 60;
 export const CITY_CAPTURE_COST = 30;
 export const WIN_SHARE = 0.6;
+export const CLAIM_RADIUS = 4; // can only buy land this close to one of your cities
+export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
 export const START_GOLD = 10;
 
 const fail = (reason: string, cost = 0): Check => ({ ok: false, cost, reason });
@@ -94,6 +97,7 @@ export class GameState {
         color: PLAYER_INFO[i].color,
         gold: START_GOLD,
         stone: 0,
+        claims: 0,
         isAI: i !== 0,
         alive: true,
       });
@@ -174,6 +178,26 @@ export class GameState {
     return reachable(this.map, unit, (t) => this.unitAt(t) !== undefined);
   }
 
+  claimCost(tile: Tile, p: PlayerId): number {
+    return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
+  }
+
+  inClaimRange(tile: Tile, p: PlayerId): boolean {
+    return this.cities().some((c) => c.owner === p && hexDistance(c, tile) <= CLAIM_RADIUS);
+  }
+
+  // Cached list of city tiles; cleared whenever something that can change cities happens.
+  private cityList: Tile[] | null = null;
+
+  cities(): Tile[] {
+    if (!this.cityList) this.cityList = this.map.tiles.filter((t) => t.city);
+    return this.cityList;
+  }
+
+  invalidate(): void {
+    this.cityList = null;
+  }
+
   cityCost(p: PlayerId): number {
     return 10 + 10 * this.cityCount(p);
   }
@@ -196,11 +220,12 @@ export class GameState {
         if (tile.owner === p) return fail('Already yours');
         if (!isLand(tile)) return fail("Can't claim water");
         if (!this.touches(tile, p)) return fail('Must border your land');
-        if (tile.owner === null) return withGold(CLAIM_COST[tile.terrain]);
+        if (!this.inClaimRange(tile, p)) return fail(`Too far from your cities (max ${CLAIM_RADIUS}): found a new city`);
+        if (tile.owner === null) return withGold(this.claimCost(tile, p));
         if (tile.capital) return withGold(CAPITAL_CAPTURE_COST);
         if (tile.city) return withGold(CITY_CAPTURE_COST);
         const nearCity = this.map.neighbors(tile).some((n) => n.city && n.owner === tile.owner);
-        return withGold(CLAIM_COST[tile.terrain] * 3 + (nearCity ? 6 : 0));
+        return withGold(this.claimCost(tile, p) * 3 + (nearCity ? 6 : 0));
       }
       case 'city': {
         if (tile.owner !== p) return fail('Build on your own land');
@@ -220,11 +245,13 @@ export class GameState {
     if (!result.ok) return result;
     const player = this.players[p];
     player.gold -= result.cost;
+    this.invalidate();
 
     switch (action) {
       case 'claim': {
         const prevOwner = tile.owner;
         tile.owner = p;
+        if (prevOwner === null) player.claims += 1;
         if (tile.capital && prevOwner !== null) {
           tile.capital = false; // captured capitals become regular cities
           this.eliminate(prevOwner, p);
@@ -332,6 +359,7 @@ export class GameState {
     const c = this.jobCheck(unit, job, target);
     if (!c.ok) return c;
     this.players[unit.owner].gold -= c.cost;
+    this.invalidate();
     switch (job) {
       case 'farm':
       case 'mine':

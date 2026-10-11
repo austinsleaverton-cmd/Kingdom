@@ -579,6 +579,16 @@ export class MapScene extends Phaser.Scene {
       const { x, y } = tileCenter(t);
       g.fillPoints(hexCorners(x, y, SIZE - 2), true);
     }
+    if (this.mode === 'claim') {
+      // Show every tile you could buy right now
+      g.fillStyle(0x22c55e, 0.25);
+      for (const t of state.map.tiles) {
+        if (t.owner === 0 || t.terrain === 'water') continue;
+        if (!state.check('claim', t, 0).ok) continue;
+        const { x, y } = tileCenter(t);
+        g.fillPoints(hexCorners(x, y, SIZE - 2), true);
+      }
+    }
     const unit = this.selectedUnit;
     if ((this.mode === 'raise' || this.mode === 'lower') && unit) {
       const here = state.tileOf(unit);

@@ -20,7 +20,7 @@ interface SaveData {
   winner: PlayerId | null;
   winReason: string;
   log: string[];
-  players: { gold: number; stone: number; alive: boolean }[];
+  players: { gold: number; stone: number; claims: number; alive: boolean }[];
   units: Unit[];
   nextUnitId: number;
   // per tile: [height, owner, flags]
@@ -43,7 +43,7 @@ export function saveGame(state: GameState): void {
     winner: state.winner,
     winReason: state.winReason,
     log: state.log,
-    players: state.players.map((p) => ({ gold: p.gold, stone: p.stone, alive: p.alive })),
+    players: state.players.map((p) => ({ gold: p.gold, stone: p.stone, claims: p.claims, alive: p.alive })),
     units: state.units,
     nextUnitId: state.nextUnitId,
     tiles: state.map.tiles.map((t) => [
@@ -107,6 +107,7 @@ export function loadGame(): GameState | null {
       if (saved) {
         p.gold = saved.gold;
         p.stone = saved.stone ?? 0;
+        p.claims = saved.claims ?? 0;
         p.alive = saved.alive;
       }
     });
@@ -117,6 +118,7 @@ export function loadGame(): GameState | null {
     state.log = data.log;
     state.units = (data.units ?? []).map((u) => ({ ...u }));
     state.nextUnitId = data.nextUnitId ?? state.units.length + 1;
+    state.invalidate();
     return state;
   } catch {
     return null;
