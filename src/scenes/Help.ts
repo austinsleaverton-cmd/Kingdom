@@ -3,7 +3,7 @@
 import {
   ANGRY_AT, ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SPACING, CLAIM_RADIUS,
   DIFFICULTY, EASY_HAPPY, FARM_FOOD, HAPPY_AT, HAPPY_BASE, HOME_HEAL, KNIGHTS_PER_PASTURE, MAX_POP, MINE_STONE, MOOD_FACE, PILLAGE_GOLD,
-  UNHAPPY_AT, WIN_SHARE,
+  UNHAPPY_AT, WIN_SHARE, troopUpkeep,
 } from '../world/game';
 import type { Difficulty } from '../world/game';
 import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
@@ -76,9 +76,10 @@ function guideHtml(): string {
     sec(
       'Gold, food, stone',
       `<ul><li><b>Gold</b> each turn: land (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}) + ${CITY_INCOME} per city (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets, +1 per happy city.</li>` +
-        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each farm ${FARM_FOOD}, +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
-        `<li><b>Stone</b>: each mine makes ${MINE_STONE} a turn. Used for walls.</li>` +
-        `<li><b>Horses</b>: each pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
+        `<li><b>Troops get paid</b> every turn: ${troopUpkeep('swordsman')} gold for a Swordsman or Archer, ${troopUpkeep('knight')} for a Knight. Builders and settlers are free.</li>` +
+        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
+        `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn. Used for walls.</li>` +
+        `<li><b>Horses</b>: each worked pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each worked forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
     ),
     sec(
       'Cities and land',
@@ -86,12 +87,14 @@ function guideHtml(): string {
         `<li>Each city owns land around it. <b>Claim land</b> (city panel) buys more within ${CLAIM_RADIUS} hexes (${BIG_CLAIM_RADIUS} once it's a ${LEVEL_NAMES[2]}). ` +
         `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, water ${CLAIM_COST.water}g, a little more each time. Water counts as yours but not toward the land-share win.</li>` +
         `<li><b>Borders grow by themselves</b>: each city makes culture (1 + 1 per 3 people + Temples, Parks, Arenas). When the bar fills it grabs the best free tile next to its land, a bit slower each time.</li>` +
+        `<li><b>One thing at a time</b>: a city trains one unit, builds walls or builds one amenity, never two at once. Builders show up right away, so you can still make those.</li>` +
         `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone, paid up front. They take ${WALL_TURNS.join('/')} turns to build. Each level adds a ${WALL_SHIELD} point shield that soaks damage first. Losing the city loses half-built walls.</li>` +
         `<li>Cities heal every turn unless enemy troops are within 2 hexes (a siege), and don't grow under siege.</li></ul>`,
     ),
     sec(
       'People',
       `<ul><li>Spare food fills a city's growth bar; a full bar is one more person (up to ${MAX_POP}). Happy cities grow 50% faster.</li>` +
+        `<li><b>People are workers</b>: each person works one farm, mine, pasture or forest on the city's land (the city takes turns between the kinds). Extra ones sit idle and make nothing until the city grows.</li>` +
         `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
         `<li>The number on a city's name tag is its people; the face is its mood.</li></ul>`,
     ),
@@ -107,7 +110,7 @@ function guideHtml(): string {
           const i = BUILDINGS[b];
           return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people</td><td>${i.note}</td></tr>`;
         }).join('') +
-        `</table><ul><li>Built from the city panel. One project at a time, and a city can't train troops while it builds (builders still work).</li>` +
+        `</table><ul><li>Built from the city panel. While a city builds one it can't train troops or build walls (builders still work).</li>` +
         `<li>Losing the city loses a half-built amenity; finished ones stay.</li></ul>`,
     ),
     sec(
@@ -126,7 +129,8 @@ function guideHtml(): string {
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses, weak vs walls</td></tr></table>` +
-        `<ul><li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
+        `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
+        `<li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
         `<li>Units heal ${pct(HOME_HEAL)} a turn on your own land, not in the field.</li>` +
         `<li>Break a city to 0 HP, then walk a Swordsman or Knight in to take it and all its land.</li>` +

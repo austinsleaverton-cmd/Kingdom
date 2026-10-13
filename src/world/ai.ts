@@ -96,7 +96,7 @@ function aiQueue(g: GameState, p: PlayerId): void {
   const builders = g.unitsOf(p).filter((u) => u.type === 'builder').length;
   const threatened = cities.some((c) => enemyTroops(g, p).some((e) => hexDistance(g.tileOf(e), c) <= 4));
   for (const city of cities) {
-    if (g.trainingAt(city)) continue;
+    if (g.busyWith(city)) continue;
     const army = troops(g, p).length + queued(g, p, (t) => UNIT_STATS[t].military);
     // Danger first: defend before expanding
     if ((threatened || army < armyWanted(g, p)) && army < cfg.maxArmy) {
@@ -110,15 +110,14 @@ function aiQueue(g: GameState, p: PlayerId): void {
       g.recruit('settler', city, p);
       continue;
     }
-    // Nothing to train: build an amenity if there's spare gold
-    if (!city.project && !g.trainingAt(city)) {
-      const b = pickBuilding(g, p, city);
-      if (b && g.players[p].gold - BUILDINGS[b].cost >= settlerReserve(g, p) + 10) g.startBuilding(city, b, p);
+    // Walls when there's stone for them
+    if (city.walls < Math.min(cfg.maxWalls, MAX_WALLS) && g.wallCheck(city, p).ok) {
+      g.buildWalls(city, p);
+      continue;
     }
-  }
-  // Walls: queue the next level when there's stone for it
-  for (const city of cities) {
-    if (city.walls < Math.min(cfg.maxWalls, MAX_WALLS) && g.wallCheck(city, p).ok) g.buildWalls(city, p);
+    // Nothing else to do: build an amenity if there's spare gold
+    const b = pickBuilding(g, p, city);
+    if (b && g.players[p].gold - BUILDINGS[b].cost >= settlerReserve(g, p) + 10) g.startBuilding(city, b, p);
   }
   // Builders are instant
   if (builders < Math.min(cfg.builders, cities.length) && g.players[p].gold >= 15 + settlerReserve(g, p)) {
@@ -168,6 +167,9 @@ function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   const cfg = DIFFICULTY[g.options.difficulty];
   if (t.city) return null; // walls are a city action now (see aiQueue)
   if (t.improvement) return null;
+  // Only build what the city has people to work (one spare is fine)
+  const home = g.homeCity(t);
+  if (home && g.improvedCount(home) > home.pop) return null;
   const hungry = g.foodUsed(p) + 3 > g.foodMade(p);
   const mines = g.ownedTiles(p).filter((x) => x.improvement === 'mine').length;
   if (improvementFits(t, 'mine') && mines < 1 + Math.floor(myCities(g, p).length / 2) && cfg.maxWalls > 0) return 'mine';
@@ -189,13 +191,13 @@ function aiBuilders(g: GameState, p: PlayerId): void {
       g.doJob(unit, job, here);
       continue;
     }
-    // Walk to the nearest tile that needs work (walls rank first, then mines/farms)
+    // Walk to the nearest tile that needs work (mines rank a bit higher)
     let target: Tile | null = null;
     let best = Infinity;
     for (const t of g.ownedTiles(p)) {
       const j = builderJob(g, p, t);
       if (!j || (g.unitAt(t) && t !== here)) continue;
-      const d = hexDistance(here, t) - (j === 'walls' ? 3 : j === 'mine' ? 1 : 0);
+      const d = hexDistance(here, t) - (j === 'mine' ? 1 : 0);
       if (d < best) {
         best = d;
         target = t;
