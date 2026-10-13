@@ -49,6 +49,22 @@ export interface PanelModel {
   footer?: string;
 }
 
+// A popup in the middle of the screen (diplomacy, war news)
+export interface DialogButton {
+  label: string;
+  hint?: string;
+  kind?: 'main' | 'danger';
+  enabled?: boolean; // default true
+  onClick: () => void;
+}
+
+export interface DialogModel {
+  title: string;
+  color?: number; // kingdom color for the border and dot
+  lines: string[];
+  buttons: DialogButton[];
+}
+
 // Claiming land is a city action now (city panel), so the bar only needs Select.
 const MODES: { id: BarMode; label: string; key: string }[] = [{ id: 'select', label: 'Select', key: '1' }];
 
@@ -102,6 +118,7 @@ const CSS = `
 .k-tab td { padding: 2px 0 2px 10px; text-align: right; }
 .k-tab td:first-child { text-align: left; padding-left: 0; }
 .k-tab tr.k-you td { color: #fff; font-weight: 600; }
+.k-tab .k-war { color: #f87171; font-size: 10px; font-weight: 600; margin-left: 4px; }
 .k-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
 .k-sel button { display: flex; justify-content: space-between; width: 100%; margin-top: 4px; padding: 6px 10px; font-size: 13px; }
 .k-sel button small { opacity: 0.7; margin-left: 8px; }
@@ -121,6 +138,16 @@ const CSS = `
 .k-pass .k-sub2 { color: #9ca3af; font-size: 13px; }
 .k-pass button { margin-top: 18px; color: #fff; border: 0; padding: 10px 26px; font-size: 16px; font-weight: 600; }
 .k-over button { margin-top: 16px; background: #2563eb; color: #fff; border: 0; padding: 8px 18px; }
+.k-dlg { inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); pointer-events: auto; position: absolute; }
+.k-dlg .k-panel { position: static; width: min(360px, calc(100vw - 32px)); box-sizing: border-box; padding: 16px 18px; border-width: 2px; }
+.k-dlg h2 { margin: 0 0 8px; font-size: 18px; display: flex; align-items: center; }
+.k-dlg h2 .k-dot { width: 12px; height: 12px; margin-right: 8px; }
+.k-dlg p { margin: 6px 0; font-size: 13px; color: #cbd5e1; }
+.k-dlg .k-dlg-btns { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.k-dlg button { width: 100%; padding: 9px 12px; text-align: center; }
+.k-dlg button small { display: block; opacity: 0.75; font-size: 11px; }
+.k-dlg button.k-danger { background: #b91c1c; border-color: #ef4444; color: #fff; }
+.k-dlg button.k-main { background: #2563eb; border-color: #60a5fa; color: #fff; }
 /* Panel headers are drag handles (move the panel) and click targets (minimize) */
 .k-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; font-weight: 600; }
 .k-head .k-tog { display: inline-block; width: auto; margin: 0; background: transparent; border: 1px solid #444; border-radius: 4px; padding: 0 7px; font-size: 13px; line-height: 18px; color: #bbb; }
@@ -312,6 +339,7 @@ export class Hud {
   private prefs: Record<string, boolean>; // collapsed panels and panel sections
   private pass: HTMLDivElement; // hot-seat: "pass the device" screen between people
   private passStart: (() => void) | null = null;
+  private dlg: HTMLDivElement; // popup (diplomacy, war news)
 
   constructor(handlers: HudHandlers) {
     const style = document.createElement('style');
@@ -356,6 +384,12 @@ export class Hud {
 
     this.idle = el('k-panel k-idle');
     this.root.appendChild(this.idle);
+
+    this.dlg = el('k-dlg');
+    this.dlg.onclick = (e) => {
+      if (e.target === this.dlg) this.hideDialog(); // tap outside the box
+    };
+    this.root.appendChild(this.dlg);
 
     this.pass = el('k-pass');
     this.root.appendChild(this.pass);
@@ -430,7 +464,8 @@ export class Hud {
         const cells = p.alive
           ? `<td>${Math.round((tiles / land) * 100)}%</td><td>${state.cityCount(p.id)}</td><td>${state.unitsOf(p.id).length}</td>`
           : `<td colspan="3">defeated</td>`;
-        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === cur ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${escape(p.name)}</td>${cells}</tr>`;
+        const war = p.alive && state.atWar(cur, p.id) ? '<span class="k-war">AT WAR</span>' : '';
+        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === cur ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${escape(p.name)}${war}</td>${cells}</tr>`;
       })
       .join('');
     const table = state.sandbox
@@ -457,6 +492,7 @@ export class Hud {
       `<h4>Land & war</h4><ul>` +
       `<li>Each city owns land up to ${CLAIM_RADIUS} hexes away (4 once it grows into a City). Buy more from the city's Claim land.</li>` +
       `<li><b>Cities grow</b> from spare food: each level (dots on the name tag) adds gold, food and HP.</li>` +
+      `<li><b>War:</b> tap a rival's capital to declare war (it lasts at least 5 turns) or offer peace.</li>` +
       `<li>Break a city to 0 HP (red hexes = attack), then walk a Swordsman or Knight in to take it and all its land.</li>` +
       `<li>Walls (built in the city with stone) add a blue bar that soaks damage first. Cities don't heal while enemies are within 2 hexes.</li></ul>`;
 
@@ -548,6 +584,42 @@ export class Hud {
     }
     this.selBox.panel.style.display = 'block';
     this.selBox.place();
+  }
+
+  // ---------- popup ----------
+
+  showDialog(model: DialogModel): void {
+    this.hideTip();
+    this.dlg.innerHTML = '';
+    const box = el('k-panel');
+    const hex = model.color !== undefined ? `#${model.color.toString(16).padStart(6, '0')}` : '';
+    if (hex) box.style.borderColor = hex;
+    const h = document.createElement('h2');
+    h.innerHTML = `${hex ? `<span class="k-dot" style="background:${hex}"></span>` : ''}${escape(model.title)}`;
+    box.appendChild(h);
+    for (const line of model.lines) {
+      const p = document.createElement('p');
+      p.textContent = line;
+      box.appendChild(p);
+    }
+    const row = el('k-dlg-btns');
+    for (const b of model.buttons) {
+      const btn = button(`${escape(b.label)}${b.hint ? `<small>${escape(b.hint)}</small>` : ''}`, b.onClick);
+      if (b.kind) btn.className = `k-${b.kind}`;
+      btn.disabled = b.enabled === false;
+      row.appendChild(btn);
+    }
+    box.appendChild(row);
+    this.dlg.appendChild(box);
+    this.dlg.style.display = 'flex';
+  }
+
+  hideDialog(): void {
+    this.dlg.style.display = 'none';
+  }
+
+  get dialogVisible(): boolean {
+    return this.dlg.style.display === 'flex';
   }
 
   // Hot-seat: cover the map until the next person is holding the device.
