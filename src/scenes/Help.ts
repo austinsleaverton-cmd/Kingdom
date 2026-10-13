@@ -1,11 +1,12 @@
 // The "?" button (top-right, always visible: start screen and in game) and the rules guide it opens.
 // Numbers come straight from src/world so the guide stays right when the rules change.
 import {
-  ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SPACING, CLAIM_RADIUS,
-  DIFFICULTY, FARM_FOOD, HOME_HEAL, KNIGHTS_PER_PASTURE, MINE_STONE, PILLAGE_GOLD, WIN_SHARE,
+  ANGRY_AT, ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SPACING, CLAIM_RADIUS,
+  DIFFICULTY, EASY_HAPPY, FARM_FOOD, HAPPY_AT, HAPPY_BASE, HOME_HEAL, KNIGHTS_PER_PASTURE, MAX_POP, MINE_STONE, MOOD_FACE, PILLAGE_GOLD,
+  UNHAPPY_AT, WIN_SHARE,
 } from '../world/game';
 import type { Difficulty } from '../world/game';
-import { CLAIM_COST, GROWTH_NEED, LEVEL_NAMES, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
+import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
 import { JOB_COST, UNIT_STATS } from '../world/units';
 
 const CSS = `
@@ -74,8 +75,8 @@ function guideHtml(): string {
     ),
     sec(
       'Gold, food, stone',
-      `<ul><li><b>Gold</b> each turn: land (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}) + ${CITY_INCOME} per city (${CAPITAL_INCOME} for the capital) + 1 per city level above 1.</li>` +
-        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each farm ${FARM_FOOD}, +1 per city level. Every unit uses some (below). Spare food makes cities grow.</li>` +
+      `<ul><li><b>Gold</b> each turn: land (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}) + ${CITY_INCOME} per city (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets, +1 per happy city.</li>` +
+        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each farm ${FARM_FOOD}, +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
         `<li><b>Stone</b>: each mine makes ${MINE_STONE} a turn. Used for walls.</li>` +
         `<li><b>Horses</b>: each pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
     ),
@@ -84,9 +85,30 @@ function guideHtml(): string {
       `<ul><li>Settlers found cities on <b>grass</b>, at least ${CITY_SPACING} hexes from any other city.</li>` +
         `<li>Each city owns land around it. <b>Claim land</b> (city panel) buys more within ${CLAIM_RADIUS} hexes (${BIG_CLAIM_RADIUS} once it's a ${LEVEL_NAMES[2]}). ` +
         `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, water ${CLAIM_COST.water}g, a little more each time. Water counts as yours but not toward the land-share win.</li>` +
-        `<li><b>Growth</b>: spare food fills a city's growth bar (${GROWTH_NEED.join(' / ')}). Levels: ${LEVEL_NAMES.join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
+        `<li><b>Borders grow by themselves</b>: each city makes culture (1 + 1 per 3 people + Temples, Parks, Arenas). When the bar fills it grabs the best free tile next to its land, a bit slower each time.</li>` +
         `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone, paid up front. They take ${WALL_TURNS.join('/')} turns to build. Each level adds a ${WALL_SHIELD} point shield that soaks damage first. Losing the city loses half-built walls.</li>` +
         `<li>Cities heal every turn unless enemy troops are within 2 hexes (a siege), and don't grow under siege.</li></ul>`,
+    ),
+    sec(
+      'People',
+      `<ul><li>Spare food fills a city's growth bar; a full bar is one more person (up to ${MAX_POP}). Happy cities grow 50% faster.</li>` +
+        `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
+        `<li>The number on a city's name tag is its people; the face is its mood.</li></ul>`,
+    ),
+    sec(
+      'Happiness',
+      `<ul><li>Every city starts at +${HAPPY_BASE} (capital +1 more, your cities +${EASY_HAPPY} more on Easy). Every 2 people take 1 away (crowding), every 2 of your troops on enemy land take 1 away (up to 3), and a siege takes 2.</li>` +
+        `<li>${MOOD_FACE.happy} Happy (+${HAPPY_AT} or more): grows 50% faster and pays +1 gold. ${MOOD_FACE.content} Content: normal. ${MOOD_FACE.unhappy} Unhappy (${UNHAPPY_AT} or less): stops growing. ${MOOD_FACE.angry} Angry (${ANGRY_AT} or less): people leave.</li></ul>`,
+    ),
+    sec(
+      'Amenities',
+      `<table><tr><th>Amenity</th><th>Gold</th><th>Turns</th><th>Needs</th><th>Does</th></tr>` +
+        BUILDING_ORDER.map((b) => {
+          const i = BUILDINGS[b];
+          return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people</td><td>${i.note}</td></tr>`;
+        }).join('') +
+        `</table><ul><li>Built from the city panel. One project at a time, and a city can't train troops while it builds (builders still work).</li>` +
+        `<li>Losing the city loses a half-built amenity; finished ones stay.</li></ul>`,
     ),
     sec(
       'Builders',
