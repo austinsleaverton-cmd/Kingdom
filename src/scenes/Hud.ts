@@ -293,8 +293,13 @@ export class Hud {
       `<div class="k-resrow"><span class="k-ic">${icon}</span><span class="k-lab">${label}</span>` +
       `<b>${value}</b><span class="k-note${warn ? ' k-warn' : ''}">${note}</span></div>`;
     const foodPct = made > 0 ? Math.min(100, (used / made) * 100) : 100;
+    const net = state.income(cur);
+    const pay = state.upkeep(cur);
+    const goldNote = free
+      ? 'free building on'
+      : `${net >= 0 ? '+' : ''}${net} next turn${pay ? ` (troops cost ${pay})` : ''}`;
     const mine =
-      row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(cur)} next turn`) +
+      row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), goldNote, !free && net < 0) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
       `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
       row('\u{1F465}', 'People', String(state.population(cur)), `eat ${state.popFood(cur)} food`) +

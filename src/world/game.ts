@@ -3,7 +3,7 @@ import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
 import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
-import type { Building, PlayerId, Tile } from './tile';
+import type { Building, Improvement, PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { runAI } from './ai';
@@ -144,6 +144,15 @@ export const HAPPY_AT = 3; // happiness at or above this: happy (faster growth, 
 export const UNHAPPY_AT = -1; // at or below: unhappy (no growth)
 export const ANGRY_AT = -3; // at or below: angry (people leave)
 
+// Workers: each person in a city works one of its farms, mines, pastures or forests (taking turns
+// between the kinds in this order). Improvements without a worker sit idle and make nothing.
+export const WORK_ORDER: Improvement[] = ['farm', 'mine', 'pasture', 'forest'];
+
+// Troops cost gold every turn (same as the food they eat): 2 for swordsmen and archers, 3 for knights
+export function troopUpkeep(type: UnitType): number {
+  return UNIT_STATS[type].military ? UNIT_STATS[type].food : 0;
+}
+
 export type Mood = 'happy' | 'content' | 'unhappy' | 'angry';
 export const MOOD_FACE: Record<Mood, string> = { happy: '\u{1F600}', content: '\u{1F610}', unhappy: '\u{1F641}', angry: '\u{1F620}' };
 
@@ -266,7 +275,8 @@ export class GameState {
     return this.map.tiles.filter(isLand).length;
   }
 
-  income(p: PlayerId): number {
+  // Gold made before paying troops
+  grossIncome(p: PlayerId): number {
     let gold = 0;
     for (const t of this.ownedTiles(p)) {
       gold += YIELD[t.terrain];
@@ -281,15 +291,76 @@ export class GameState {
     return gold;
   }
 
+  // Gold paid to troops each turn
+  upkeep(p: PlayerId): number {
+    if (this.isFree(p)) return 0;
+    return this.unitsOf(p).reduce((sum, u) => sum + troopUpkeep(u.type), 0);
+  }
+
+  // Gold per turn after paying troops (what a person sees as "next turn")
+  income(p: PlayerId): number {
+    return this.grossIncome(p) - this.upkeep(p);
+  }
+
+  // ---------- workers ----------
+
+  // Improved tiles (farm, mine, pasture, forest) that have a worker this turn
+  workedTiles(p: PlayerId): Set<Tile> {
+    const out = new Set<Tile>();
+    const byCity = new Map<number, Tile[]>();
+    for (const t of this.map.tiles) {
+      if (t.owner !== p || !t.improvement || t.home === null) continue;
+      let list = byCity.get(t.home);
+      if (!list) byCity.set(t.home, (list = []));
+      list.push(t);
+    }
+    for (const [home, list] of byCity) {
+      const city = this.map.tiles[home];
+      if (!city || !city.city || city.owner !== p) continue;
+      const groups = WORK_ORDER.map((k) => list.filter((t) => t.improvement === k));
+      let left = city.pop;
+      for (let round = 0; left > 0; round++) {
+        let any = false;
+        for (const g of groups) {
+          if (left > 0 && round < g.length) {
+            out.add(g[round]);
+            left--;
+            any = true;
+          }
+        }
+        if (!any) break;
+      }
+    }
+    return out;
+  }
+
+  // Farms, mines, pastures and forests on a city's land
+  improvedCount(city: Tile): number {
+    return this.cityLand(city).filter((t) => t.improvement).length;
+  }
+
+  // How many of a city's improvements are worked right now
+  cityWork(city: Tile): { worked: number; total: number } {
+    if (city.owner === null) return { worked: 0, total: 0 };
+    const worked = this.workedTiles(city.owner);
+    const land = this.cityLand(city).filter((t) => t.improvement);
+    return { worked: land.filter((t) => worked.has(t)).length, total: land.length };
+  }
+
+  isWorked(tile: Tile): boolean {
+    return tile.owner !== null && !!tile.improvement && this.workedTiles(tile.owner).has(tile);
+  }
+
   // Food is supply: farms and cities produce it, units use it up.
   foodMade(p: PlayerId): number {
+    const worked = this.workedTiles(p);
     let food = 0;
     for (const t of this.ownedTiles(p)) {
       if (t.capital) food += CAPITAL_FOOD;
       else if (t.city) food += CITY_FOOD;
       if (t.city) food += cityLevel(t) - 1;
       if (t.city) for (const b of t.buildings) food += BUILDINGS[b].food;
-      if (t.improvement === 'farm') food += FARM_FOOD;
+      if (t.improvement === 'farm' && worked.has(t)) food += FARM_FOOD;
     }
     return food;
   }
@@ -352,13 +423,23 @@ export class GameState {
     return this.training.find((t) => t.col === city.col && t.row === city.row);
   }
 
+  // A city does one thing at a time: train a unit, build walls or build an amenity. Empty = free.
+  busyWith(city: Tile): string {
+    const t = this.trainingAt(city);
+    if (t) return `training a ${UNIT_STATS[t.type].name}`;
+    if (city.wallTurns > 0) return 'building walls';
+    if (city.project) return `building a ${BUILDINGS[city.project].name}`;
+    return '';
+  }
+
   unitCost(type: UnitType, p: PlayerId): number {
     return type === 'settler' ? this.cityCost(p) : UNIT_STATS[type].cost;
   }
 
-  // Horses and bows work like food: a cap from your pastures/forests, used by living (and training) troops
+  // Horses and bows work like food: a cap from your worked pastures/forests, used by living (and training) troops
   private countImp(p: PlayerId, imp: 'pasture' | 'forest'): number {
-    return this.ownedTiles(p).filter((t) => t.improvement === imp).length;
+    const worked = this.workedTiles(p);
+    return this.ownedTiles(p).filter((t) => t.improvement === imp && worked.has(t)).length;
   }
 
   private countTroop(p: PlayerId, type: UnitType): number {
@@ -382,7 +463,8 @@ export class GameState {
   }
 
   stoneIncome(p: PlayerId): number {
-    return this.ownedTiles(p).filter((t) => t.improvement === 'mine').length * MINE_STONE;
+    const worked = this.workedTiles(p);
+    return this.ownedTiles(p).filter((t) => t.improvement === 'mine' && worked.has(t)).length * MINE_STONE;
   }
 
   unitsOf(p: PlayerId): Unit[] {
@@ -613,8 +695,8 @@ export class GameState {
     if (!city.city || city.owner !== p) return fail('Build in your own city');
     const info = BUILDINGS[b];
     if (city.buildings.includes(b)) return fail('Already built');
-    if (city.project) return fail(`Busy building ${BUILDINGS[city.project].name}`);
-    if (this.trainingAt(city)) return fail('Busy training troops');
+    const busy = this.busyWith(city);
+    if (busy) return fail(`Busy ${busy}`);
     if (city.pop < info.minPop) return fail(`Needs ${info.minPop} people`);
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
@@ -824,11 +906,12 @@ export class GameState {
     if (this.winner !== null) return fail('Game over');
     if (!city.city || city.owner !== p) return fail('Recruit from your own city');
     const stats = UNIT_STATS[type];
-    if (stats.train > 0 && this.trainingAt(city)) return fail('City is already training');
-    if (stats.train > 0 && city.project) return fail(`Busy building ${BUILDINGS[city.project].name}`);
+    // Builders show up right away, so they don't count as the city's one job
+    const busy = stats.train > 0 ? this.busyWith(city) : '';
+    if (busy) return fail(`Busy ${busy}`);
     if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
-    if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: build a pasture');
-    if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: plant a forest');
+    if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
+    if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
     if (stats.train === 0 && !this.spawnTile(city)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
@@ -1187,6 +1270,8 @@ export class GameState {
     if (!city.city || city.owner !== p) return fail('Build walls in your own city');
     if (city.walls >= MAX_WALLS) return fail('Walls are maxed');
     if (city.wallTurns > 0) return fail(`Walls going up: ${city.wallTurns} turn${city.wallTurns === 1 ? '' : 's'} left`);
+    const busy = this.busyWith(city);
+    if (busy) return fail(`Busy ${busy}`);
     const stone = this.wallStoneCost(city);
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     if (this.players[p].stone < stone) return fail(`Need ${stone} stone (build mines)`);
@@ -1321,9 +1406,14 @@ export class GameState {
   // ---------- internals ----------
 
   private startTurn(p: PlayerId): void {
-    const mult = this.players[p].isAI ? DIFFICULTY[this.options.difficulty].income : 1;
-    this.players[p].gold += Math.round(this.income(p) * mult);
-    this.players[p].stone += this.stoneIncome(p);
+    const pl = this.players[p];
+    const mult = pl.isAI ? DIFFICULTY[this.options.difficulty].income : 1;
+    pl.gold += Math.round(this.grossIncome(p) * mult) - this.upkeep(p);
+    if (pl.gold < 0) {
+      pl.gold = 0;
+      this.tell(p, 'Not enough gold to pay all your troops');
+    }
+    pl.stone += this.stoneIncome(p);
     this.growCities(p);
     this.growBorders(p);
     this.advanceWalls(p);
