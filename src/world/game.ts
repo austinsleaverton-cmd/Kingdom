@@ -6,7 +6,7 @@ import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
-import { runAI } from './ai';
+import { aiPeaceVerdict, runAI } from './ai';
 
 export type Action = 'claim';
 
@@ -29,7 +29,7 @@ export interface DifficultyConfig {
   income: number; // AI gold multiplier
   troopsPerCity: number; // standing army size per city
   maxArmy: number;
-  attackTurn: number; // won't march on anyone before this turn
+  attackTurn: number; // won't declare war on anyone before this turn
   attackArmy: number; // troops needed before it goes to war
   garrison: number; // troops kept home while at war
   builders: number;
@@ -144,6 +144,20 @@ export const HAPPY_AT = 3; // happiness at or above this: happy (faster growth, 
 export const UNHAPPY_AT = -1; // at or below: unhappy (no growth)
 export const ANGRY_AT = -3; // at or below: angry (people leave)
 
+// War and peace: everyone starts at peace; attacking needs a declared war
+export const MIN_WAR_TURNS = 5; // a war lasts at least this long before peace can be made
+export const TRUCE_TURNS = 10; // after peace, neither side can declare war again for this long
+export const PEACE_RETRY = 3; // an AI said no: wait this long before asking again
+
+// Fog of war: how far things see (hexes)
+export const UNIT_SIGHT: Record<UnitType, number> = { builder: 1, settler: 1, swordsman: 2, archer: 2, knight: 3 };
+export const CITY_SIGHT = 2; // +1 once a city reaches level 3
+
+// Wars, treaties and refusals are stored per pair of kingdoms
+export function pairKey(a: PlayerId, b: PlayerId): string {
+  return a < b ? `${a}-${b}` : `${b}-${a}`;
+}
+
 // Workers: each person in a city works one of its farms, mines, pastures or forests (taking turns
 // between the kinds in this order). Improvements without a worker sit idle and make nothing.
 export const WORK_ORDER: Improvement[] = ['farm', 'mine', 'pasture', 'forest'];
@@ -206,6 +220,11 @@ export class GameState {
   nextUnitId = 1;
   training: Training[] = [];
   cityNames: Record<number, string> = {}; // tile index -> city name
+  wars: Record<string, number> = {}; // pairKey -> turn the war started
+  truces: Record<string, number> = {}; // pairKey -> turn peace was made
+  peaceAsked: Record<string, number> = {}; // pairKey -> turn an AI last refused peace
+  explored: Uint8Array[] = []; // fog of war, per player: 1 = that tile has been seen
+  alerts: { p: PlayerId; msg: string }[] = []; // big news for a person (war declared on them), shown as a popup
 
   constructor(options: GameOptions) {
     const seats = seatsFor(options);
@@ -230,8 +249,10 @@ export class GameState {
         alive: true,
       });
     }
+    this.explored = this.players.map(() => new Uint8Array(this.map.tiles.length));
     this.placeCapitals();
     this.startTurn(0);
+    for (const pl of this.players) this.explore(pl.id);
   }
 
   get seed(): number {
@@ -240,6 +261,11 @@ export class GameState {
 
   get sandbox(): boolean {
     return this.options.opponents === 0;
+  }
+
+  // Fog of war is on whenever there are rivals
+  get fog(): boolean {
+    return !this.sandbox;
   }
 
   // Two or more people sharing the device: messages use names instead of "you"
@@ -488,8 +514,9 @@ export class GameState {
     const canCapture = UNIT_STATS[unit.type].canCapture === true;
     return reachable(this.map, unit, (t) => {
       if (this.unitAt(t)) return true;
-      // Enemy cities block movement until destroyed; then only capture-capable troops can walk in.
-      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture;
+      // Other kingdoms' cities block movement. A destroyed city of someone you're at war with
+      // can be walked into (that captures it), but only by capture-capable troops.
+      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
       return false;
     });
   }
@@ -513,12 +540,156 @@ export class GameState {
     );
   }
 
+  // Someone you're at war with who is still in the game. At peace there are no attacks, sieges or pillage.
   isEnemy(owner: PlayerId | null, p: PlayerId): boolean {
-    return owner !== null && owner !== p && this.players[owner].alive;
+    return owner !== null && owner !== p && this.players[owner].alive && this.atWar(owner, p);
   }
 
   claimCost(tile: Tile, p: PlayerId): number {
     return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
+  }
+
+  // ---------- war and peace ----------
+
+  atWar(a: PlayerId, b: PlayerId): boolean {
+    return a !== b && this.wars[pairKey(a, b)] !== undefined;
+  }
+
+  // Turns since the war started (0 = declared this turn)
+  warTurns(a: PlayerId, b: PlayerId): number {
+    const start = this.wars[pairKey(a, b)];
+    return start === undefined ? 0 : this.turn - start;
+  }
+
+  // Turns left on a peace treaty (0 = none)
+  truceLeft(a: PlayerId, b: PlayerId): number {
+    const t = this.truces[pairKey(a, b)];
+    return t === undefined ? 0 : Math.max(0, t + TRUCE_TURNS - this.turn);
+  }
+
+  warCheck(p: PlayerId, q: PlayerId): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (this.sandbox) return fail('No rivals in a sandbox');
+    if (p === q) return fail("That's you");
+    if (!this.players[q] || !this.players[q].alive) return fail('Already defeated');
+    if (this.atWar(p, q)) return fail('Already at war');
+    const left = this.truceLeft(p, q);
+    if (left > 0) return fail(`Peace treaty: no war for ${left} more turn${left === 1 ? '' : 's'}`);
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  declareWar(p: PlayerId, q: PlayerId): Check {
+    const c = this.warCheck(p, q);
+    if (!c.ok) return c;
+    const key = pairKey(p, q);
+    this.wars[key] = this.turn;
+    delete this.truces[key];
+    delete this.peaceAsked[key];
+    this.addLog(`${this.youCap(p)} declared war on ${this.you(q)}`);
+    if (!this.players[q].isAI) {
+      const who = this.hotseat ? this.players[q].name : 'you';
+      this.alerts.push({ p: q, msg: `${this.players[p].name} declared war on ${who}! Their troops can now attack your units and cities.` });
+    }
+    return c;
+  }
+
+  peaceCheck(p: PlayerId, q: PlayerId): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (!this.atWar(p, q)) return fail('Not at war');
+    const t = this.warTurns(p, q);
+    if (t < MIN_WAR_TURNS) {
+      const n = MIN_WAR_TURNS - t;
+      return fail(`Wars last at least ${MIN_WAR_TURNS} turns: peace is possible in ${n} turn${n === 1 ? '' : 's'}`);
+    }
+    const asked = this.peaceAsked[pairKey(p, q)];
+    if (asked !== undefined && this.turn - asked < PEACE_RETRY) {
+      const n = PEACE_RETRY - (this.turn - asked);
+      return fail(`${this.players[q].name} said no. Ask again in ${n} turn${n === 1 ? '' : 's'}`);
+    }
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  // p asks q for peace. AI kingdoms decide by how the war is going (see aiPeaceVerdict);
+  // people sharing the device agree right away.
+  offerPeace(p: PlayerId, q: PlayerId): Check {
+    const c = this.peaceCheck(p, q);
+    if (!c.ok) return c;
+    if (this.players[q].isAI) {
+      const v = aiPeaceVerdict(this, q, p);
+      if (!v.accept) {
+        this.peaceAsked[pairKey(p, q)] = this.turn;
+        this.tell(p, `${this.players[q].name} refused peace`);
+        return fail(v.reason);
+      }
+      this.makePeace(p, q);
+      return { ok: true, cost: 0, reason: v.reason };
+    }
+    this.makePeace(p, q);
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  makePeace(p: PlayerId, q: PlayerId): void {
+    const key = pairKey(p, q);
+    if (this.wars[key] === undefined) return;
+    delete this.wars[key];
+    delete this.peaceAsked[key];
+    this.truces[key] = this.turn;
+    this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
+  }
+
+  // Popups waiting for a person (cleared once read)
+  takeAlerts(p: PlayerId): string[] {
+    const mine = this.alerts.filter((a) => a.p === p).map((a) => a.msg);
+    this.alerts = this.alerts.filter((a) => a.p !== p);
+    return mine;
+  }
+
+  private peaceNote(q: PlayerId): string {
+    return `At peace with ${this.players[q].name}: tap their capital to declare war`;
+  }
+
+  // ---------- fog of war ----------
+
+  // Tiles p can see right now: its land and the tiles next to it, plus everything near its cities and units
+  visibleTiles(p: PlayerId): Set<Tile> {
+    const out = new Set<Tile>();
+    for (const t of this.map.tiles) {
+      if (t.owner !== p) continue;
+      out.add(t);
+      for (const n of this.map.neighbors(t)) out.add(n);
+      if (t.city) this.addAround(t, CITY_SIGHT + (cityLevel(t) >= 3 ? 1 : 0), out);
+    }
+    for (const u of this.unitsOf(p)) this.addAround(this.tileOf(u), UNIT_SIGHT[u.type], out);
+    return out;
+  }
+
+  private addAround(from: Tile, r: number, out: Set<Tile>): void {
+    const seen = new Set<Tile>([from]);
+    let ring = [from];
+    for (let i = 0; i < r; i++) {
+      const next: Tile[] = [];
+      for (const t of ring) {
+        for (const n of this.map.neighbors(t)) {
+          if (seen.has(n)) continue;
+          seen.add(n);
+          next.push(n);
+        }
+      }
+      ring = next;
+    }
+    for (const t of seen) out.add(t);
+  }
+
+  // Marks everything p sees right now as explored and returns the visible tiles
+  explore(p: PlayerId): Set<Tile> {
+    const vis = this.visibleTiles(p);
+    const ex = this.explored[p];
+    if (ex) for (const t of vis) ex[this.tileIndex(t)] = 1;
+    return vis;
+  }
+
+  isExplored(p: PlayerId, t: Tile): boolean {
+    return this.explored[p]?.[this.tileIndex(t)] === 1;
   }
 
   // ---------- city names ----------
@@ -993,7 +1164,7 @@ export class GameState {
     return (t) => {
       const u = this.unitAt(t);
       if (u && u !== unit && (ownBlock || u.owner !== unit.owner)) return true;
-      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture;
+      if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
       return false;
     };
   }
@@ -1129,7 +1300,7 @@ export class GameState {
     const defender = this.unitAt(target);
     if (defender) {
       if (defender.owner === unit.owner) return no('Your own unit');
-      if (!this.isEnemy(defender.owner, unit.owner)) return no('Nothing to attack');
+      if (!this.isEnemy(defender.owner, unit.owner)) return no(this.players[defender.owner].alive ? this.peaceNote(defender.owner) : 'Nothing to attack');
       const d = UNIT_STATS[defender.type];
       if (!d.military) return { ok: true, reason: '', dmg: defender.hp, counter: 0, kind: 'unit' };
       const dmg = Math.max(1, Math.round(stats.atk * this.typeMult(unit.type, defender.type) * this.defenseMult(target, defender.owner)));
@@ -1137,6 +1308,9 @@ export class GameState {
         ? Math.round(d.atk * COUNTER_SHARE * this.typeMult(defender.type, unit.type) * this.defenseMult(from, unit.owner))
         : 0;
       return { ok: true, reason: '', dmg, counter, kind: 'unit' };
+    }
+    if (target.city && target.owner !== null && target.owner !== unit.owner && this.players[target.owner].alive && !this.isEnemy(target.owner, unit.owner)) {
+      return no(this.peaceNote(target.owner));
     }
     if (target.city && this.isEnemy(target.owner, unit.owner)) {
       if (target.hp <= 0 && target.shield <= 0) return no(stats.canCapture ? 'Destroyed: move in to capture' : 'Destroyed: send a swordsman or knight');
@@ -1316,6 +1490,7 @@ export class GameState {
     if (unit.acted) return fail('Already acted this turn');
     const here = this.tileOf(unit);
     if (here.city) return fail("Can't pillage a city: attack it");
+    if (here.owner !== null && here.owner !== unit.owner && !this.isEnemy(here.owner, unit.owner)) return fail('Only during a war');
     if (!this.isEnemy(here.owner, unit.owner)) return fail('Stand on enemy land to pillage');
     if (!here.improvement && !here.road) return fail('Nothing here to pillage');
     return { ok: true, cost: 0, reason: '' };
@@ -1454,6 +1629,12 @@ export class GameState {
     return !this.hotseat && !this.players[p].isAI ? 'you' : this.players[p].name;
   }
 
+  // Same as you(), for the start of a sentence
+  private youCap(p: PlayerId): string {
+    const s = this.you(p);
+    return s === 'you' ? 'You' : s;
+  }
+
   // News only people care about (the AI doesn't read the log)
   private tell(p: PlayerId, msg: string): void {
     if (this.players[p].isAI) return;
@@ -1474,6 +1655,13 @@ export class GameState {
     this.training = this.training.filter((t) => t.owner !== loser);
     for (const t of this.map.tiles) {
       if (t.owner === loser) t.owner = captor;
+    }
+    // Their wars and treaties end with them
+    for (const pl of this.players) {
+      const key = pairKey(loser, pl.id);
+      delete this.wars[key];
+      delete this.truces[key];
+      delete this.peaceAsked[key];
     }
     this.addLog(`${c.name} captured ${this.whose(loser)} capital!`);
   }

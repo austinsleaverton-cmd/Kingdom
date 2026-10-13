@@ -1,15 +1,16 @@
 // Rival AI. Plays only through public GameState methods, same rules as the human.
 // No Phaser imports in src/world.
-import { CITY_SPACING, DIFFICULTY } from './game';
+import { CITY_SPACING, DIFFICULTY, MIN_WAR_TURNS } from './game';
 import type { GameState } from './game';
 import { hexDistance } from './map';
-import { BUILDINGS, MAX_WALLS, YIELD, improvementFits, isLand } from './tile';
+import { BUILDINGS, MAX_WALLS, YIELD, cityMaxHp, improvementFits, isLand } from './tile';
 import type { Building, PlayerId, Tile } from './tile';
 import { TROOPS, UNIT_STATS } from './units';
 import type { Job, Unit, UnitType } from './units';
 
 export function runAI(g: GameState, p: PlayerId): void {
   const cfg = DIFFICULTY[g.options.difficulty];
+  aiDiplomacy(g, p);
   aiTroops(g, p);
   if (!alive(g, p)) return;
   aiSettlers(g, p);
@@ -38,6 +39,7 @@ function myCities(g: GameState, p: PlayerId): Tile[] {
   return g.cities().filter((c) => c.owner === p);
 }
 
+// Cities of kingdoms we're at war with
 function enemyCities(g: GameState, p: PlayerId): Tile[] {
   return g.cities().filter((c) => g.isEnemy(c.owner, p));
 }
@@ -50,9 +52,84 @@ function armyWanted(g: GameState, p: PlayerId): number {
   const cfg = DIFFICULTY[g.options.difficulty];
   if (g.sandbox) return 0;
   const n = Math.ceil(myCities(g, p).length * cfg.troopsPerCity);
-  // Grow a bigger army once it's time to go to war.
-  const war = g.turn >= cfg.attackTurn ? cfg.attackArmy : 0;
+  // Grow a bigger army once it's time to go to war (or someone already started one).
+  const fighting = g.players.some((q) => q.alive && g.atWar(p, q.id));
+  const war = g.turn >= cfg.attackTurn || fighting ? cfg.attackArmy : 0;
   return Math.min(cfg.maxArmy, Math.max(n, war));
+}
+
+// ---------- war and peace ----------
+
+// Rough military strength: troops (health and punch) plus cities
+function power(g: GameState, p: PlayerId): number {
+  return troops(g, p).reduce((s, u) => s + u.hp + UNIT_STATS[u.type].atk * 2, 0) + g.cityCount(p) * 15;
+}
+
+// Would AI kingdom `ai` agree to peace with `other` right now? It depends on how the war is going:
+// who's stronger, whose cities are hurting, how long it has dragged on, unrest at home, and difficulty.
+export function aiPeaceVerdict(g: GameState, ai: PlayerId, other: PlayerId): { accept: boolean; reason: string } {
+  const cfg = DIFFICULTY[g.options.difficulty];
+  const name = g.players[ai].name;
+  const ratio = power(g, other) / Math.max(1, power(g, ai)); // above 1: the other side is stronger
+  const cities = myCities(g, ai);
+  const hurting = cities.some((c) => c.hp < cityMaxHp(c) * 0.5);
+  const winning = g.cities().some((c) => c.owner === other && c.hp < cityMaxHp(c) * 0.5);
+  let chance = 0.35 + Math.max(0, g.warTurns(ai, other) - MIN_WAR_TURNS) * 0.04; // war weariness
+  chance += Math.max(-0.3, Math.min(0.35, (ratio - 1) * 0.4));
+  if (hurting) chance += 0.25;
+  if (winning) chance -= 0.3;
+  chance += 0.08 * cities.filter((c) => g.mood(c) === 'unhappy' || g.mood(c) === 'angry').length;
+  if (g.options.difficulty === 'easy') chance += 0.15;
+  if (g.options.difficulty === 'hard') chance -= 0.15;
+  if (cfg.focusHuman && !g.players[other].isAI) chance -= 0.1;
+  chance = Math.max(0.05, Math.min(0.95, chance));
+  if (Math.random() < chance) {
+    return { accept: true, reason: hurting || ratio > 1.2 ? `${name} is glad to stop the fighting.` : `${name} agrees to peace.` };
+  }
+  const reason = winning
+    ? `${name} smells victory and wants to keep fighting.`
+    : ratio < 0.8
+      ? `${name} thinks it's winning this war.`
+      : `${name} isn't ready to stop yet.`;
+  return { accept: false, reason };
+}
+
+// Start wars when the army is ready, and make peace with other AI kingdoms when it suits both
+function aiDiplomacy(g: GameState, p: PlayerId): void {
+  if (g.sandbox) return;
+  const cfg = DIFFICULTY[g.options.difficulty];
+  for (const q of g.players) {
+    if (q.id === p || !q.alive || !q.isAI || !g.atWar(p, q.id)) continue;
+    if (g.peaceCheck(p, q.id).ok && aiPeaceVerdict(g, p, q.id).accept) g.offerPeace(p, q.id);
+  }
+  // One war at a time, and not before the difficulty allows it
+  if (g.turn < cfg.attackTurn || troops(g, p).length < cfg.attackArmy) return;
+  if (g.players.some((q) => q.alive && g.atWar(p, q.id))) return;
+  if (!cfg.smart && Math.random() > cfg.aggression) return; // doesn't always pounce the moment it can
+  const target = pickWarTarget(g, p);
+  if (target !== null) g.declareWar(p, target);
+}
+
+// Nearest kingdom we're allowed to declare war on (Hard only goes after people)
+function pickWarTarget(g: GameState, p: PlayerId): PlayerId | null {
+  const cfg = DIFFICULTY[g.options.difficulty];
+  const cities = myCities(g, p);
+  const home = cities.find((c) => c.capital) ?? cities[0];
+  if (!home) return null;
+  let best: PlayerId | null = null;
+  let bestD = Infinity;
+  for (const c of g.cities()) {
+    const q = c.owner;
+    if (q === null || q === p || !g.players[q].alive) continue;
+    if (cfg.focusHuman && g.players[q].isAI) continue;
+    if (!g.warCheck(p, q).ok) continue;
+    const d = hexDistance(home, c);
+    if (d < bestD) {
+      bestD = d;
+      best = q;
+    }
+  }
+  return best;
 }
 
 // ---------- recruiting ----------
@@ -247,10 +324,10 @@ function aiTroops(g: GameState, p: PlayerId): void {
   // A city is under threat if enemy troops are close
   const threatened = cities.filter((c) => enemies.some((e) => hexDistance(g.tileOf(e), c) <= 3));
 
-  // Pick a war target: nearest (easy/normal) or weakest-nearby (hard) enemy city
+  // Pick a war target among kingdoms we're at war with: nearest (easy/normal) or weakest-nearby (hard)
   let warTarget: Tile | null = null;
-  const atWar = g.turn >= cfg.attackTurn && army.length >= cfg.attackArmy;
-  if (atWar && cities.length > 0) {
+  const marching = army.length >= cfg.attackArmy;
+  if (marching && cities.length > 0) {
     const home = cities.find((c) => c.capital) ?? cities[0];
     let best = Infinity;
     for (const c of enemyCities(g, p)) {

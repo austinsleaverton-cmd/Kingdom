@@ -29,6 +29,10 @@ interface SaveData {
   training?: Training[];
   homes?: (number | null)[]; // per tile: index of the city it belongs to
   names?: Record<number, string>; // city tile index -> name
+  wars?: Record<string, number>; // pair of kingdoms -> turn the war started
+  truces?: Record<string, number>; // pair -> turn peace was made
+  peaceAsked?: Record<string, number>; // pair -> turn an AI refused peace
+  explored?: string[]; // fog of war, per player: one '0'/'1' per tile
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -58,6 +62,10 @@ export function saveGame(state: GameState): void {
     training: state.training,
     homes: state.map.tiles.map((t) => t.home),
     names: state.cityNames,
+    wars: state.wars,
+    truces: state.truces,
+    peaceAsked: state.peaceAsked,
+    explored: state.explored.map((a) => Array.from(a).join('')),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -153,10 +161,24 @@ export function loadGame(): GameState | null {
     state.units = (data.units ?? []).map((u) => ({ ...u, hp: u.hp ?? UNIT_STATS[u.type].hp }));
     state.nextUnitId = data.nextUnitId ?? state.units.length + 1;
     state.training = (data.training ?? []).map((t) => ({ ...t }));
+    // Older saves have no wars: everyone starts at peace
+    state.wars = { ...(data.wars ?? {}) };
+    state.truces = { ...(data.truces ?? {}) };
+    state.peaceAsked = { ...(data.peaceAsked ?? {}) };
+    state.alerts = [];
     state.invalidate();
     state.assignMissingHomes();
     state.cityNames = { ...(data.names ?? {}) };
     state.nameMissingCities();
+    // Fog of war: what each kingdom has seen (older saves start with what's in sight now)
+    const n = state.map.tiles.length;
+    state.explored = state.players.map((_, i) => {
+      const a = new Uint8Array(n);
+      const s = data.explored?.[i];
+      if (s && s.length === n) for (let k = 0; k < n; k++) a[k] = s.charCodeAt(k) === 49 ? 1 : 0;
+      return a;
+    });
+    for (const p of state.players) state.explore(p.id);
     return state;
   } catch {
     return null;
