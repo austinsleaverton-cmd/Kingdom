@@ -1,7 +1,7 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
-import { cityMaxHp, shieldMax, terrainFromHeight } from './tile';
+import { BUILDING_ORDER, LEVEL_POP, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
 import type { PlayerId } from './tile';
 import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
@@ -29,8 +29,9 @@ interface SaveData {
   training?: Training[];
   homes?: (number | null)[]; // per tile: index of the city it belongs to
   names?: Record<number, string>; // city tile index -> name
-  // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns] (the rest only for cities)
-  tiles: [number, PlayerId | null, number, number?, number?, number?, number?, number?, number?][];
+  // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
+  // (everything after flags only for cities)
+  tiles: [number, PlayerId | null, number, ...number[]][];
 }
 
 export interface SaveSummary {
@@ -66,7 +67,10 @@ export function saveGame(state: GameState): void {
         (t.improvement === 'mine' ? MINE : 0) |
         (t.improvement === 'pasture' ? PASTURE : 0) |
         (t.improvement === 'forest' ? FOREST : 0);
-      return t.city ? [t.height, t.owner, flags, t.hp, t.walls, t.shield, t.level, t.growth, t.wallTurns] : [t.height, t.owner, flags];
+      if (!t.city) return [t.height, t.owner, flags];
+      const bits = t.buildings.reduce((m, b) => m | (1 << BUILDING_ORDER.indexOf(b)), 0);
+      const project = t.project ? BUILDING_ORDER.indexOf(t.project) : -1;
+      return [t.height, t.owner, flags, t.hp, t.walls, t.shield, t.level, t.growth, t.wallTurns, t.pop, t.culture, t.borders, bits, project, t.projectTurns];
     }),
   };
   try {
@@ -108,7 +112,7 @@ export function loadGame(): GameState | null {
     const state = new GameState(data.options);
     if (data.tiles.length !== state.map.tiles.length) return null;
     state.map.tiles.forEach((t, i) => {
-      const [height, owner, flags, hp, walls, shield, level, growth, wallTurns] = data.tiles[i];
+      const [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, bits, project, projectTurns] = data.tiles[i];
       t.height = height;
       t.terrain = terrainFromHeight(height);
       t.owner = owner;
@@ -120,6 +124,14 @@ export function loadGame(): GameState | null {
       t.level = t.city ? (level ?? 1) : 0; // old saves: every city starts as a Village
       t.growth = t.city ? (growth ?? 0) : 0;
       t.wallTurns = t.city ? (wallTurns ?? 0) : 0;
+      // Older saves had levels, not people: start each city with the people its level needs
+      t.pop = t.city ? (pop ?? LEVEL_POP[Math.max(0, Math.min(LEVEL_POP.length, t.level) - 1)]) : 0;
+      if (t.city) t.level = levelFromPop(t.pop);
+      t.culture = t.city ? (culture ?? 0) : 0;
+      t.borders = t.city ? (borders ?? 0) : 0;
+      t.buildings = t.city ? BUILDING_ORDER.filter((_, k) => ((bits ?? 0) & (1 << k)) !== 0) : [];
+      t.project = t.city && project !== undefined && project >= 0 ? BUILDING_ORDER[project] : null;
+      t.projectTurns = t.city ? (projectTurns ?? 0) : 0;
       t.hp = t.city ? (hp ?? cityMaxHp(t)) : 0;
       t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
       t.home = data.homes && data.homes.length === data.tiles.length ? data.homes[i] : null;

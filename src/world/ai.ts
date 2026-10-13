@@ -3,8 +3,8 @@
 import { CITY_SPACING, DIFFICULTY } from './game';
 import type { GameState } from './game';
 import { hexDistance } from './map';
-import { MAX_WALLS, YIELD, improvementFits, isLand } from './tile';
-import type { PlayerId, Tile } from './tile';
+import { BUILDINGS, MAX_WALLS, YIELD, improvementFits, isLand } from './tile';
+import type { Building, PlayerId, Tile } from './tile';
 import { TROOPS, UNIT_STATS } from './units';
 import type { Job, Unit, UnitType } from './units';
 
@@ -110,6 +110,11 @@ function aiQueue(g: GameState, p: PlayerId): void {
       g.recruit('settler', city, p);
       continue;
     }
+    // Nothing to train: build an amenity if there's spare gold
+    if (!city.project && !g.trainingAt(city)) {
+      const b = pickBuilding(g, p, city);
+      if (b && g.players[p].gold - BUILDINGS[b].cost >= settlerReserve(g, p) + 10) g.startBuilding(city, b, p);
+    }
   }
   // Walls: queue the next level when there's stone for it
   for (const city of cities) {
@@ -120,6 +125,19 @@ function aiQueue(g: GameState, p: PlayerId): void {
     const city = cities.find((c) => g.recruitCheck('builder', c, p).ok);
     if (city) g.recruit('builder', city, p);
   }
+}
+
+// Unhappy cities get temples and arenas first, hungry kingdoms a granary, otherwise markets
+function pickBuilding(g: GameState, p: PlayerId, city: Tile): Building | null {
+  const mood = g.mood(city);
+  const hungry = g.foodUsed(p) + 2 > g.foodMade(p);
+  const order: Building[] =
+    mood === 'unhappy' || mood === 'angry'
+      ? ['temple', 'arena', 'park', 'market', 'granary']
+      : hungry
+        ? ['granary', 'market', 'temple', 'park', 'arena']
+        : ['market', 'temple', 'granary', 'park', 'arena'];
+  return order.find((b) => g.buildCheck(city, b, p).ok) ?? null;
 }
 
 // ---------- movement helpers ----------
