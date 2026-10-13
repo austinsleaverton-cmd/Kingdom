@@ -152,6 +152,7 @@ export const PEACE_RETRY = 3; // an AI said no: wait this long before asking aga
 // Fog of war: how far things see (hexes)
 export const UNIT_SIGHT: Record<UnitType, number> = { builder: 1, settler: 1, swordsman: 2, archer: 2, knight: 3 };
 export const CITY_SIGHT = 2; // +1 once a city reaches level 3
+export const START_SIGHT = 4; // everyone starts knowing the land this close to their capital
 
 // Wars, treaties and refusals are stored per pair of kingdoms
 export function pairKey(a: PlayerId, b: PlayerId): string {
@@ -252,7 +253,11 @@ export class GameState {
     this.explored = this.players.map(() => new Uint8Array(this.map.tiles.length));
     this.placeCapitals();
     this.startTurn(0);
-    for (const pl of this.players) this.explore(pl.id);
+    for (const pl of this.players) {
+      const cap = this.map.tiles.find((t) => t.capital && t.owner === pl.id);
+      if (cap) this.markExplored(pl.id, cap, START_SIGHT);
+      this.explore(pl.id);
+    }
   }
 
   get seed(): number {
@@ -686,6 +691,15 @@ export class GameState {
     const ex = this.explored[p];
     if (ex) for (const t of vis) ex[this.tileIndex(t)] = 1;
     return vis;
+  }
+
+  // Remember everything within r hexes of a tile as explored for p
+  markExplored(p: PlayerId, at: Tile, r: number): void {
+    const ex = this.explored[p];
+    if (!ex) return;
+    const around = new Set<Tile>();
+    this.addAround(at, r, around);
+    for (const t of around) ex[this.tileIndex(t)] = 1;
   }
 
   isExplored(p: PlayerId, t: Tile): boolean {
@@ -1144,6 +1158,11 @@ export class GameState {
     const left = this.reachableFor(unit).get(dest);
     if (left === undefined) return false;
     if (!keepRoute) this.clearRoute(unit);
+    // Everything the unit passes on the way stays explored, not just where it stops
+    if (this.fog && !this.players[unit.owner].isAI) {
+      const trail = findPath(this.map, this.tileOf(unit), new Set([dest]), () => false, unit.owner) ?? [];
+      for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[unit.type]);
+    }
     unit.col = dest.col;
     unit.row = dest.row;
     unit.moves = left;
