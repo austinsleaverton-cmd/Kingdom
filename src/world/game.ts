@@ -1,9 +1,9 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { CITY_REGEN, CLAIM_COST, GROWTH_NEED, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
-import { IMPROVEMENT_NAME } from './tile';
-import type { PlayerId, Tile } from './tile';
+import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
+import type { Building, PlayerId, Tile } from './tile';
 import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { runAI } from './ai';
@@ -137,6 +137,15 @@ export const HOME_HEAL = 0.25; // units on their own land heal this share of max
 export const BIG_CLAIM_RADIUS = 4; // claim range once a city reaches level 3
 export const PILLAGE_GOLD = 3; // loot for wrecking an enemy farm, pasture, forest or mine (roads give 1)
 export const GROWTH_SHARE_CAP = 3; // most spare food a single city can use for growth per turn
+export const MAX_POP = 20;
+export const HAPPY_BASE = 3; // every city starts this happy
+export const EASY_HAPPY = 2; // extra happiness for people's cities on Easy
+export const HAPPY_AT = 3; // happiness at or above this: happy (faster growth, +1 gold)
+export const UNHAPPY_AT = -1; // at or below: unhappy (no growth)
+export const ANGRY_AT = -3; // at or below: angry (people leave)
+
+export type Mood = 'happy' | 'content' | 'unhappy' | 'angry';
+export const MOOD_FACE: Record<Mood, string> = { happy: '\u{1F600}', content: '\u{1F610}', unhappy: '\u{1F641}', angry: '\u{1F620}' };
 
 const CITY_NAMES = [
   'Oakvale', 'Stonebridge', 'Riverford', 'Highmoor', 'Ashford', 'Brightwater', 'Eldermere', 'Foxhollow',
@@ -263,7 +272,11 @@ export class GameState {
       gold += YIELD[t.terrain];
       if (t.capital) gold += CAPITAL_INCOME;
       else if (t.city) gold += CITY_INCOME;
-      if (t.city) gold += cityLevel(t) - 1; // bigger cities pay more
+      if (t.city) {
+        gold += cityLevel(t) - 1; // bigger cities pay more
+        for (const b of t.buildings) gold += BUILDINGS[b].gold;
+        if (this.mood(t) === 'happy') gold += 1;
+      }
     }
     return gold;
   }
@@ -275,6 +288,7 @@ export class GameState {
       if (t.capital) food += CAPITAL_FOOD;
       else if (t.city) food += CITY_FOOD;
       if (t.city) food += cityLevel(t) - 1;
+      if (t.city) for (const b of t.buildings) food += BUILDINGS[b].food;
       if (t.improvement === 'farm') food += FARM_FOOD;
     }
     return food;
@@ -284,7 +298,54 @@ export class GameState {
   foodUsed(p: PlayerId): number {
     const units = this.unitsOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
     const queued = this.training.filter((t) => t.owner === p).reduce((sum, t) => sum + UNIT_STATS[t.type].food, 0);
-    return units + queued;
+    return units + queued + this.popFood(p);
+  }
+
+  // Every 2 people in a city eat 1 food
+  popFood(p: PlayerId): number {
+    let n = 0;
+    for (const c of this.cities()) if (c.owner === p) n += Math.floor(c.pop / 2);
+    return n;
+  }
+
+  population(p: PlayerId): number {
+    let n = 0;
+    for (const c of this.cities()) if (c.owner === p) n += c.pop;
+    return n;
+  }
+
+  // ---------- happiness ----------
+
+  // Your troops standing on enemy land: war makes people at home unhappy
+  troopsAway(p: PlayerId): number {
+    return this.unitsOf(p).filter((u) => UNIT_STATS[u.type].military && this.isEnemy(this.tileOf(u).owner, p)).length;
+  }
+
+  happinessParts(city: Tile): [string, number][] {
+    const p = city.owner;
+    if (p === null) return [];
+    const parts: [string, number][] = [['Base', HAPPY_BASE]];
+    if (city.capital) parts.push(['Capital', 1]);
+    if (!this.players[p].isAI && this.options.difficulty === 'easy') parts.push(['Easy mode', EASY_HAPPY]);
+    for (const b of city.buildings) if (BUILDINGS[b].happy) parts.push([BUILDINGS[b].name, BUILDINGS[b].happy]);
+    const crowd = Math.floor(city.pop / 2);
+    if (crowd) parts.push(['Crowding', -crowd]);
+    const war = Math.min(3, Math.floor(this.troopsAway(p) / 2));
+    if (war) parts.push(['Troops at war', -war]);
+    if (this.besieged(city)) parts.push(['Under siege', -2]);
+    return parts;
+  }
+
+  happiness(city: Tile): number {
+    return this.happinessParts(city).reduce((s, [, n]) => s + n, 0);
+  }
+
+  mood(city: Tile): Mood {
+    const h = this.happiness(city);
+    if (h >= HAPPY_AT) return 'happy';
+    if (h <= ANGRY_AT) return 'angry';
+    if (h <= UNHAPPY_AT) return 'unhappy';
+    return 'content';
   }
 
   trainingAt(city: Tile): Training | undefined {
@@ -435,30 +496,149 @@ export class GameState {
 
   // ---------- city growth ----------
 
-  // Growth a city gains next turn: 1 plus its share of your spare food (capped)
+  // Growth a city gains next turn: 1 plus its share of your spare food (capped).
+  // Happy cities grow faster, unhappy ones stop, angry ones (or a starving kingdom) shrink.
   growthRate(city: Tile): number {
     if (city.owner === null) return 0;
+    const spareAll = this.foodMade(city.owner) - this.foodUsed(city.owner);
+    if (spareAll < 0) return -1; // starving
+    const mood = this.mood(city);
+    if (mood === 'angry') return -2;
+    if (mood === 'unhappy') return 0;
     const mine = this.cities().filter((c) => c.owner === city.owner).length;
-    const spare = Math.max(0, this.foodMade(city.owner) - this.foodUsed(city.owner));
-    return 1 + Math.min(GROWTH_SHARE_CAP, mine > 0 ? spare / mine : 0);
+    const rate = 1 + Math.min(GROWTH_SHARE_CAP, mine > 0 ? spareAll / mine : 0);
+    return Math.round(rate * (mood === 'happy' ? 1.5 : 1) * 10) / 10;
   }
 
   growthNeed(city: Tile): number {
-    const lvl = cityLevel(city);
-    return lvl >= MAX_LEVEL ? 0 : GROWTH_NEED[lvl - 1];
+    return city.pop >= MAX_POP ? 0 : popNeed(city.pop);
+  }
+
+  // Why a city isn't growing (empty when it is)
+  growthNote(city: Tile): string {
+    if (city.owner === null) return '';
+    if (this.besieged(city)) return 'Not growing: enemy troops nearby';
+    if (this.foodMade(city.owner) < this.foodUsed(city.owner)) return 'Starving: build farms or the city shrinks';
+    const mood = this.mood(city);
+    if (mood === 'angry') return 'Angry: people are leaving';
+    if (mood === 'unhappy') return 'Unhappy: not growing';
+    return '';
   }
 
   private growCities(p: PlayerId): void {
     for (const c of this.cities()) {
-      if (c.owner !== p || cityLevel(c) >= MAX_LEVEL || this.besieged(c)) continue;
-      c.level = cityLevel(c);
-      c.growth = Math.round((c.growth + this.growthRate(c)) * 10) / 10;
+      if (c.owner !== p || this.besieged(c)) continue;
       const need = this.growthNeed(c);
-      if (c.growth < need) continue;
+      const rate = this.growthRate(c);
+      if (need === 0 && rate > 0) continue; // full
+      c.growth = Math.round((c.growth + rate) * 10) / 10;
+      if (c.growth < 0) {
+        c.growth = 0;
+        if (c.pop > 1) {
+          c.pop -= 1;
+          this.setPopLevel(c);
+          this.tell(p, `${this.cityName(c)} lost a person (${this.growthNote(c).split(':')[0].toLowerCase() || 'unrest'})`);
+        }
+        continue;
+      }
+      if (need === 0 || c.growth < need) continue;
       c.growth = Math.round((c.growth - need) * 10) / 10;
-      c.level += 1;
-      c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
-      this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
+      c.pop += 1;
+      const before = cityLevel(c);
+      this.setPopLevel(c);
+      if (cityLevel(c) > before) {
+        c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
+        this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
+      }
+    }
+  }
+
+  private setPopLevel(c: Tile): void {
+    c.level = levelFromPop(c.pop);
+    c.hp = Math.min(c.hp, cityMaxHp(c));
+  }
+
+  // ---------- culture: cities grab nearby land by themselves ----------
+
+  cultureRate(city: Tile): number {
+    let n = 1 + Math.floor(city.pop / 3);
+    for (const b of city.buildings) n += BUILDINGS[b].culture;
+    return n;
+  }
+
+  cultureNeed(city: Tile): number {
+    return 5 + 3 * city.borders;
+  }
+
+  // The tile a city would grab next: the best unowned tile touching its land
+  borderPick(city: Tile): Tile | null {
+    if (city.owner === null) return null;
+    const value: Record<string, number> = { grass: 3, hills: 3, sand: 2, mountain: 1, water: 1 };
+    let best: Tile | null = null;
+    let bestScore = -Infinity;
+    for (const t of this.map.tiles) {
+      if (t.owner !== null || !this.inCityRange(t, city) || !this.claimingCity(t, city.owner, city)) continue;
+      const s = value[t.terrain] - hexDistance(t, city) * 0.6;
+      if (s > bestScore) {
+        bestScore = s;
+        best = t;
+      }
+    }
+    return best;
+  }
+
+  private growBorders(p: PlayerId): void {
+    for (const c of this.cities()) {
+      if (c.owner !== p || this.besieged(c)) continue;
+      const need = this.cultureNeed(c);
+      c.culture = Math.min(need, c.culture + this.cultureRate(c));
+      if (c.culture < need) continue;
+      const t = this.borderPick(c);
+      if (!t) continue; // nothing left to grab: stays full until land opens up
+      t.owner = p;
+      t.home = this.tileIndex(c);
+      c.culture = 0;
+      c.borders += 1;
+      this.invalidate();
+      this.tell(p, `${this.cityName(c)} grew its borders`);
+    }
+    this.checkWin();
+  }
+
+  // ---------- amenities ----------
+
+  buildCheck(city: Tile, b: Building, p: PlayerId = this.current): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (p !== this.current) return fail('Not your turn');
+    if (!city.city || city.owner !== p) return fail('Build in your own city');
+    const info = BUILDINGS[b];
+    if (city.buildings.includes(b)) return fail('Already built');
+    if (city.project) return fail(`Busy building ${BUILDINGS[city.project].name}`);
+    if (this.trainingAt(city)) return fail('Busy training troops');
+    if (city.pop < info.minPop) return fail(`Needs ${info.minPop} people`);
+    if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
+    return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
+  }
+
+  startBuilding(city: Tile, b: Building, p: PlayerId = this.current): Check {
+    const c = this.buildCheck(city, b, p);
+    if (!c.ok) return c;
+    this.players[p].gold -= c.cost;
+    city.project = b;
+    city.projectTurns = BUILDINGS[b].turns;
+    return c;
+  }
+
+  private advanceProjects(p: PlayerId): void {
+    for (const c of this.cities()) {
+      if (c.owner !== p || !c.project) continue;
+      c.projectTurns -= 1;
+      if (c.projectTurns > 0) continue;
+      const b = c.project;
+      c.project = null;
+      c.projectTurns = 0;
+      if (!c.buildings.includes(b)) c.buildings.push(b);
+      this.tell(p, `${this.cityName(c)} finished its ${BUILDINGS[b].name}`);
     }
   }
 
@@ -616,6 +796,12 @@ export class GameState {
     tile.improvement = null;
     tile.level = 1;
     tile.growth = 0;
+    tile.pop = 1;
+    tile.culture = 0;
+    tile.borders = 0;
+    tile.buildings = [];
+    tile.project = null;
+    tile.projectTurns = 0;
     tile.hp = cityMaxHp(tile);
     tile.walls = 0;
     tile.shield = 0;
@@ -639,6 +825,7 @@ export class GameState {
     if (!city.city || city.owner !== p) return fail('Recruit from your own city');
     const stats = UNIT_STATS[type];
     if (stats.train > 0 && this.trainingAt(city)) return fail('City is already training');
+    if (stats.train > 0 && city.project) return fail(`Busy building ${BUILDINGS[city.project].name}`);
     if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
     if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: build a pasture');
     if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: plant a forest');
@@ -924,8 +1111,12 @@ export class GameState {
     const wasCapital = city.capital;
     city.owner = captor;
     city.capital = false;
-    city.level = Math.max(1, cityLevel(city) - 1); // war shrinks a city
+    city.pop = Math.max(1, Math.floor(city.pop * 0.6)); // war shrinks a city
+    city.level = levelFromPop(city.pop);
     city.growth = 0;
+    city.culture = 0;
+    city.project = null; // half-built amenities are lost
+    city.projectTurns = 0;
     city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
     city.shield = 0;
     city.wallTurns = 0; // half-built walls are lost
@@ -1134,7 +1325,9 @@ export class GameState {
     this.players[p].gold += Math.round(this.income(p) * mult);
     this.players[p].stone += this.stoneIncome(p);
     this.growCities(p);
+    this.growBorders(p);
     this.advanceWalls(p);
+    this.advanceProjects(p);
     // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
       if (t.owner !== p || this.besieged(t)) continue;
@@ -1257,6 +1450,7 @@ export class GameState {
       best.city = true;
       best.capital = true;
       best.level = 1;
+      best.pop = 1;
       best.hp = cityMaxHp(best);
       for (const n of this.map.neighbors(best)) {
         if (n.terrain === 'water') {
