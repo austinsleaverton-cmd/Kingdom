@@ -51,12 +51,12 @@ export const DIFFICULTY: Record<Difficulty, DifficultyConfig> = {
   normal: {
     label: 'Normal', note: 'Rivals build up, defend, and attack once they have an army.',
     income: 1, troopsPerCity: 1, maxArmy: 8, attackTurn: 22, attackArmy: 4, garrison: 1,
-    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true, builderUses: 3, pillage: true,
+    builders: 2, maxWalls: 2, smart: false, aggression: 0.85, focusHuman: false, landWin: true, builderUses: 5, pillage: true,
   },
   hard: {
     label: 'Hard', note: 'Rivals earn more, counter your troops, and come for you early.',
     income: 1.25, troopsPerCity: 1.5, maxArmy: 14, attackTurn: 14, attackArmy: 4, garrison: 1,
-    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true, builderUses: 3, pillage: true,
+    builders: 3, maxWalls: 3, smart: true, aggression: 1, focusHuman: true, landWin: true, builderUses: 2, pillage: true,
   },
 };
 
