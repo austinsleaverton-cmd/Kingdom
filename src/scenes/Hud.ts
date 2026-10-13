@@ -297,6 +297,7 @@ export class Hud {
       row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), free ? 'free building on' : `+${state.income(cur)} next turn`) +
       row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
       `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
+      row('\u{1F465}', 'People', String(state.population(cur)), `eat ${state.popFood(cur)} food`) +
       row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(cur) > 0 ? `+${state.stoneIncome(cur)} next turn` : 'build mines for walls') +
       row('\u{1F40E}', 'Horses', `${state.horsesUsed(cur)}/${state.horsesMade(cur)}`, state.horsesMade(cur) > 0 ? 'knights' : 'build a pasture for knights') +
       row('\u{1F332}', 'Bows', `${state.bowsUsed(cur)}/${state.bowsMade(cur)}`, state.bowsMade(cur) > 0 ? 'archers' : 'plant a forest for archers');
