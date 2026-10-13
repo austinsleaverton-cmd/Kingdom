@@ -1,11 +1,11 @@
 // Rendering and input only. All rules live in src/world.
 import Phaser from 'phaser';
-import { GameState } from '../world/game';
+import { GameState, MOOD_FACE } from '../world/game';
 import type { AttackPreview, Check, GameOptions, RoutePlan } from '../world/game';
 import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
-import { LEVEL_NAMES, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
-import type { Terrain, Tile } from '../world/tile';
+import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
+import type { Building, Terrain, Tile } from '../world/tile';
 import { JOBS, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
@@ -459,6 +459,13 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  private build(city: Tile, b: Building): void {
+    const state = this.state;
+    if (!state) return;
+    if (!state.startBuilding(city, b, this.me).ok) return this.fail();
+    this.redraw();
+  }
+
   private pillage(): void {
     const state = this.state;
     const unit = this.selectedUnit;
@@ -727,7 +734,7 @@ export class MapScene extends Phaser.Scene {
       `Yield ${YIELD[tile.terrain]}g/turn`,
     ];
     const home = state.homeCity(tile);
-    if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]})`);
+    if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]}, ${tile.pop} people ${MOOD_FACE[state.mood(tile)]})`);
     else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
     if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}${tile.wallTurns ? ` · walls going up (${tile.wallTurns})` : ''}`);
     if (unit) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
@@ -870,24 +877,85 @@ export class MapScene extends Phaser.Scene {
     if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
     sections.push({ bars });
 
-    // Growth: spare food fills the bar, a full bar is the next level
+    // People: spare food fills the growth bar, a full bar is one more person
     const lvl = cityLevel(city);
     const unlock = (n: number) =>
       n === 3 ? 'claims land 4 hexes out' : n === MAX_LEVEL ? 'troops train 1 turn faster' : '+1 gold, +1 food, +10 HP';
-    const growLines = [`Level ${lvl} ${LEVEL_NAMES[lvl - 1]}${lvl > 1 ? `: +${lvl - 1} gold, +${lvl - 1} food, +${(lvl - 1) * 10} HP` : ''}`];
-    if (lvl < MAX_LEVEL) {
-      growLines.push(
-        state.besieged(city)
-          ? 'Not growing: enemy troops nearby'
-          : `+${state.growthRate(city).toFixed(1)} per turn (spare food speeds it up)`,
-      );
-      growLines.push(`Next: ${LEVEL_NAMES[lvl]} \u00b7 ${unlock(lvl + 1)}`);
-    } else growLines.push('Max size: troops train 1 turn faster');
+    const need = state.growthNeed(city);
+    const note = state.growthNote(city);
+    const rate = state.growthRate(city);
+    const growLines = [
+      `${city.pop} people \u00b7 ${LEVEL_NAMES[lvl - 1]}${lvl > 1 ? `: +${lvl - 1} gold, +${lvl - 1} food, +${(lvl - 1) * 10} HP` : ''}`,
+      `They eat ${Math.floor(city.pop / 2)} food (1 per 2 people)`,
+    ];
+    if (need > 0) growLines.push(note || `+${rate.toFixed(1)} growth per turn (spare food and happiness speed it up)`);
+    else growLines.push('Full: this city can\'t grow any bigger');
+    if (lvl < MAX_LEVEL) growLines.push(`${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people \u00b7 ${unlock(lvl + 1)}`);
     sections.push({
-      heading: 'Growth',
-      summary: `Lv ${lvl} ${LEVEL_NAMES[lvl - 1]}`,
-      bars: lvl < MAX_LEVEL ? [{ label: 'Growth', value: Math.floor(city.growth), max: state.growthNeed(city), color: '#a3e635' }] : [],
+      heading: 'People',
+      summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`,
+      bars: need > 0 ? [{ label: 'Growth', value: Math.floor(city.growth), max: need, color: '#a3e635' }] : [],
       lines: growLines,
+    });
+
+    // Happiness: what's helping and hurting
+    const mood = state.mood(city);
+    const happy = state.happiness(city);
+    const moodText: Record<string, string> = {
+      happy: 'Happy: grows 50% faster, +1 gold',
+      content: 'Content',
+      unhappy: 'Unhappy: not growing. Build a Temple or Park',
+      angry: 'Angry: people are leaving! Build amenities or bring troops home',
+    };
+    sections.push({
+      heading: 'Happiness',
+      summary: `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy}`,
+      lines: [
+        `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy} \u00b7 ${moodText[mood]}`,
+        state.happinessParts(city).map(([k, n]) => `${k} ${n >= 0 ? '+' : ''}${n}`).join(', '),
+      ],
+    });
+
+    // Culture: the city grabs a free tile next to its land when the bar fills
+    const cNeed = state.cultureNeed(city);
+    const cRate = state.cultureRate(city);
+    const pick = state.borderPick(city);
+    const cTurns = Math.max(1, Math.ceil((cNeed - city.culture) / cRate));
+    sections.push({
+      heading: 'Borders',
+      summary: pick ? `+1 tile in ${cTurns}t` : 'no room',
+      bars: [{ label: 'Culture', value: city.culture, max: cNeed, color: '#c084fc' }],
+      lines: [
+        pick
+          ? `+${cRate} culture per turn \u00b7 grabs a free tile in about ${cTurns} turn${cTurns === 1 ? '' : 's'}`
+          : 'No open land in reach: grows again when land opens up',
+      ],
+    });
+
+    // Amenities: one project at a time, shared with training troops
+    const buildButtons: PanelButton[] = [];
+    const built = BUILDING_ORDER.filter((b) => city.buildings.includes(b));
+    for (const b of BUILDING_ORDER) {
+      if (city.buildings.includes(b)) continue;
+      const info = BUILDINGS[b];
+      const c = state.buildCheck(city, b, this.me);
+      const doing = city.project === b;
+      buildButtons.push({
+        label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`,
+        enabled: c.ok,
+        active: doing,
+        hint: doing ? 'building' : c.ok ? `${state.options.freeBuild ? 'free' : `${c.cost}g`} \u00b7 ${info.turns}t \u00b7 ${info.note}` : `${c.reason} \u00b7 ${info.note}`,
+        onClick: () => this.build(city, b),
+      });
+    }
+    sections.push({
+      heading: 'Amenities',
+      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length}/${BUILDING_ORDER.length} built`,
+      lines: [
+        built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. Amenities keep people happy.',
+        'One project at a time (shared with training troops)',
+      ],
+      buttons: buildButtons,
     });
 
     const wc = state.wallCheck(city, this.me);
@@ -957,7 +1025,7 @@ export class MapScene extends Phaser.Scene {
     const queued = state.trainingAt(city);
     const trainLines = queued
       ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
-      : [`One unit at a time \u00b7 food left: ${state.foodMade(this.me) - state.foodUsed(this.me)}`];
+      : [city.project ? `Busy building ${BUILDINGS[city.project].name} (builders still OK)` : `One unit at a time \u00b7 food left: ${state.foodMade(this.me) - state.foodUsed(this.me)}`];
     // While training, only Builder (instant) is still possible, so the list shrinks to that
     const trainButtons = queued ? train.filter((b) => b.enabled) : train;
     sections.push({
@@ -1017,7 +1085,7 @@ export class MapScene extends Phaser.Scene {
       title,
       subtitle:
         tile.city && tile.owner !== null
-          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} \u00b7 ${LEVEL_NAMES[cityLevel(tile) - 1]}`
+          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} \u00b7 ${LEVEL_NAMES[cityLevel(tile) - 1]} \u00b7 ${tile.pop} people ${MOOD_FACE[state.mood(tile)]}`
           : undefined,
       sections: [{ bars, lines }],
     };
@@ -1189,15 +1257,15 @@ export class MapScene extends Phaser.Scene {
         }
         this.drawCity(g, x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
-        this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, cityLevel(t));
+        this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
   }
 
   // Name tag under each city, above units so it never gets covered.
-  // Dots after the name show the city's level (1 dot = Village ... 5 = Metropolis).
-  private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean, level: number): void {
+  // After the name: how many people live there and how happy they are.
+  private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean, pop: number, face: string): void {
     let label = this.cityLabels[i];
     if (!label) {
       label = this.add
@@ -1207,7 +1275,7 @@ export class MapScene extends Phaser.Scene {
       this.cityLabels.push(label);
     }
     const bg = `#${color.toString(16).padStart(6, '0')}`;
-    const text = `${capital ? '\u2605 ' : ''}${name} ${'\u2022'.repeat(level)}`;
+    const text = `${capital ? '\u2605 ' : ''}${name} ${pop} ${face}`;
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
 
