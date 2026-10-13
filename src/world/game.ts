@@ -150,7 +150,7 @@ export const TRUCE_TURNS = 10; // after peace, neither side can declare war agai
 export const PEACE_RETRY = 3; // an AI said no: wait this long before asking again
 
 // Fog of war: how far things see (hexes)
-export const UNIT_SIGHT: Record<UnitType, number> = { builder: 1, settler: 1, swordsman: 2, archer: 2, knight: 3 };
+export const UNIT_SIGHT: Record<UnitType, number> = { builder: 2, settler: 2, swordsman: 3, archer: 3, knight: 4 };
 export const CITY_SIGHT = 2; // +1 once a city reaches level 3
 export const START_SIGHT = 4; // everyone starts knowing the land this close to their capital
 
