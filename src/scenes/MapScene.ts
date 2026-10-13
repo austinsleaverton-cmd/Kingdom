@@ -30,7 +30,7 @@ const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
 
 // Fog of war colors: unexplored land is near-black, explored-but-out-of-sight is dimmed
 const FOG_COLOR = 0x0d1320;
-const FOG_DIM = 0.4;
+const FOG_DIM = 0.22; // light veil: explored land stays easy to read, only enemy troops are hidden
 
 // Pixel sprites: little workers on worked tiles (hidden when zoomed far out) and people on unit tokens
 const WORKER_SCALE = 1.6;
