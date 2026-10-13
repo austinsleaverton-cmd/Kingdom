@@ -69,7 +69,8 @@ const CSS = `
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-.k-sel { bottom: 70px; left: 12px; width: 250px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
+/* Selection panel sits top-right (under the ? button) so it never covers the stats panel */
+.k-sel { top: 56px; right: 12px; width: 250px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
 .k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 4px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
 .k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 6px; margin-top: 6px; }
@@ -120,8 +121,11 @@ const CSS = `
 .k-pass .k-sub2 { color: #9ca3af; font-size: 13px; }
 .k-pass button { margin-top: 18px; color: #fff; border: 0; padding: 10px 26px; font-size: 16px; font-weight: 600; }
 .k-over button { margin-top: 16px; background: #2563eb; color: #fff; border: 0; padding: 8px 18px; }
-.k-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: pointer; user-select: none; font-weight: 600; }
+/* Panel headers are drag handles (move the panel) and click targets (minimize) */
+.k-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; font-weight: 600; }
 .k-head .k-tog { display: inline-block; width: auto; margin: 0; background: transparent; border: 1px solid #444; border-radius: 4px; padding: 0 7px; font-size: 13px; line-height: 18px; color: #bbb; }
+.k-dragging { box-shadow: 0 8px 24px rgba(0,0,0,0.55); border-color: #60a5fa; }
+.k-dragging .k-head { cursor: grabbing; }
 .k-body { margin-top: 6px; }
 .k-collapsed .k-body { display: none; }
 .k-collapsed { padding: 6px 10px; }
@@ -131,7 +135,7 @@ const CSS = `
   .k-help { max-width: 46vw; }
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
-  .k-sel { bottom: 120px; width: 210px; max-height: calc(100% - 180px); }
+  .k-sel { top: auto; right: auto; left: 12px; bottom: 120px; width: 210px; max-height: calc(100% - 180px); }
   .k-idle { bottom: 120px; }
 }
 /* Phones sideways: not much height, so the selection panel runs down the right side and scrolls */
@@ -142,6 +146,9 @@ const CSS = `
 `;
 
 const UI_KEY = 'kingdom-ui';
+const POS_KEY = 'kingdom-pos';
+
+type Pos = { x: number; y: number };
 
 function loadCollapsed(): Record<string, boolean> {
   try {
@@ -159,16 +166,39 @@ function saveCollapsed(state: Record<string, boolean>): void {
   }
 }
 
-// A panel with a clickable header that hides/shows its body.
+function loadPositions(): Record<string, Pos> {
+  try {
+    return JSON.parse(localStorage.getItem(POS_KEY) ?? '{}') as Record<string, Pos>;
+  } catch {
+    return {};
+  }
+}
+
+function savePosition(key: string, pos: Pos | null): void {
+  try {
+    const all = loadPositions();
+    if (pos) all[key] = pos;
+    else delete all[key];
+    localStorage.setItem(POS_KEY, JSON.stringify(all));
+  } catch {
+    // ignore
+  }
+}
+
+// A panel with a header that hides/shows its body when clicked and moves the panel when dragged.
+// Double-click the header to put the panel back where it started. Positions are remembered.
 class Collapsible {
   readonly panel: HTMLDivElement;
   readonly head: HTMLSpanElement;
   readonly body: HTMLDivElement;
   private tog: HTMLButtonElement;
+  private pos: Pos | null = null; // null = default CSS spot
+  private dragged = false; // the last press was a drag, so its click shouldn't minimize
 
   constructor(className: string, key: string, defaultCollapsed: boolean, prefs: Record<string, boolean>) {
     this.panel = el(className);
     const headRow = el('k-head');
+    headRow.title = 'Drag to move \u00b7 double-click to reset';
     this.head = document.createElement('span');
     this.tog = document.createElement('button');
     this.tog.className = 'k-tog';
@@ -184,12 +214,85 @@ class Collapsible {
     };
     set(prefs[key] ?? defaultCollapsed);
     headRow.onclick = () => {
+      if (this.dragged) {
+        this.dragged = false;
+        return;
+      }
       const collapsed = !this.panel.classList.contains('k-collapsed');
       set(collapsed);
       prefs[key] = collapsed;
       saveCollapsed(prefs);
       this.tog.blur();
+      this.place(); // keep it on screen if it grew
     };
+    this.pos = loadPositions()[key] ?? null;
+    this.makeMovable(headRow, key);
+  }
+
+  // Re-apply the saved spot, kept inside the window (call after showing or resizing)
+  place(): void {
+    if (this.pos) this.moveTo(this.pos.x, this.pos.y);
+  }
+
+  private moveTo(x: number, y: number): Pos {
+    const p = this.panel;
+    const w = Math.min(p.offsetWidth, window.innerWidth);
+    const headH = 36; // always leave the header reachable
+    const nx = Math.round(Math.max(0, Math.min(window.innerWidth - w, x)));
+    const ny = Math.round(Math.max(0, Math.min(window.innerHeight - headH, y)));
+    p.style.left = `${nx}px`;
+    p.style.top = `${ny}px`;
+    p.style.right = 'auto';
+    p.style.bottom = 'auto';
+    p.style.transform = 'none';
+    p.style.maxHeight = `${Math.max(headH, window.innerHeight - ny - 8)}px`;
+    p.style.overflowY = 'auto';
+    return { x: nx, y: ny };
+  }
+
+  private reset(key: string): void {
+    this.pos = null;
+    const s = this.panel.style;
+    s.left = s.top = s.right = s.bottom = s.transform = s.maxHeight = s.overflowY = '';
+    savePosition(key, null);
+  }
+
+  private makeMovable(handle: HTMLElement, key: string): void {
+    let start: { px: number; py: number; x: number; y: number; id: number } | null = null;
+    const onTitleButton = (e: Event) => !!(e.target as HTMLElement).closest('.k-titlebtn');
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || onTitleButton(e)) return;
+      const r = this.panel.getBoundingClientRect();
+      start = { px: e.clientX, py: e.clientY, x: r.left, y: r.top, id: e.pointerId };
+      this.dragged = false;
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!start || e.pointerId !== start.id) return;
+      const dx = e.clientX - start.px;
+      const dy = e.clientY - start.py;
+      if (!this.dragged && Math.hypot(dx, dy) < 6) return; // small wiggle = still a click
+      if (!this.dragged) {
+        this.dragged = true;
+        this.panel.classList.add('k-dragging');
+      }
+      this.pos = this.moveTo(start.x + dx, start.y + dy);
+      e.preventDefault();
+    });
+    const end = (e: PointerEvent) => {
+      if (!start || e.pointerId !== start.id) return;
+      start = null;
+      this.panel.classList.remove('k-dragging');
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      if (this.dragged && this.pos) savePosition(key, this.pos);
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    // Double-click also fires two clicks (minimize + expand), so the panel ends up as it was, just moved home
+    handle.addEventListener('dblclick', (e) => {
+      if (onTitleButton(e)) return;
+      this.reset(key);
+    });
   }
 }
 
@@ -202,6 +305,7 @@ export class Hud {
   private help: HTMLDivElement;
   private sel: HTMLDivElement;
   private statsBox: Collapsible;
+  private helpBox: Collapsible;
   private selBox: Collapsible;
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
   private idle: HTMLDivElement;
@@ -225,10 +329,10 @@ export class Hud {
     this.root.appendChild(this.statsBox.panel);
 
     // Starts minimized so it doesn't cover the map; open it when you need it
-    const helpBox = new Collapsible('k-panel k-help', 'help2', true, prefs);
-    helpBox.head.textContent = 'How to play';
-    this.help = helpBox.body;
-    this.root.appendChild(helpBox.panel);
+    this.helpBox = new Collapsible('k-panel k-help', 'help2', true, prefs);
+    this.helpBox.head.textContent = 'How to play';
+    this.help = this.helpBox.body;
+    this.root.appendChild(this.helpBox.panel);
 
     this.selBox = new Collapsible('k-panel k-sel', 'sel', false, prefs);
     this.sel = this.selBox.body;
@@ -263,10 +367,21 @@ export class Hud {
     box.appendChild(button('Back to menu', () => handlers.onMenu()));
     this.over.appendChild(box);
     this.root.appendChild(this.over);
+
+    // Keep moved panels on screen when the window changes size (or a phone rotates)
+    window.addEventListener('resize', () => this.placePanels());
+    this.placePanels();
+  }
+
+  private placePanels(): void {
+    this.statsBox.place();
+    this.helpBox.place();
+    if (this.selBox.panel.style.display !== 'none') this.selBox.place();
   }
 
   setVisible(visible: boolean): void {
     this.root.style.display = visible ? 'block' : 'none';
+    if (visible) this.placePanels();
   }
 
   update(state: GameState, mode: string): void {
@@ -432,6 +547,7 @@ export class Hud {
       this.sel.appendChild(f);
     }
     this.selBox.panel.style.display = 'block';
+    this.selBox.place();
   }
 
   // Hot-seat: cover the map until the next person is holding the device.
