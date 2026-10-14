@@ -1334,7 +1334,7 @@ export class GameState {
     // Everything the unit passes on the way stays explored, not just where it stops
     if (this.fog && !this.players[unit.owner].isAI) {
       const trail = findPath(this.map, this.tileOf(unit), new Set([dest]), () => false, unit.owner, moveMode(unit.type)) ?? [];
-      for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[u.type]);
+      for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[unit.type]);
     }
     unit.col = dest.col;
     unit.row = dest.row;
