@@ -1070,12 +1070,9 @@ export class MapScene extends Phaser.Scene {
     const note = state.growthNote(city);
     const rate = state.growthRate(city);
     const growLines = [
-      `${city.pop} people \u00b7 ${LEVEL_NAMES[lvl - 1]}${lvl > 1 ? `: +${lvl - 1} gold, +${lvl - 1} food, +${(lvl - 1) * 10} HP` : ''}`,
-      `They eat ${Math.floor(city.pop / 2)} food (1 per 2 people)`,
+      `${city.pop} people \u00b7 eat ${Math.floor(city.pop / 2)} food \u00b7 ${need > 0 ? note || `+${rate.toFixed(1)} growth/turn` : 'full size'}`,
     ];
-    if (need > 0) growLines.push(note || `+${rate.toFixed(1)} growth per turn (spare food and happiness speed it up)`);
-    else growLines.push('Full: this city can\'t grow any bigger');
-    if (lvl < MAX_LEVEL) growLines.push(`${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people \u00b7 ${unlock(lvl + 1)}`);
+    if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)})`);
     sections.push({
       heading: 'People',
       summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`,
@@ -1094,6 +1091,7 @@ export class MapScene extends Phaser.Scene {
     };
     sections.push({
       heading: 'Happiness',
+      folded: true,
       summary: `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy}`,
       lines: [
         `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy} \u00b7 ${moodText[mood]}`,
@@ -1108,6 +1106,7 @@ export class MapScene extends Phaser.Scene {
     const cTurns = Math.max(1, Math.ceil((cNeed - city.culture) / cRate));
     sections.push({
       heading: 'Borders',
+      folded: true,
       summary: pick ? `+1 tile in ${cTurns}t` : 'no room',
       bars: [{ label: 'Culture', value: city.culture, max: cNeed, color: '#c084fc' }],
       lines: [
@@ -1130,18 +1129,16 @@ export class MapScene extends Phaser.Scene {
         label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`,
         enabled: c.ok,
         active: doing,
-        hint: doing ? 'building' : c.ok ? `${state.options.freeBuild ? 'free' : `${c.cost}g`} \u00b7 ${info.turns}t \u00b7 ${info.note}` : `${c.reason} \u00b7 ${info.note}`,
+        hint: doing ? 'building' : c.ok ? `${state.options.freeBuild ? 'free' : `${c.cost}g`} \u00b7 ${info.turns}t \u00b7 ${info.note}` : c.reason,
         onClick: () => this.build(city, b),
       });
     }
     sections.push({
       heading: 'Amenities',
       summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length}/${BUILDING_ORDER.length} built`,
-      lines: [
-        built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. Amenities keep people happy.',
-        'One project at a time (shared with training troops)',
-      ],
+      lines: [built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.'],
       buttons: buildButtons,
+      grid: true,
     });
 
     const wc = state.wallCheck(city, this.me);
@@ -1156,6 +1153,7 @@ export class MapScene extends Phaser.Scene {
     if (city.wallTurns > 0) wallLines.push(`Building walls level ${city.walls + 1}: ${turnsTxt(city.wallTurns)} left`);
     sections.push({
       heading: 'Defense',
+      folded: true,
       summary: city.wallTurns > 0 ? `walls ${city.walls + 1} in ${city.wallTurns}` : city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls',
       lines: wallLines,
       buttons: [
@@ -1220,6 +1218,7 @@ export class MapScene extends Phaser.Scene {
       summary: queued ? `${UNIT_STATS[queued.type].name} \u00b7 ${queued.turnsLeft}t` : 'ready',
       lines: trainLines,
       buttons: trainButtons,
+      grid: true,
     });
 
     const here = state.unitAt(city);
