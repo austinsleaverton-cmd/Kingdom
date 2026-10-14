@@ -317,11 +317,13 @@ export class GameState {
     return this.map.tiles.filter(isLand).length;
   }
 
-  // Gold made before paying troops
+  // Gold made before paying troops. Terrain only pays when an improvement has a worker;
+  // city, building and happiness income stays independent of tile workers.
   grossIncome(p: PlayerId): number {
+    const worked = this.workedTiles(p);
     let gold = 0;
     for (const t of this.ownedTiles(p)) {
-      gold += YIELD[t.terrain];
+      if (worked.has(t)) gold += YIELD[t.terrain];
       if (t.capital) gold += CAPITAL_INCOME;
       else if (t.city) gold += CITY_INCOME;
       if (t.city) {
@@ -742,7 +744,8 @@ export class GameState {
   }
 
   peaceCheck(p: PlayerId, q: PlayerId): Check {
-    if (this.winner !== null) return fail('Game over');
+    const c = this.winner !== null;
+    if (c) return fail('Game over');
     if (!this.atWar(p, q)) return fail('Not at war');
     const t = this.warTurns(p, q);
     if (t < MIN_WAR_TURNS) {
@@ -765,7 +768,6 @@ export class GameState {
     if (this.players[q].isAI) {
       const v = aiPeaceVerdict(this, q, p);
       if (!v.accept) {
-        this.peaceAsked[pairKey(p, q)] = this.turn;
         this.tell(p, `${this.players[q].name} refused peace`);
         return fail(v.reason);
       }
@@ -780,11 +782,12 @@ export class GameState {
     const key = pairKey(p, q);
     if (this.wars[key] === undefined) return;
     delete this.wars[key];
+    delete this.truces[key];
     delete this.peaceAsked[key];
     this.truces[key] = this.turn;
-    this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
     this.expel(p);
     this.expel(q);
+    this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
   }
 
   // Popups waiting for a person (cleared once read)

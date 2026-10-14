@@ -76,7 +76,7 @@ function guideHtml(): string {
     ),
     sec(
       'Gold, food, stone',
-      `<ul><li><b>Gold</b> each turn: land (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}, water ${YIELD.water}) + ${CITY_INCOME} per city (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets and Harbors, +1 per happy city.</li>` +
+      `<ul><li><b>Gold</b> each turn: <b>worked improvements only</b> pay terrain gold (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}, water ${YIELD.water}). Bare land and idle improvements pay nothing; roads and palisades alone do not produce gold. Cities separately pay ${CITY_INCOME} each (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets and Harbors, +1 per happy city.</li>` +
         `<li><b>Troops get paid</b> every turn: ${troopUpkeep('swordsman')} gold for a Swordsman or Archer, ${troopUpkeep('knight')} for a Knight, ${troopUpkeep('trireme')} for a Trireme, ${troopUpkeep('galleass')} for a Galleass. Builders, settlers and transports are free.</li>` +
         `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, each worked fishery ${FISHERY_FOOD} (+${HARBOR_FISH} with a Harbor), +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
         `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn. Used for city walls, palisades and catapults.</li>` +
@@ -95,7 +95,7 @@ function guideHtml(): string {
     sec(
       'People',
       `<ul><li>Spare food fills a city's growth bar; a full bar is one more person (up to ${MAX_POP}). Happy cities grow 50% faster.</li>` +
-        `<li><b>People are workers</b>: each person works one farm, fishery, mine, pasture or forest on the city's land (the city takes turns between the kinds). Extra ones sit idle and make nothing until the city grows.</li>` +
+        `<li><b>People are workers</b>: each person works one farm, fishery, mine, pasture or forest on the city's land (the city takes turns between the kinds). Only those worked improvements earn terrain gold. Extra ones sit idle and make nothing until the city grows.</li>` +
         `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
         `<li>The number on a city's name tag is its people; the face is its mood.</li></ul>`,
     ),
@@ -133,7 +133,7 @@ function guideHtml(): string {
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
-        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
+        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.moves}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
         `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
         `<li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
