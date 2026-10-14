@@ -64,6 +64,7 @@ const SWORDSMAN = bob(['...iii...l', '..iiiii.l.', '...sss.l..', '...sss.l..', '
 const ARCHER = bob(['...ggg..w.', '..ggggg..w', '...sss...w', '...sss...w', '..ggggsl.w', '.s.gggg..w', '...gggg.w.', '...g..g...', '...g..g...', '..kk..kk..']);
 const KNIGHT = bob(['....ii....', '...iiii...', '....ss..l.', '...cccc.l.', '...cccc.l.', '......mnn.', '.nnnnnnnnn', 'nnnnnnnn..', '.n.n..n.n.', '.k.k..k.k.']);
 const BUILDER = bob(['..yyyy....', '.yyyyyy...', '..ssss.ll.', '..ssss..w.', '..oooow...', '.s.oo.....', '...oo.....', '...oo.....', '..o..o....', '..k..k....']);
+const SCOUT = bob(['...ggg....', '..ggggg...', '..gsss....', '...sss.lw.', '..nnnnsw..', '.s.nnnn...', '...nnnn...', '...g..g...', '...g..g...', '..kk..kk..']);
 const SETTLER = bob(['...mmm....', '..mmmm.ww.', '...ss.wwww', '...ss.wwww', '..bbbbwww.', '.s.bb.....', '...bb.....', '...bb.....', '..b..b....', '..k..k....']);
 
 // Who works each kind of improvement
@@ -73,6 +74,7 @@ export const WORKER_SPRITE: Record<Improvement, string> = {
 export const UNIT_SPRITE: Record<UnitType, string> = {
   builder: 'px-builder',
   settler: 'px-settler',
+  scout: 'px-scout',
   swordsman: 'px-swordsman',
   archer: 'px-archer',
   knight: 'px-knight',
@@ -93,6 +95,7 @@ export function makeSprites(scene: Phaser.Scene): void {
     ['px-knight', KNIGHT, 2.5],
     ['px-builder', BUILDER, 2],
     ['px-settler', SETTLER, 2],
+    ['px-scout', SCOUT, 2.5],
     ['px-fisher', FISHER, 1.5],
     ['px-trireme', TRIREME, 2],
     ['px-galleass', GALLEASS, 1.5],
