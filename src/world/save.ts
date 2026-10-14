@@ -14,6 +14,7 @@ const FARM = 8;
 const MINE = 16;
 const PASTURE = 32;
 const FOREST = 64;
+const FISHERY = 128;
 
 interface SaveData {
   version: 3;
@@ -74,7 +75,8 @@ export function saveGame(state: GameState): void {
         (t.improvement === 'farm' ? FARM : 0) |
         (t.improvement === 'mine' ? MINE : 0) |
         (t.improvement === 'pasture' ? PASTURE : 0) |
-        (t.improvement === 'forest' ? FOREST : 0);
+        (t.improvement === 'forest' ? FOREST : 0) |
+        (t.improvement === 'fishery' ? FISHERY : 0);
       if (!t.city) return [t.height, t.owner, flags];
       const bits = t.buildings.reduce((m, b) => m | (1 << BUILDING_ORDER.indexOf(b)), 0);
       const project = t.project ? BUILDING_ORDER.indexOf(t.project) : -1;
@@ -127,7 +129,7 @@ export function loadGame(): GameState | null {
       t.city = (flags & CITY) !== 0;
       t.capital = (flags & CAPITAL) !== 0;
       t.road = (flags & ROAD) !== 0;
-      t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : flags & PASTURE ? 'pasture' : flags & FOREST ? 'forest' : null;
+      t.improvement = flags & FARM ? 'farm' : flags & MINE ? 'mine' : flags & PASTURE ? 'pasture' : flags & FOREST ? 'forest' : flags & FISHERY ? 'fishery' : null;
       t.walls = t.city ? (walls ?? 0) : 0;
       t.level = t.city ? (level ?? 1) : 0; // old saves: every city starts as a Village
       t.growth = t.city ? (growth ?? 0) : 0;
