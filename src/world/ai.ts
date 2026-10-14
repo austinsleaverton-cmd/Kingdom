@@ -5,7 +5,7 @@ import type { GameState } from './game';
 import { hexDistance } from './map';
 import { BUILDINGS, MAX_WALLS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand } from './tile';
 import type { Building, PlayerId, Tile } from './tile';
-import { TROOPS, UNIT_STATS } from './units';
+import { PALISADE_STONE, TROOPS, UNIT_STATS } from './units';
 import type { Job, Unit, UnitType } from './units';
 
 export function runAI(g: GameState, p: PlayerId): void {
@@ -160,6 +160,12 @@ function pickTroopType(g: GameState, p: PlayerId, city: Tile): UnitType {
       if (counter && canHave(counter)) return counter;
     }
   }
+  // A couple of Catapults for a war (Normal and Hard): they crack palisades and walls
+  if (g.options.difficulty !== 'easy' && g.players.some((q) => q.alive && g.atWar(p, q.id))) {
+    const cats = mine.filter((u) => u.type === 'catapult').length + queued(g, p, (t) => t === 'catapult');
+    const st = UNIT_STATS.catapult;
+    if (cats < 2 && mine.length >= 3 && (st.minLevel ?? 0) <= cityLevel(city) && g.players[p].stone >= (st.stone ?? 0)) return 'catapult';
+  }
   // Default mix: mostly swordsmen (they can capture), some archers, knights when rich
   const archers = mine.filter((u) => u.type === 'archer').length + queued(g, p, (t) => t === 'archer');
   if (archers < Math.floor((mine.length + 1) / 3) && canHave('archer')) return 'archer';
@@ -259,6 +265,7 @@ function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   if (t.owner !== p) return null;
   const cfg = DIFFICULTY[g.options.difficulty];
   if (t.city) return null; // walls are a city action now (see aiQueue)
+  if (wantsPalisade(g, p, t)) return 'palisade';
   if (t.improvement) return null;
   // Only build what the city has people to work (one spare is fine)
   const home = g.homeCity(t);
@@ -276,6 +283,16 @@ function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   if (improvementFits(t, 'farm') && t.terrain === 'grass') return 'farm';
   if (improvementFits(t, 'fishery') && home?.buildings.includes('harbor')) return 'fishery';
   return null;
+}
+
+// Normal and Hard ring their capital with palisades once they're at war or enemies come close
+function wantsPalisade(g: GameState, p: PlayerId, t: Tile): boolean {
+  if (g.options.difficulty === 'easy' || t.palisade || !isLand(t) || t.city) return false;
+  if (g.players[p].stone < PALISADE_STONE) return false;
+  const cap = myCities(g, p).find((c) => c.capital);
+  if (!cap || hexDistance(cap, t) !== 1) return false;
+  const fighting = g.players.some((q) => q.alive && g.atWar(p, q.id));
+  return fighting || enemyTroops(g, p).some((e) => hexDistance(g.tileOf(e), cap) <= 5);
 }
 
 function aiBuilders(g: GameState, p: PlayerId): void {
@@ -308,7 +325,8 @@ function aiBuilders(g: GameState, p: PlayerId): void {
 
 // ---------- troops ----------
 
-function bestAttack(g: GameState, unit: Unit): Tile | null {
+// palisades: also consider breaking palisades (after moving, or for catapults that can't move first)
+function bestAttack(g: GameState, unit: Unit, palisades = true): Tile | null {
   const here = g.tileOf(unit);
   const cand = new Set<Tile>(g.map.neighbors(here));
   if (UNIT_STATS[unit.type].range >= 2) for (const n of [...cand]) for (const m of g.map.neighbors(n)) if (m !== here) cand.add(m);
@@ -318,11 +336,13 @@ function bestAttack(g: GameState, unit: Unit): Tile | null {
   for (const t of cand) {
     const pv = g.attackPreview(unit, t);
     if (!pv.ok) continue;
+    if (pv.kind === 'palisade' && !palisades) continue;
     if (pv.counter >= unit.hp) continue; // suicide
     const target = g.unitAt(t);
     let s = pv.dmg - pv.counter;
     if (target && pv.dmg >= target.hp) s += 25; // kill
     if (pv.kind === 'city') s += 5 + (t.capital ? 3 : 0);
+    if (pv.kind === 'palisade') s -= 4; // only when nothing better is in reach
     if (smart && target) s += (1 - target.hp / UNIT_STATS[target.type].hp) * 10; // finish wounded units
     if (s > bestScore) {
       bestScore = s;
@@ -367,7 +387,7 @@ function aiTroops(g: GameState, p: PlayerId): void {
     const keep = stats.range >= 2 ? 2 : 0;
 
     // 1. Hit something if we can do it right where we are
-    const first = bestAttack(g, unit);
+    const first = bestAttack(g, unit, !!stats.setup);
     if (first && (cfg.smart || Math.random() < cfg.aggression)) {
       g.attack(unit, first);
       continue;
