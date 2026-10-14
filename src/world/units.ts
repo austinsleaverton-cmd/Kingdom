@@ -2,7 +2,7 @@
 import type { WorldMap } from './map';
 import type { Building, PlayerId, Terrain, Tile } from './tile';
 
-export type UnitType = 'builder' | 'settler' | 'scout' | 'swordsman' | 'archer' | 'knight' | 'trireme' | 'galleass' | 'transport';
+export type UnitType = 'builder' | 'settler' | 'scout' | 'swordsman' | 'archer' | 'knight' | 'catapult' | 'trireme' | 'galleass' | 'transport';
 
 export interface UnitStats {
   name: string;
@@ -23,6 +23,10 @@ export interface UnitStats {
   minLevel?: number; // the city must be at least this level to make it
   needs?: Building; // the city must have this amenity to make it
   scout?: boolean; // crosses closed borders at peace; hills, mountains and forests cost 1 less
+  stone?: number; // stone it costs to make, on top of gold
+  vsPalisade?: number; // damage multiplier against palisades
+  vsCity?: number; // damage multiplier against cities (walls and HP)
+  setup?: boolean; // can't attack on a turn it has moved
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
@@ -42,6 +46,11 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
     name: 'Knight', letter: 'Kn', cost: 45, food: 3, moves: 4, train: 3,
     hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true, minLevel: 3,
   },
+  // Siege: wrecks palisades and walls from 2 hexes away, weak in a straight fight, must set up before firing
+  catapult: {
+    name: 'Catapult', letter: 'Ca', cost: 30, food: 2, moves: 2, train: 3,
+    hp: 15, atk: 6, range: 2, military: true, minLevel: 3, stone: 10, vsPalisade: 3, vsCity: 2, setup: true,
+  },
   // Boats: need a Harbor
   trireme: {
     name: 'Trireme', letter: 'Tr', cost: 30, food: 2, moves: 4, train: 2,
@@ -49,7 +58,7 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   },
   galleass: {
     name: 'Galleass', letter: 'Ga', cost: 50, food: 3, moves: 3, train: 3,
-    hp: 30, atk: 9, range: 2, military: true, naval: true, needs: 'harbor', minLevel: 4,
+    hp: 30, atk: 9, range: 2, military: true, naval: true, needs: 'harbor', minLevel: 4, vsPalisade: 2,
   },
   transport: {
     name: 'Transport', letter: 'Tp', cost: 25, food: 1, moves: 4, train: 2,
@@ -58,7 +67,7 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
 };
 
 // What a city's Train list offers after Builder and Settler (with rivals in the game)
-export const TROOPS: UnitType[] = ['scout', 'swordsman', 'archer', 'knight'];
+export const TROOPS: UnitType[] = ['scout', 'swordsman', 'archer', 'knight', 'catapult'];
 export const NAVY: UnitType[] = ['trireme', 'galleass', 'transport'];
 
 export interface Unit {
@@ -86,7 +95,14 @@ export interface Training {
   turnsLeft: number;
 }
 
-export type Job = 'farm' | 'pasture' | 'forest' | 'mine' | 'fishery' | 'road' | 'walls' | 'raise' | 'lower';
+export type Job = 'farm' | 'pasture' | 'forest' | 'mine' | 'fishery' | 'road' | 'palisade' | 'walls' | 'raise' | 'lower';
+
+// Palisades: a builder puts one on your land near a city; enemies must break it to get through
+export const PALISADE_STONE = 4; // stone per palisade (plus its gold in JOB_COST)
+export const PALISADE_HP = 20;
+export const PALISADE_REGEN = 5; // HP a damaged palisade regains per turn when no enemy troops are near
+export const PALISADE_RANGE = 2; // only within this many hexes of one of your cities
+export const PALISADE_COVER = 0.75; // your units standing on one take this share of the damage
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm (food)', key: 'F' },
@@ -95,11 +111,12 @@ export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'forest', label: 'Plant forest (bows)', key: 'T' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
+  { id: 'palisade', label: `Palisade (${PALISADE_STONE} stone)`, key: 'E' },
   { id: 'raise', label: 'Raise land', key: 'U' },
   { id: 'lower', label: 'Lower land', key: 'D' },
 ];
 
-export const JOB_COST: Record<Job, number> = { farm: 5, pasture: 6, forest: 4, mine: 8, fishery: 6, road: 2, walls: 5, raise: 3, lower: 3 };
+export const JOB_COST: Record<Job, number> = { farm: 5, pasture: 6, forest: 4, mine: 8, fishery: 6, road: 2, palisade: 4, walls: 5, raise: 3, lower: 3 };
 
 const TERRAIN_MOVE: Record<Terrain, number> = {
   water: Infinity,
