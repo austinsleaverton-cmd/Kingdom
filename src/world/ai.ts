@@ -3,7 +3,7 @@
 import { CITY_SPACING, DIFFICULTY, MIN_WAR_TURNS } from './game';
 import type { GameState } from './game';
 import { hexDistance } from './map';
-import { BUILDINGS, MAX_WALLS, YIELD, cityMaxHp, improvementFits, isLand } from './tile';
+import { BUILDINGS, MAX_WALLS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand } from './tile';
 import type { Building, PlayerId, Tile } from './tile';
 import { TROOPS, UNIT_STATS } from './units';
 import type { Job, Unit, UnitType } from './units';
@@ -143,12 +143,13 @@ function wantsSettler(g: GameState, p: PlayerId): boolean {
   return !busy && g.cityCount(p) < 15;
 }
 
-function pickTroopType(g: GameState, p: PlayerId): UnitType {
+function pickTroopType(g: GameState, p: PlayerId, city: Tile): UnitType {
   const cfg = DIFFICULTY[g.options.difficulty];
-  const mine = troops(g, p);
-  // Knights need horses (pastures), archers need bows (forests)
+  const mine = troops(g, p).filter((u) => !UNIT_STATS[u.type].naval);
+  // Knights need horses (pastures) and a big enough city, archers need bows (forests)
   const canHave = (t: UnitType) =>
-    t === 'knight' ? g.horsesUsed(p) < g.horsesMade(p) : t === 'archer' ? g.bowsUsed(p) < g.bowsMade(p) : true;
+    (UNIT_STATS[t].minLevel ?? 0) <= cityLevel(city) &&
+    (t === 'knight' ? g.horsesUsed(p) < g.horsesMade(p) : t === 'archer' ? g.bowsUsed(p) < g.bowsMade(p) : true);
   if (cfg.smart) {
     // Counter whatever enemy troops are most common nearby
     const counts: Record<string, number> = {};
@@ -177,7 +178,7 @@ function aiQueue(g: GameState, p: PlayerId): void {
     const army = troops(g, p).length + queued(g, p, (t) => UNIT_STATS[t].military);
     // Danger first: defend before expanding
     if ((threatened || army < armyWanted(g, p)) && army < cfg.maxArmy) {
-      const type = pickTroopType(g, p);
+      const type = pickTroopType(g, p, city);
       if (g.recruitCheck(type, city, p).ok && (threatened || g.players[p].gold - g.unitCost(type, p) >= 0)) {
         g.recruit(type, city, p);
         continue;
@@ -186,6 +187,13 @@ function aiQueue(g: GameState, p: PlayerId): void {
     if (wantsSettler(g, p) && g.recruitCheck('settler', city, p).ok) {
       g.recruit('settler', city, p);
       continue;
+    }
+    // A Trireme or two to guard the coast once there's a Harbor
+    if (!g.sandbox && city.buildings.includes('harbor') && boats(g, p) < Math.min(2, harbors(g, p)) && g.recruitCheck('trireme', city, p).ok) {
+      if (g.players[p].gold - g.unitCost('trireme', p) >= settlerReserve(g, p)) {
+        g.recruit('trireme', city, p);
+        continue;
+      }
     }
     // Walls when there's stone for them
     if (city.walls < Math.min(cfg.maxWalls, MAX_WALLS) && g.wallCheck(city, p).ok) {
@@ -203,16 +211,24 @@ function aiQueue(g: GameState, p: PlayerId): void {
   }
 }
 
+function boats(g: GameState, p: PlayerId): number {
+  return g.unitsOf(p).filter((u) => UNIT_STATS[u.type].naval).length + queued(g, p, (t) => !!UNIT_STATS[t].naval);
+}
+
+function harbors(g: GameState, p: PlayerId): number {
+  return myCities(g, p).filter((c) => c.buildings.includes('harbor')).length;
+}
+
 // Unhappy cities get temples and arenas first, hungry kingdoms a granary, otherwise markets
 function pickBuilding(g: GameState, p: PlayerId, city: Tile): Building | null {
   const mood = g.mood(city);
   const hungry = g.foodUsed(p) + 2 > g.foodMade(p);
   const order: Building[] =
     mood === 'unhappy' || mood === 'angry'
-      ? ['temple', 'arena', 'park', 'market', 'granary']
+      ? ['temple', 'arena', 'park', 'market', 'granary', 'harbor']
       : hungry
-        ? ['granary', 'market', 'temple', 'park', 'arena']
-        : ['market', 'temple', 'granary', 'park', 'arena'];
+        ? ['granary', 'harbor', 'market', 'temple', 'park', 'arena']
+        : ['market', 'temple', 'harbor', 'granary', 'park', 'arena'];
   return order.find((b) => g.buildCheck(city, b, p).ok) ?? null;
 }
 
@@ -251,12 +267,14 @@ function builderJob(g: GameState, p: PlayerId, t: Tile): Job | null {
   const mines = g.ownedTiles(p).filter((x) => x.improvement === 'mine').length;
   if (improvementFits(t, 'mine') && mines < 1 + Math.floor(myCities(g, p).length / 2) && cfg.maxWalls > 0) return 'mine';
   if (improvementFits(t, 'farm') && hungry) return 'farm';
+  if (improvementFits(t, 'fishery') && hungry) return 'fishery';
   // A few pastures and forests so it can field knights and archers
   const want = 1 + Math.floor(myCities(g, p).length / 3);
   const count = (imp: string) => g.ownedTiles(p).filter((x) => x.improvement === imp).length;
   if (improvementFits(t, 'pasture') && count('pasture') < want) return 'pasture';
   if (improvementFits(t, 'forest') && count('forest') < want) return 'forest';
   if (improvementFits(t, 'farm') && t.terrain === 'grass') return 'farm';
+  if (improvementFits(t, 'fishery') && home?.buildings.includes('harbor')) return 'fishery';
   return null;
 }
 
