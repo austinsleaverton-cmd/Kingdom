@@ -7,7 +7,7 @@ import {
 } from '../world/game';
 import type { Difficulty } from '../world/game';
 import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
-import { JOB_COST, UNIT_STATS } from '../world/units';
+import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS } from '../world/units';
 
 const CSS = `
 .k-qbtn { position: fixed; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); z-index: 30;
@@ -79,7 +79,7 @@ function guideHtml(): string {
       `<ul><li><b>Gold</b> each turn: land (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}, water ${YIELD.water}) + ${CITY_INCOME} per city (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets and Harbors, +1 per happy city.</li>` +
         `<li><b>Troops get paid</b> every turn: ${troopUpkeep('swordsman')} gold for a Swordsman or Archer, ${troopUpkeep('knight')} for a Knight, ${troopUpkeep('trireme')} for a Trireme, ${troopUpkeep('galleass')} for a Galleass. Builders, settlers and transports are free.</li>` +
         `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, each worked fishery ${FISHERY_FOOD} (+${HARBOR_FISH} with a Harbor), +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
-        `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn. Used for walls.</li>` +
+        `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn. Used for city walls, palisades and catapults.</li>` +
         `<li><b>Horses</b>: each worked pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each worked forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
     ),
     sec(
@@ -121,7 +121,8 @@ function guideHtml(): string {
         `<li><b>Fishery</b> ${JOB_COST.fishery}g: builders can wade into <b>your own water</b> (1 move per hex) and set one up. A worked fishery gives ${FISHERY_FOOD} food, ${FISHERY_FOOD + HARBOR_FISH} if its city has a Harbor.</li>` +
         `<li>A new job replaces what was there. Roads (and cities) cut movement cost to half, but only for their owner: enemy roads don't help invaders.</li>` +
         `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain.</li>` +
-        `<li>Forests cost 2 moves to cross and give cover like hills.</li></ul>`,
+        `<li>Forests cost 2 moves to cross and give cover like hills.</li>` +
+        `<li><b>Palisade</b> (<kbd>E</kbd>) ${JOB_COST.palisade}g + ${PALISADE_STONE} stone: on your land within ${PALISADE_RANGE} hexes of a city (farms and mines under it keep working). Enemies can't walk through it, they have to break it (${PALISADE_HP} HP, heals ${PALISADE_REGEN} a turn when no enemies are near). Your own units pass freely and take ${pct(1 - PALISADE_COVER)} less damage standing on one. Catapults and the Galleass break them fastest; Knights are bad at it.</li></ul>`,
     ),
     sec(
       'Units and fighting',
@@ -131,7 +132,8 @@ function guideHtml(): string {
         `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders</td></tr>` +
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
-        `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr></table>` +
+        `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
+        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
         `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
         `<li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
@@ -144,7 +146,7 @@ function guideHtml(): string {
       `<ul><li>Only a coastal city with a <b>Harbor</b> can build boats. Boats sail on water and can dock in your own cities.</li></ul>` +
         `<table><tr><th>Boat</th><th>Gold</th><th>Food</th><th>Moves</th><th>HP</th><th>Attack</th><th>Notes</th></tr>` +
         `<tr><td>Trireme</td><td>${u.trireme.cost}</td><td>${u.trireme.food}</td><td>${u.trireme.moves}</td><td>${u.trireme.hp}</td><td>${u.trireme.atk}</td><td>rams boats only, beats the Galleass up close</td></tr>` +
-        `<tr><td>Galleass</td><td>${u.galleass.cost}</td><td>${u.galleass.food}</td><td>${u.galleass.moves}</td><td>${u.galleass.hp}</td><td>${u.galleass.atk}</td><td>shoots 2 hexes: boats, units on the shore and cities. Needs a ${lvl(u.galleass.minLevel)}</td></tr>` +
+        `<tr><td>Galleass</td><td>${u.galleass.cost}</td><td>${u.galleass.food}</td><td>${u.galleass.moves}</td><td>${u.galleass.hp}</td><td>${u.galleass.atk}</td><td>shoots 2 hexes: boats, units on the shore, cities and palisades (x${u.galleass.vsPalisade}). Needs a ${lvl(u.galleass.minLevel)}</td></tr>` +
         `<tr><td>Transport</td><td>${u.transport.cost}</td><td>${u.transport.food}</td><td>${u.transport.moves}</td><td>${u.transport.hp}</td><td>-</td><td>carries ${u.transport.carry} land units</td></tr></table>` +
         `<ul><li><b>Boarding</b>: move a land unit onto your Transport next to it (uses all its moves). The white pips on the Transport are passengers.</li>` +
         `<li><b>Unloading</b>: select the Transport and tap a green land hex next to it. The unit steps off and is done for that turn. Sink a Transport and everyone aboard is lost.</li>` +
@@ -186,7 +188,7 @@ function guideHtml(): string {
       `<ul><li>Drag to move the map, pinch or scroll to zoom.</li>` +
         `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route, <kbd>Esc</kbd> deselect / menu.</li>` +
         `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land. Troops: <kbd>L</kbd> pillage.</li>` +
-        `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li></ul>`,
+        `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>E</kbd> palisade, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li></ul>`,
     ),
   ].join('');
 }
