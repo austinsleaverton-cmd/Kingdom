@@ -744,8 +744,7 @@ export class GameState {
   }
 
   peaceCheck(p: PlayerId, q: PlayerId): Check {
-    const c = this.winner !== null;
-    if (c) return fail('Game over');
+    if (this.winner !== null) return fail('Game over');
     if (!this.atWar(p, q)) return fail('Not at war');
     const t = this.warTurns(p, q);
     if (t < MIN_WAR_TURNS) {
@@ -768,6 +767,7 @@ export class GameState {
     if (this.players[q].isAI) {
       const v = aiPeaceVerdict(this, q, p);
       if (!v.accept) {
+        this.peaceAsked[pairKey(p, q)] = this.turn;
         this.tell(p, `${this.players[q].name} refused peace`);
         return fail(v.reason);
       }
@@ -782,12 +782,11 @@ export class GameState {
     const key = pairKey(p, q);
     if (this.wars[key] === undefined) return;
     delete this.wars[key];
-    delete this.truces[key];
     delete this.peaceAsked[key];
     this.truces[key] = this.turn;
+    this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
     this.expel(p);
     this.expel(q);
-    this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
   }
 
   // Popups waiting for a person (cleared once read)
@@ -1335,7 +1334,7 @@ export class GameState {
     // Everything the unit passes on the way stays explored, not just where it stops
     if (this.fog && !this.players[unit.owner].isAI) {
       const trail = findPath(this.map, this.tileOf(unit), new Set([dest]), () => false, unit.owner, moveMode(unit.type)) ?? [];
-      for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[unit.type]);
+      for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[u.type]);
     }
     unit.col = dest.col;
     unit.row = dest.row;

@@ -133,7 +133,7 @@ function guideHtml(): string {
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
-        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.moves}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
+        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
         `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
         `<li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
