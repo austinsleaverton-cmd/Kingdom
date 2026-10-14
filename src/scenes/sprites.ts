@@ -64,6 +64,7 @@ const SWORDSMAN = bob(['...iii...l', '..iiiii.l.', '...sss.l..', '...sss.l..', '
 const ARCHER = bob(['...ggg..w.', '..ggggg..w', '...sss...w', '...sss...w', '..ggggsl.w', '.s.gggg..w', '...gggg.w.', '...g..g...', '...g..g...', '..kk..kk..']);
 const KNIGHT = bob(['....ii....', '...iiii...', '....ss..l.', '...cccc.l.', '...cccc.l.', '......mnn.', '.nnnnnnnnn', 'nnnnnnnn..', '.n.n..n.n.', '.k.k..k.k.']);
 const BUILDER = bob(['..yyyy....', '.yyyyyy...', '..ssss.ll.', '..ssss..w.', '..oooow...', '.s.oo.....', '...oo.....', '...oo.....', '..o..o....', '..k..k....']);
+const CATAPULT = bob(['.......ww.', '......wll.', '.....w....', '....w.....', '...w......', '..wwwwwww.', '.wwwwwwww.', '.w.w..w.w.', 'kk.....kk.', 'kk.....kk.']);
 const SCOUT = bob(['...ggg....', '..ggggg...', '..gsss....', '...sss.lw.', '..nnnnsw..', '.s.nnnn...', '...nnnn...', '...g..g...', '...g..g...', '..kk..kk..']);
 const SETTLER = bob(['...mmm....', '..mmmm.ww.', '...ss.wwww', '...ss.wwww', '..bbbbwww.', '.s.bb.....', '...bb.....', '...bb.....', '..b..b....', '..k..k....']);
 
@@ -78,6 +79,7 @@ export const UNIT_SPRITE: Record<UnitType, string> = {
   swordsman: 'px-swordsman',
   archer: 'px-archer',
   knight: 'px-knight',
+  catapult: 'px-catapult',
   trireme: 'px-trireme',
   galleass: 'px-galleass',
   transport: 'px-transport',
@@ -93,6 +95,7 @@ export function makeSprites(scene: Phaser.Scene): void {
     ['px-swordsman', SWORDSMAN, 2],
     ['px-archer', ARCHER, 2],
     ['px-knight', KNIGHT, 2.5],
+    ['px-catapult', CATAPULT, 1.5],
     ['px-builder', BUILDER, 2],
     ['px-settler', SETTLER, 2],
     ['px-scout', SCOUT, 2.5],
