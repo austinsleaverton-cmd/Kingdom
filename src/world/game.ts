@@ -65,6 +65,7 @@ export interface GameOptions {
   size: MapSize;
   opponents: number; // 0 = sandbox, no rivals and no win conditions
   freeBuild: boolean; // human players' actions cost no gold
+  simple?: boolean; // easy rules for people: no city size, food, horse/bow or unhappiness limits (AI plays normally)
   difficulty: Difficulty;
   seats?: Seat[]; // who plays each kingdom (first is always a person). Missing = you vs AI rivals
 }
@@ -291,6 +292,11 @@ export class GameState {
     return this.options.freeBuild && !this.players[p].isAI;
   }
 
+  // Easy rules (great with kids): people skip city-size, food, horse/bow and unhappiness limits
+  isSimple(p: PlayerId | null): boolean {
+    return p !== null && !!this.options.simple && !this.players[p].isAI;
+  }
+
   // ---------- queries ----------
 
   ownedTiles(p: PlayerId): Tile[] {
@@ -472,6 +478,7 @@ export class GameState {
   mood(city: Tile): Mood {
     const h = this.happiness(city);
     if (h >= HAPPY_AT) return 'happy';
+    if (this.isSimple(city.owner)) return 'content'; // easy rules: never unhappy or angry
     if (h <= ANGRY_AT) return 'angry';
     if (h <= UNHAPPY_AT) return 'unhappy';
     return 'content';
@@ -855,12 +862,12 @@ export class GameState {
   growthRate(city: Tile): number {
     if (city.owner === null) return 0;
     const spareAll = this.foodMade(city.owner) - this.foodUsed(city.owner);
-    if (spareAll < 0) return -1; // starving
+    if (spareAll < 0 && !this.isSimple(city.owner)) return -1; // starving
     const mood = this.mood(city);
     if (mood === 'angry') return -2;
     if (mood === 'unhappy') return 0;
     const mine = this.cities().filter((c) => c.owner === city.owner).length;
-    const rate = 1 + Math.min(GROWTH_SHARE_CAP, mine > 0 ? spareAll / mine : 0);
+    const rate = 1 + Math.min(GROWTH_SHARE_CAP, mine > 0 ? Math.max(0, spareAll) / mine : 0);
     return Math.round(rate * (mood === 'happy' ? 1.5 : 1) * 10) / 10;
   }
 
@@ -872,7 +879,7 @@ export class GameState {
   growthNote(city: Tile): string {
     if (city.owner === null) return '';
     if (this.besieged(city)) return 'Not growing: enemy troops nearby';
-    if (this.foodMade(city.owner) < this.foodUsed(city.owner)) return 'Starving: build farms or the city shrinks';
+    if (this.foodMade(city.owner) < this.foodUsed(city.owner) && !this.isSimple(city.owner)) return 'Starving: build farms or the city shrinks';
     const mood = this.mood(city);
     if (mood === 'angry') return 'Angry: people are leaving';
     if (mood === 'unhappy') return 'Unhappy: not growing';
@@ -969,7 +976,7 @@ export class GameState {
     if (city.buildings.includes(b)) return fail('Already built');
     const busy = this.busyWith(city);
     if (busy) return fail(`Busy ${busy}`);
-    if (city.pop < info.minPop) return fail(`Needs ${info.minPop} people`);
+    if (city.pop < info.minPop && !this.isSimple(p)) return fail(`Needs ${info.minPop} people`);
     if (info.coastal && !this.isCoastal(city)) return fail('Needs to be next to water');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
@@ -1185,12 +1192,13 @@ export class GameState {
     if (stats.needs && !city.buildings.includes(stats.needs)) {
       return fail(this.isCoastal(city) ? `Needs a ${BUILDINGS[stats.needs].name}` : 'Only coastal cities build boats');
     }
-    if (stats.minLevel && cityLevel(city) < stats.minLevel) {
+    const simple = this.isSimple(p);
+    if (stats.minLevel && cityLevel(city) < stats.minLevel && !simple) {
       return fail(`Needs a ${LEVEL_NAMES[stats.minLevel - 1]} (${LEVEL_POP[stats.minLevel - 1]} people)`);
     }
-    if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms or fisheries');
-    if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
-    if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
+    if (!simple && this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms or fisheries');
+    if (!simple && type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
+    if (!simple && type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
     if (stats.train === 0 && !this.spawnTile(city, type)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
