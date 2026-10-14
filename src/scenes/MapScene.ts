@@ -6,7 +6,7 @@ import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, Improvement, Terrain, Tile } from '../world/tile';
-import { JOBS, NAVY, TROOPS, UNIT_STATS } from '../world/units';
+import { JOBS, NAVY, PALISADE_HP, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
@@ -897,7 +897,7 @@ export class MapScene extends Phaser.Scene {
       lines = ['Unexplored', 'Send a unit to scout it'];
     } else {
       const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
-      const extras = [tile.capital ? 'Capital' : tile.city ? 'City' : '', tile.improvement ?? '', tile.road ? 'road' : '']
+      const extras = [tile.capital ? 'Capital' : tile.city ? 'City' : '', tile.improvement ?? '', tile.road ? 'road' : '', tile.palisade ? `palisade ${tile.palisade} HP` : '']
         .filter(Boolean)
         .join(' · ');
       const unit = state.unitAt(tile);
@@ -962,6 +962,7 @@ export class MapScene extends Phaser.Scene {
       status.lines!.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
       if (stats.boatsOnly) status.lines!.push('Only fights other boats.');
       else if (stats.naval) status.lines!.push('Hits boats, units on the shore and cities. Next to an enemy city it blockades its fisheries.');
+      if (stats.setup) status.lines!.push(`Fire first, then move: it can't shoot after moving. x${stats.vsPalisade} vs palisades, x${stats.vsCity} vs cities.`);
       status.lines!.push(unit.acted ? 'Already attacked this turn' : 'Red hexes = attack (only kingdoms you are at war with).');
     } else if (unit.type === 'builder') {
       status.lines!.push(unit.uses !== undefined ? `Jobs left: ${unit.uses}` : 'Unlimited jobs');
@@ -971,6 +972,8 @@ export class MapScene extends Phaser.Scene {
       const aboard = unit.cargo ?? [];
       status.lines!.push(`On board ${aboard.length}/${stats.carry}${aboard.length ? `: ${aboard.map((c) => UNIT_STATS[c.type].name).join(', ')}` : ''}`);
       status.lines!.push(aboard.length ? 'Green hexes = unload the next unit there.' : 'Land units board by moving onto it.');
+    } else if (stats.scout) {
+      status.lines!.push("Crosses closed borders at peace to look around. Hills, mountains and forests cost 1 less. Can't fight.");
     } else {
       status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
     }
@@ -1057,7 +1060,6 @@ export class MapScene extends Phaser.Scene {
     const claiming = this.mode === 'claim' && this.claimCity === city;
     const open = state.openClaims(city);
     const sections: PanelSection[] = [];
-
     const bars: PanelBar[] = [{ label: 'Health', value: city.hp, max: cityMaxHp(city), color: this.hpColor(city.hp / cityMaxHp(city)) }];
     if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
     sections.push({ bars });
@@ -1263,6 +1265,9 @@ export class MapScene extends Phaser.Scene {
       title = state.cityName(tile);
       bars.push({ label: 'Health', value: tile.hp, max: cityMaxHp(tile), color: this.hpColor(tile.hp / cityMaxHp(tile)) });
       if (tile.walls) bars.push({ label: `Walls ${tile.walls}`, value: tile.shield, max: shieldMax(tile), color: '#60a5fa' });
+    }
+    if (tile.palisade) {
+      lines.push(`Palisade ${tile.palisade}/${PALISADE_HP} HP${tile.owner === this.me ? ': enemies have to break it to get through' : ': break it to get through'}`);
     }
     const other = state.unitAt(tile);
     if (other && other.owner !== this.me && this.sees(tile)) {
@@ -1476,6 +1481,14 @@ export class MapScene extends Phaser.Scene {
         g.lineBetween(a.x, a.y, b.x, b.y);
       }
 
+      if (t.palisade) {
+        // wooden stakes around the hex
+        const ring = hexCorners(x, y, SIZE - 5);
+        g.lineStyle(3, 0x8b5a2b, 1);
+        g.strokePoints(ring, true);
+        g.fillStyle(0x5b3a1e, 1);
+        for (const c of ring) g.fillCircle(c.x, c.y, 2.5);
+      }
       if (t.city) {
         if (t.walls > 0) {
           // stone ring, thicker per level
