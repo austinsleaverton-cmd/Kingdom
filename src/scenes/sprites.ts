@@ -18,6 +18,8 @@ const PALETTE: Record<string, number> = {
   b: 0x2563eb, // blue shirt
   o: 0xf97316, // orange work shirt
   r: 0xb91c1c, // red shirt
+  a: 0x5b3a1e, // dark hull
+  f: 0x7dd3fc, // fish
 };
 
 type Frames = string[][];
@@ -48,6 +50,16 @@ const WOODCUTTER: Frames = [
   ['..mmm...', '.mmmmm..', '..sss...', '..sss...', '..rrrr..', '.s.rr.s.', '...rr.w.', '...rr..w', '..r..rll', '..k..k.l'],
 ];
 
+const FISHER: Frames = [
+  ['..yyyy..w.', '.yyyyyy.w.', '..ssss..w.', '..ssss..w.', '..bbbbsw..', '.s.bb..l..', '...bb...l.', '...bb...l.', '..b..b..f.', '..k..k....'],
+  ['..yyyy...w', '.yyyyyy..w', '..ssss...w', '..ssss..w.', '..bbbbsw..', '.s.bb....l', '...bb....l', '...bb...ff', '..b..b....', '..k..k....'],
+];
+
+// Boats: hull, sails and oars
+const TRIREME = bob(['....l.....', '....ll....', '....lll...', '....llll..', '....w.....', 'wwwwwwwwwa', '.wwwwwwwa.', '.k.k.k.k..']);
+const GALLEASS = bob(['..l...l...', '..ll..ll..', '..lll.lll.', '..w...w...', 'wwwwwwwwww', 'wkwkwkwkwa', '.wwwwwwwa.', '..k.k.k...']);
+const TRANSPORT = bob(['....w.....', '..lllll...', '..lllll...', '..lllll...', '....w.....', '.nn.w.nn..', 'wwwwwwwwwa', '.aaaaaaaa.']);
+
 const SWORDSMAN = bob(['...iii...l', '..iiiii.l.', '...sss.l..', '...sss.l..', '..ccccsw..', '.s.cccc...', '...cccc...', '...c..c...', '...c..c...', '..kk..kk..']);
 const ARCHER = bob(['...ggg..w.', '..ggggg..w', '...sss...w', '...sss...w', '..ggggsl.w', '.s.gggg..w', '...gggg.w.', '...g..g...', '...g..g...', '..kk..kk..']);
 const KNIGHT = bob(['....ii....', '...iiii...', '....ss..l.', '...cccc.l.', '...cccc.l.', '......mnn.', '.nnnnnnnnn', 'nnnnnnnn..', '.n.n..n.n.', '.k.k..k.k.']);
@@ -55,13 +67,18 @@ const BUILDER = bob(['..yyyy....', '.yyyyyy...', '..ssss.ll.', '..ssss..w.', '..
 const SETTLER = bob(['...mmm....', '..mmmm.ww.', '...ss.wwww', '...ss.wwww', '..bbbbwww.', '.s.bb.....', '...bb.....', '...bb.....', '..b..b....', '..k..k....']);
 
 // Who works each kind of improvement
-export const WORKER_SPRITE: Record<Improvement, string> = { farm: 'px-farmer', pasture: 'px-horse', mine: 'px-miner', forest: 'px-woodcutter' };
+export const WORKER_SPRITE: Record<Improvement, string> = {
+  farm: 'px-farmer', pasture: 'px-horse', mine: 'px-miner', forest: 'px-woodcutter', fishery: 'px-fisher',
+};
 export const UNIT_SPRITE: Record<UnitType, string> = {
   builder: 'px-builder',
   settler: 'px-settler',
   swordsman: 'px-swordsman',
   archer: 'px-archer',
   knight: 'px-knight',
+  trireme: 'px-trireme',
+  galleass: 'px-galleass',
+  transport: 'px-transport',
 };
 
 // Paint every sprite once and register a looping animation under the same key
@@ -76,6 +93,10 @@ export function makeSprites(scene: Phaser.Scene): void {
     ['px-knight', KNIGHT, 2.5],
     ['px-builder', BUILDER, 2],
     ['px-settler', SETTLER, 2],
+    ['px-fisher', FISHER, 1.5],
+    ['px-trireme', TRIREME, 2],
+    ['px-galleass', GALLEASS, 1.5],
+    ['px-transport', TRANSPORT, 1.5],
   ];
   for (const [key, frames, rate] of all) {
     if (!scene.textures.exists(key)) paint(scene, key, frames);
