@@ -1,10 +1,10 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
-import { JOB_COST, UNIT_STATS, findPath, reachable, routeTurns } from './units';
+import { JOB_COST, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
 
@@ -121,6 +121,8 @@ export const ARCHERS_PER_FOREST = 2; // each forest gives bows for this many arc
 export const CITY_FOOD = 2;
 export const CAPITAL_FOOD = 3;
 export const MINE_STONE = 2;
+export const FISHERY_FOOD = 2; // a worked fishery feeds this many
+export const HARBOR_FISH = 1; // extra food per worked fishery when its city has a Harbor
 export const CAPITAL_INCOME = 5;
 export const WIN_SHARE = 0.6;
 export const CLAIM_RADIUS = 3; // can only buy land this many hexes (or fewer) from one of your cities
@@ -150,7 +152,9 @@ export const TRUCE_TURNS = 10; // after peace, neither side can declare war agai
 export const PEACE_RETRY = 3; // an AI said no: wait this long before asking again
 
 // Fog of war: how far things see (hexes)
-export const UNIT_SIGHT: Record<UnitType, number> = { builder: 2, settler: 2, swordsman: 3, archer: 3, knight: 4 };
+export const UNIT_SIGHT: Record<UnitType, number> = {
+  builder: 2, settler: 2, swordsman: 3, archer: 3, knight: 4, trireme: 3, galleass: 3, transport: 3,
+};
 export const CITY_SIGHT = 2; // +1 once a city reaches level 3
 export const START_SIGHT = 4; // everyone starts knowing the land this close to their capital
 
@@ -159,9 +163,9 @@ export function pairKey(a: PlayerId, b: PlayerId): string {
   return a < b ? `${a}-${b}` : `${b}-${a}`;
 }
 
-// Workers: each person in a city works one of its farms, mines, pastures or forests (taking turns
+// Workers: each person in a city works one of its farms, fisheries, mines, pastures or forests (taking turns
 // between the kinds in this order). Improvements without a worker sit idle and make nothing.
-export const WORK_ORDER: Improvement[] = ['farm', 'mine', 'pasture', 'forest'];
+export const WORK_ORDER: Improvement[] = ['farm', 'fishery', 'mine', 'pasture', 'forest'];
 
 // Troops cost gold every turn (same as the food they eat): 2 for swordsmen and archers, 3 for knights
 export function troopUpkeep(type: UnitType): number {
@@ -325,7 +329,7 @@ export class GameState {
   // Gold paid to troops each turn
   upkeep(p: PlayerId): number {
     if (this.isFree(p)) return 0;
-    return this.unitsOf(p).reduce((sum, u) => sum + troopUpkeep(u.type), 0);
+    return this.armyOf(p).reduce((sum, u) => sum + troopUpkeep(u.type), 0);
   }
 
   // Gold per turn after paying troops (what a person sees as "next turn")
@@ -392,13 +396,36 @@ export class GameState {
       if (t.city) food += cityLevel(t) - 1;
       if (t.city) for (const b of t.buildings) food += BUILDINGS[b].food;
       if (t.improvement === 'farm' && worked.has(t)) food += FARM_FOOD;
+      if (t.improvement === 'fishery' && worked.has(t)) food += this.fisheryFood(t);
     }
     return food;
   }
 
+  // A worked fishery: 2 food, +1 with a Harbor in its city, nothing while enemy ships blockade that city
+  fisheryFood(t: Tile): number {
+    const home = this.homeCity(t);
+    if (home && this.blockaded(home)) return 0;
+    return FISHERY_FOOD + (home && home.buildings.includes('harbor') ? HARBOR_FISH : 0);
+  }
+
+  // Next to water: can build a Harbor and boats
+  isCoastal(city: Tile): boolean {
+    return this.map.neighbors(city).some((n) => n.terrain === 'water');
+  }
+
+  // Enemy warships right next to a city shut down its fisheries
+  blockaded(city: Tile): boolean {
+    const owner = city.owner;
+    if (owner === null) return false;
+    return this.units.some((u) => {
+      const s = UNIT_STATS[u.type];
+      return !!s.naval && s.military && this.isEnemy(u.owner, owner) && hexDistance(this.tileOf(u), city) <= 1;
+    });
+  }
+
   // Units in training already reserve their food.
   foodUsed(p: PlayerId): number {
-    const units = this.unitsOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
+    const units = this.armyOf(p).reduce((sum, u) => sum + UNIT_STATS[u.type].food, 0);
     const queued = this.training.filter((t) => t.owner === p).reduce((sum, t) => sum + UNIT_STATS[t.type].food, 0);
     return units + queued + this.popFood(p);
   }
@@ -474,7 +501,7 @@ export class GameState {
   }
 
   private countTroop(p: PlayerId, type: UnitType): number {
-    return this.unitsOf(p).filter((u) => u.type === type).length + this.training.filter((t) => t.owner === p && t.type === type).length;
+    return this.armyOf(p).filter((u) => u.type === type).length + this.training.filter((t) => t.owner === p && t.type === type).length;
   }
 
   horsesMade(p: PlayerId): number {
@@ -502,6 +529,16 @@ export class GameState {
     return this.units.filter((u) => u.owner === p);
   }
 
+  // Every unit p has, including land units riding in transports (they still eat and get paid)
+  armyOf(p: PlayerId): Unit[] {
+    const out: Unit[] = [];
+    for (const u of this.unitsOf(p)) {
+      out.push(u);
+      if (u.cargo) out.push(...u.cargo);
+    }
+    return out;
+  }
+
   unitAt(tile: Tile): Unit | undefined {
     return this.units.find((u) => u.col === tile.col && u.row === tile.row);
   }
@@ -517,13 +554,63 @@ export class GameState {
   reachableFor(unit: Unit): Map<Tile, number> {
     if (unit.owner !== this.current) return new Map();
     const canCapture = UNIT_STATS[unit.type].canCapture === true;
-    return reachable(this.map, unit, (t) => {
+    const out = reachable(this.map, unit, (t) => {
       if (this.unitAt(t)) return true;
       // Other kingdoms' cities block movement. A destroyed city of someone you're at war with
       // can be walked into (that captures it), but only by capture-capable troops.
       if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
       return false;
     });
+    // Land units can board one of your transports right next to them (uses up their moves)
+    if (!UNIT_STATS[unit.type].naval && unit.moves > 0) {
+      for (const n of this.map.neighbors(this.tileOf(unit))) {
+        if (this.hasRoom(n, unit.owner)) out.set(n, 0);
+      }
+    }
+    return out;
+  }
+
+  // One of p's transports with a free spot sits on this tile
+  hasRoom(t: Tile, p: PlayerId): Unit | null {
+    const u = this.unitAt(t);
+    if (!u || u.owner !== p) return null;
+    const carry = UNIT_STATS[u.type].carry ?? 0;
+    return carry > (u.cargo?.length ?? 0) ? u : null;
+  }
+
+  // Land hexes next to a transport where the next unit on board can get off
+  unloadCheck(boat: Unit, tile: Tile): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (boat.owner !== this.current) return fail('Not your turn');
+    if (!boat.cargo?.length) return fail('Nobody on board');
+    if (!this.map.neighbors(this.tileOf(boat)).includes(tile)) return fail('Pick a hex next to the transport');
+    if (!isLand(tile)) return fail('Unload onto land');
+    if (this.unitAt(tile)) return fail('Something is already there');
+    if (tile.city && tile.owner !== boat.owner) return fail("Can't unload into someone else's city");
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  unloadTiles(boat: Unit): Set<Tile> {
+    const out = new Set<Tile>();
+    if (!boat.cargo?.length || boat.owner !== this.current) return out;
+    for (const n of this.map.neighbors(this.tileOf(boat))) if (this.unloadCheck(boat, n).ok) out.add(n);
+    return out;
+  }
+
+  // The first unit on board steps off. It's done for this turn.
+  unload(boat: Unit, tile: Tile): Unit | null {
+    if (!this.unloadCheck(boat, tile).ok) return null;
+    const u = boat.cargo!.shift()!;
+    if (!boat.cargo!.length) boat.cargo = undefined;
+    u.col = tile.col;
+    u.row = tile.row;
+    u.moves = 0;
+    u.acted = true;
+    u.hold = false;
+    this.clearRoute(u);
+    this.units.push(u);
+    if (this.fog && !this.players[u.owner].isAI) this.markExplored(u.owner, tile, UNIT_SIGHT[u.type]);
+    return u;
   }
 
   // Your units that haven't done anything yet this turn and weren't told to hold.
@@ -883,6 +970,7 @@ export class GameState {
     const busy = this.busyWith(city);
     if (busy) return fail(`Busy ${busy}`);
     if (city.pop < info.minPop) return fail(`Needs ${info.minPop} people`);
+    if (info.coastal && !this.isCoastal(city)) return fail('Needs to be next to water');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
   }
@@ -1094,10 +1182,16 @@ export class GameState {
     // Builders show up right away, so they don't count as the city's one job
     const busy = stats.train > 0 ? this.busyWith(city) : '';
     if (busy) return fail(`Busy ${busy}`);
-    if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms');
+    if (stats.needs && !city.buildings.includes(stats.needs)) {
+      return fail(this.isCoastal(city) ? `Needs a ${BUILDINGS[stats.needs].name}` : 'Only coastal cities build boats');
+    }
+    if (stats.minLevel && cityLevel(city) < stats.minLevel) {
+      return fail(`Needs a ${LEVEL_NAMES[stats.minLevel - 1]} (${LEVEL_POP[stats.minLevel - 1]} people)`);
+    }
+    if (this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms or fisheries');
     if (type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
     if (type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
-    if (stats.train === 0 && !this.spawnTile(city)) return fail('No room around the city');
+    if (stats.train === 0 && !this.spawnTile(city, type)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
     const gold = this.players[p].gold;
@@ -1116,7 +1210,7 @@ export class GameState {
       this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: turns });
       return 'queued';
     }
-    const at = this.spawnTile(city)!;
+    const at = this.spawnTile(city, type)!;
     const unit: Unit = { id: this.nextUnitId++, type, owner: p, col: at.col, row: at.row, moves: 0, acted: true, hp: stats.hp };
     const uses = DIFFICULTY[this.options.difficulty].builderUses;
     if (type === 'builder' && uses > 0) unit.uses = uses;
@@ -1135,7 +1229,7 @@ export class GameState {
       const city = this.map.get(t.col, t.row);
       if (!city || !city.city || city.owner !== p) continue; // city lost: training cancelled
       t.turnsLeft -= 1;
-      const at = t.turnsLeft <= 0 ? this.spawnTile(city) : null;
+      const at = t.turnsLeft <= 0 ? this.spawnTile(city, t.type) : null;
       if (!at) {
         keep.push(t); // still training, or waiting for room
         continue;
@@ -1147,8 +1241,10 @@ export class GameState {
     this.training = keep;
   }
 
-  private spawnTile(city: Tile): Tile | null {
+  // Boats launch into the water next to the city, everyone else onto the city's land
+  private spawnTile(city: Tile, type: UnitType): Tile | null {
     if (!this.unitAt(city)) return city;
+    if (UNIT_STATS[type].naval) return this.map.neighbors(city).find((n) => n.terrain === 'water' && !this.unitAt(n)) ?? null;
     return this.map.neighbors(city).find((n) => isLand(n) && n.owner === city.owner && !this.unitAt(n)) ?? null;
   }
 
@@ -1158,9 +1254,23 @@ export class GameState {
     const left = this.reachableFor(unit).get(dest);
     if (left === undefined) return false;
     if (!keepRoute) this.clearRoute(unit);
+    // Boarding one of your transports: the unit rides along until it's unloaded
+    const boat = UNIT_STATS[unit.type].naval ? null : this.hasRoom(dest, unit.owner);
+    if (boat) {
+      this.clearRoute(unit);
+      this.units = this.units.filter((u) => u !== unit);
+      unit.col = dest.col;
+      unit.row = dest.row;
+      unit.moves = 0;
+      unit.acted = true;
+      unit.hold = false;
+      boat.cargo = [...(boat.cargo ?? []), unit];
+      this.tell(unit.owner, `${UNIT_STATS[unit.type].name} boarded the Transport`);
+      return true;
+    }
     // Everything the unit passes on the way stays explored, not just where it stops
     if (this.fog && !this.players[unit.owner].isAI) {
-      const trail = findPath(this.map, this.tileOf(unit), new Set([dest]), () => false, unit.owner) ?? [];
+      const trail = findPath(this.map, this.tileOf(unit), new Set([dest]), () => false, unit.owner, moveMode(unit.type)) ?? [];
       for (const t of trail) this.markExplored(unit.owner, t, UNIT_SIGHT[unit.type]);
     }
     unit.col = dest.col;
@@ -1192,7 +1302,7 @@ export class GameState {
     const fail = (reason: string, arrived = false): RoutePlan => ({ ok: false, reason, path: [], turnAt: [], turns: 0, nextTo: false, arrived });
     const from = this.tileOf(unit);
     if (dest === from) return fail('Already here', true);
-    if (!isLand(dest)) return fail("Can't cross water");
+    const mode = moveMode(unit.type);
     const blocked = this.routeBlocker(unit, ownBlock);
     const taken = (t: Tile) => {
       const u = this.unitAt(t);
@@ -1200,10 +1310,15 @@ export class GameState {
     };
     // Heading for a unit or an enemy city: stop on the best tile next to it (never attacks by itself)
     const nextTo = taken(dest) || blocked(dest);
+    if (!nextTo && !canEnter(dest, unit.owner, mode)) {
+      if (mode === 'sea') return fail('Boats stay on water (they can dock in your cities)');
+      if (mode === 'wade') return fail('Builders only wade into your own water');
+      return fail("Can't cross water: board a Transport");
+    }
     const goals = nextTo
-      ? new Set(this.map.neighbors(dest).filter((n) => n === from || (isLand(n) && !blocked(n) && !taken(n))))
+      ? new Set(this.map.neighbors(dest).filter((n) => n === from || (canEnter(n, unit.owner, mode) && !blocked(n) && !taken(n))))
       : new Set([dest]);
-    const path = findPath(this.map, from, goals, blocked, unit.owner);
+    const path = findPath(this.map, from, goals, blocked, unit.owner, mode);
     if (!path) return fail('No way to get there');
     if (!path.length) return fail('Already next to it', true);
     const turnAt = routeTurns(unit, path, from);
@@ -1317,11 +1432,17 @@ export class GameState {
     if (dist < 1 || dist > stats.range) return no(`Out of range (${stats.range})`);
     const melee = dist === 1 && stats.range === 1;
     const defender = this.unitAt(target);
+    if (stats.boatsOnly && !(defender && UNIT_STATS[defender.type].naval)) {
+      return no(defender || target.city ? `${stats.name}s only fight boats` : 'Nothing to attack');
+    }
     if (defender) {
       if (defender.owner === unit.owner) return no('Your own unit');
       if (!this.isEnemy(defender.owner, unit.owner)) return no(this.players[defender.owner].alive ? this.peaceNote(defender.owner) : 'Nothing to attack');
       const d = UNIT_STATS[defender.type];
-      if (!d.military) return { ok: true, reason: '', dmg: defender.hp, counter: 0, kind: 'unit' };
+      // Swordsmen and knights can't reach anything out on the water (archers and ships can)
+      if (melee && !stats.naval && target.terrain === 'water') return no("Can't reach the water: use archers or ships");
+      // Builders and settlers are caught at once; transports are boats and take normal hits
+      if (!d.military && !d.naval) return { ok: true, reason: '', dmg: defender.hp, counter: 0, kind: 'unit' };
       const dmg = Math.max(1, Math.round(stats.atk * this.typeMult(unit.type, defender.type) * this.defenseMult(target, defender.owner)));
       const counter = melee && dmg < defender.hp
         ? Math.round(d.atk * COUNTER_SHARE * this.typeMult(defender.type, unit.type) * this.defenseMult(from, unit.owner))
@@ -1355,7 +1476,8 @@ export class GameState {
       defender.hp -= pv.dmg;
       if (defender.hp <= 0) {
         this.units = this.units.filter((u) => u !== defender);
-        this.addLog(`${a.name} destroyed ${dName}`);
+        const aboard = defender.cargo?.length ?? 0;
+        this.addLog(`${a.name} destroyed ${dName}${aboard ? ` and the ${aboard} unit${aboard === 1 ? '' : 's'} aboard` : ''}`);
       }
     } else {
       const absorbed = Math.min(target.shield, pv.dmg);
@@ -1419,6 +1541,10 @@ export class GameState {
     }
     if ((job === 'farm' || job === 'pasture' || job === 'forest' || job === 'mine') && target.city) return fail('Move off the city first');
     switch (job) {
+      case 'fishery':
+        if (target.improvement === 'fishery') return fail('Already a fishery');
+        if (!improvementFits(target, 'fishery')) return fail('Fisheries go on water: wade into your own water');
+        break;
       case 'farm':
         if (target.improvement === 'farm') return fail('Already a farm');
         if (!improvementFits(target, 'farm')) return fail('Farms need grass or sand');
@@ -1437,6 +1563,7 @@ export class GameState {
         break;
       case 'road':
         if (target.city) return fail('Cities already count as roads');
+        if (!isLand(target)) return fail("Can't build a road on water");
         if (target.road) return fail('Already a road');
         break;
       case 'walls':
@@ -1444,6 +1571,7 @@ export class GameState {
       case 'raise':
         if (target.height >= MAX_HEIGHT) return fail('Already a mountain');
         if (target.city && target.height + 1 >= MAX_HEIGHT) return fail("Cities can't sit on mountains");
+        if (target.height === 0 && this.unitAt(target) && UNIT_STATS[this.unitAt(target)!.type].naval) return fail('A boat is in the way');
         break;
       case 'lower':
         if (target.height <= 0) return fail('Already water');
@@ -1556,6 +1684,7 @@ export class GameState {
       case 'pasture':
       case 'forest':
       case 'mine':
+      case 'fishery':
         target.improvement = job; // replaces whatever was there (e.g. turn a farm into a pasture)
         break;
       case 'road':
@@ -1749,11 +1878,8 @@ export class GameState {
       best.level = 1;
       best.pop = 1;
       best.hp = cityMaxHp(best);
+      // Water next to the capital stays water, so a capital can be coastal (Harbor, boats, fisheries)
       for (const n of this.map.neighbors(best)) {
-        if (n.terrain === 'water') {
-          n.height = 1;
-          n.terrain = 'sand';
-        }
         if (n.owner === null) {
           n.owner = pl.id;
           n.home = best.home;
