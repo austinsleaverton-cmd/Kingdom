@@ -86,10 +86,10 @@ const CSS = `
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
 .k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
 /* Selection panel sits top-right (under the ? button) so it never covers the stats panel */
-.k-sel { top: 56px; right: 12px; width: 250px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
-.k-sel .k-lines { font-size: 12px; color: #bbb; margin-bottom: 4px; }
+.k-sel { top: 56px; right: 12px; width: 280px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
+.k-sel .k-lines { font-size: 12px; line-height: 1.45; color: #bbb; margin: 2px 0 6px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
-.k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 6px; margin-top: 6px; }
+.k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 8px; margin-top: 8px; }
 .k-sel .k-sec:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
 .k-sel h4.k-fold { display: flex; justify-content: space-between; cursor: pointer; user-select: none; }
 .k-sel h4.k-fold:hover { color: #cbd5e1; }
@@ -120,8 +120,11 @@ const CSS = `
 .k-tab tr.k-you td { color: #fff; font-weight: 600; }
 .k-tab .k-war { color: #f87171; font-size: 10px; font-weight: 600; margin-left: 4px; }
 .k-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
-.k-sel button { display: flex; justify-content: space-between; width: 100%; margin-top: 4px; padding: 6px 10px; font-size: 13px; }
-.k-sel button small { opacity: 0.7; margin-left: 8px; }
+.k-sel button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; margin-top: 5px; padding: 7px 10px; font-size: 13px; text-align: left; box-sizing: border-box; }
+/* Button = name on top (one line), cost or reason underneath in small grey text */
+.k-sel button > span { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.k-sel button small { opacity: 0.7; font-size: 11px; line-height: 1.3; }
+.k-sel button small:empty { display: none; }
 .k-sel .k-titlebtn { display: inline-block; width: auto; margin: 0 0 0 6px; font-size: 11px; padding: 1px 7px; font-weight: 400; }
 .k-tip { position: fixed; pointer-events: none; background: rgba(0,0,0,0.85); border: 1px solid #555; border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: pre; display: none; }
 .k-tip .k-bad { color: #f87171; } .k-tip .k-good { color: #4ade80; }
