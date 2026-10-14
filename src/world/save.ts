@@ -34,6 +34,7 @@ interface SaveData {
   truces?: Record<string, number>; // pair -> turn peace was made
   peaceAsked?: Record<string, number>; // pair -> turn an AI refused peace
   explored?: string[]; // fog of war, per player: one '0'/'1' per tile
+  palisades?: Record<number, number>; // tile index -> palisade HP
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -67,6 +68,7 @@ export function saveGame(state: GameState): void {
     truces: state.truces,
     peaceAsked: state.peaceAsked,
     explored: state.explored.map((a) => Array.from(a).join('')),
+    palisades: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.palisade ? [[i, t.palisade]] : []))),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -145,6 +147,7 @@ export function loadGame(): GameState | null {
       t.hp = t.city ? (hp ?? cityMaxHp(t)) : 0;
       t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
       t.home = data.homes && data.homes.length === data.tiles.length ? data.homes[i] : null;
+      t.palisade = data.palisades?.[i] ?? 0;
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];
