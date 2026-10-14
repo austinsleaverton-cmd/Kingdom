@@ -2,8 +2,8 @@
 
 export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
 export type PlayerId = number; // 0 is always the human player
-export type Improvement = 'farm' | 'mine' | 'pasture' | 'forest';
-export type Building = 'market' | 'temple' | 'granary' | 'park' | 'arena';
+export type Improvement = 'farm' | 'mine' | 'pasture' | 'forest' | 'fishery';
+export type Building = 'market' | 'temple' | 'granary' | 'park' | 'arena' | 'harbor';
 
 export interface Tile {
   col: number;
@@ -74,6 +74,7 @@ export interface BuildingInfo {
   food: number;
   culture: number;
   minPop: number;
+  coastal?: boolean; // only cities next to water can build it
   note: string;
 }
 
@@ -83,9 +84,14 @@ export const BUILDINGS: Record<Building, BuildingInfo> = {
   granary: { name: 'Granary', icon: '\u{1F33E}', cost: 35, turns: 3, happy: 0, gold: 0, food: 2, culture: 0, minPop: 2, note: '+2 food' },
   park: { name: 'Park', icon: '\u{1F333}', cost: 25, turns: 2, happy: 1, gold: 0, food: 0, culture: 2, minPop: 3, note: '+1 happy, +2 culture' },
   arena: { name: 'Arena', icon: '\u{1F3DF}', cost: 70, turns: 5, happy: 3, gold: 0, food: 0, culture: 1, minPop: 5, note: '+3 happy, +1 culture' },
+  harbor: {
+    name: 'Harbor', icon: '\u2693', cost: 40, turns: 3, happy: 0, gold: 1, food: 0, culture: 0, minPop: 2, coastal: true,
+    note: 'builds boats, +1 food per fishery, +1 gold',
+  },
 };
 
-export const BUILDING_ORDER: Building[] = ['temple', 'market', 'granary', 'park', 'arena'];
+// New amenities go at the end: saves store built amenities as bits in this order
+export const BUILDING_ORDER: Building[] = ['temple', 'market', 'granary', 'park', 'arena', 'harbor'];
 
 export function cityMaxHp(tile: Tile): number {
   return (tile.capital ? CAPITAL_HP : CITY_HP) + (cityLevel(tile) - 1) * LEVEL_HP;
@@ -108,15 +114,17 @@ export function isLand(tile: Tile): boolean {
   return tile.terrain !== 'water';
 }
 
-// Farms need flat land, pastures (horses) and forests (bows) need grass, mines need high ground.
+// Farms need flat land, pastures (horses) and forests (bows) need grass, mines need high ground,
+// fisheries go on water.
 export function improvementFits(tile: Tile, imp: Improvement): boolean {
   if (tile.city) return false;
+  if (imp === 'fishery') return tile.terrain === 'water';
   if (imp === 'farm') return tile.terrain === 'grass' || tile.terrain === 'sand';
   if (imp === 'pasture' || imp === 'forest') return tile.terrain === 'grass';
   return tile.terrain === 'hills' || tile.terrain === 'mountain';
 }
 
-export const IMPROVEMENT_NAME: Record<Improvement, string> = { farm: 'farm', mine: 'mine', pasture: 'pasture', forest: 'forest' };
+export const IMPROVEMENT_NAME: Record<Improvement, string> = { farm: 'farm', mine: 'mine', pasture: 'pasture', forest: 'forest', fishery: 'fishery' };
 
 // Drop anything that no longer fits after the terrain changed.
 export function fixAfterTerrainChange(tile: Tile): void {
@@ -150,7 +158,7 @@ export const YIELD: Record<Terrain, number> = {
   mountain: 0,
 };
 
-// Gold to claim an unowned tile (water is cheap: no gold yet, fish coming)
+// Gold to claim an unowned tile (water is cheap: no gold, but builders can put fisheries on it)
 export const CLAIM_COST: Record<Terrain, number> = {
   water: 2,
   sand: 3,
