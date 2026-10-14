@@ -6,7 +6,7 @@ import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, Improvement, Terrain, Tile } from '../world/tile';
-import { JOBS, TROOPS, UNIT_STATS } from '../world/units';
+import { JOBS, NAVY, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
@@ -36,7 +36,7 @@ const FOG_DIM = 0.22; // light veil: explored land stays easy to read, only enem
 const WORKER_SCALE = 1.6;
 const UNIT_SCALE = 1.7;
 const WORKER_ZOOM = 0.55; // below this zoom the workers are too small to matter
-const WORKER_OFFSET: Record<Improvement, [number, number]> = { farm: [10, -4], pasture: [1, -7], mine: [12, -3], forest: [13, 7] };
+const WORKER_OFFSET: Record<Improvement, [number, number]> = { farm: [10, -4], pasture: [1, -7], mine: [12, -3], forest: [13, 7], fishery: [10, -6] };
 
 // select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
@@ -50,6 +50,7 @@ export class MapScene extends Phaser.Scene {
   private selected: Tile | null = null;
   private selectedUnitId: number | null = null;
   private reach = new Map<Tile, number>();
+  private unloadAt = new Set<Tile>(); // land hexes the selected transport can drop a unit on
   private targets = new Map<Tile, AttackPreview>();
   private claimCity: Tile | null = null; // city buying land in claim mode
   private lastPointer = { x: 0, y: 0 };
@@ -227,6 +228,7 @@ export class MapScene extends Phaser.Scene {
     this.selected = null;
     this.selectedUnitId = null;
     this.reach = new Map();
+    this.unloadAt = new Set();
     this.targets = new Map();
     this.claimCity = null;
     this.routePreview = null;
@@ -309,6 +311,7 @@ export class MapScene extends Phaser.Scene {
   private hasWork(state: GameState, u: Unit): boolean {
     if (u.owner !== this.me || u.hold || u.goal || state.players[state.current].isAI) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
+    if (state.unloadTiles(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
 
@@ -385,6 +388,11 @@ export class MapScene extends Phaser.Scene {
           this.routePreview = null;
           state.attack(unit, tile);
           this.cameras.main.shake(60, 0.003);
+          acted = true;
+        } else if (unit && this.unloadAt.has(tile)) {
+          // Transport: drop the next unit on board onto this hex
+          this.routePreview = null;
+          state.unload(unit, tile);
           acted = true;
         } else if (unit && this.reach.has(tile)) {
           this.routePreview = null;
@@ -846,7 +854,14 @@ export class MapScene extends Phaser.Scene {
         if (this.rivalCapital(state, tile) !== null && !this.reach.has(tile)) {
           return { label: 'Diplomacy', check: { ok: true, cost: 0, reason: 'click to declare war or make peace' } };
         }
+        const sel2 = this.selectedUnit;
+        if (sel2 && this.unloadAt.has(tile) && sel2.cargo?.length) {
+          return { label: 'Unload', check: { ok: true, cost: 0, reason: `drop off the ${UNIT_STATS[sel2.cargo[0].type].name}` } };
+        }
         const left = this.reach.get(tile);
+        if (left !== undefined && sel2 && !UNIT_STATS[sel2.type].naval && state.hasRoom(tile, this.me)) {
+          return { label: 'Board', check: { ok: true, cost: 0, reason: 'ride the Transport (uses all moves)' } };
+        }
         if (left === undefined) {
           const unit = this.selectedUnit;
           if (!unit || !this.canRoute(state, unit, tile) || state.tileOf(unit) === tile) return null;
@@ -945,10 +960,17 @@ export class MapScene extends Phaser.Scene {
     };
     if (stats.military) {
       status.lines!.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
+      if (stats.boatsOnly) status.lines!.push('Only fights other boats.');
+      else if (stats.naval) status.lines!.push('Hits boats, units on the shore and cities. Next to an enemy city it blockades its fisheries.');
       status.lines!.push(unit.acted ? 'Already attacked this turn' : 'Red hexes = attack (only kingdoms you are at war with).');
     } else if (unit.type === 'builder') {
       status.lines!.push(unit.uses !== undefined ? `Jobs left: ${unit.uses}` : 'Unlimited jobs');
+      status.lines!.push('Can wade into your own water to build fisheries.');
       if (unit.acted) status.lines!.push('Done working this turn');
+    } else if (stats.carry) {
+      const aboard = unit.cargo ?? [];
+      status.lines!.push(`On board ${aboard.length}/${stats.carry}${aboard.length ? `: ${aboard.map((c) => UNIT_STATS[c.type].name).join(', ')}` : ''}`);
+      status.lines!.push(aboard.length ? 'Green hexes = unload the next unit there.' : 'Land units board by moving onto it.');
     } else {
       status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
     }
@@ -1100,6 +1122,7 @@ export class MapScene extends Phaser.Scene {
     const built = BUILDING_ORDER.filter((b) => city.buildings.includes(b));
     for (const b of BUILDING_ORDER) {
       if (city.buildings.includes(b)) continue;
+      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // inland: no Harbor
       const info = BUILDINGS[b];
       const c = state.buildCheck(city, b, this.me);
       const doing = city.project === b;
@@ -1172,6 +1195,7 @@ export class MapScene extends Phaser.Scene {
       { type: 'builder', key: 'B' },
       { type: 'settler', key: 'S' },
       ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
+      ...(state.sandbox || !state.isCoastal(city) ? [] : NAVY.map((type) => ({ type }))),
     ];
     for (const r of recruitables) {
       const c = state.recruitCheck(r.type, city, this.me);
@@ -1315,6 +1339,7 @@ export class MapScene extends Phaser.Scene {
     if (this.routePreview && (this.routePreview.unitId !== this.selectedUnitId || this.mode !== 'select')) this.routePreview = null;
     this.hoverPlan = null; // the board changed: re-plan hover routes
     this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
+    this.unloadAt = unit && this.mode === 'select' && unit.owner === this.me ? state.unloadTiles(unit) : new Set();
     this.targets = unit && this.mode === 'select' ? this.findTargets(state, unit) : new Map();
     // Fog of war: reveal what's in sight now (and remember it)
     this.visible = state.fog ? state.explore(this.me) : null;
@@ -1379,6 +1404,17 @@ export class MapScene extends Phaser.Scene {
         g.beginPath();
         g.arc(x, y - 8, 4, Phaser.Math.DegToRad(200), Phaser.Math.DegToRad(340), true);
         g.strokePath();
+      } else if (t.improvement === 'fishery') {
+        // net floats and a little jumping fish
+        g.lineStyle(1.5, 0xe5e7eb, 0.8);
+        g.strokeCircle(x - 4, y + 4, 7);
+        g.lineBetween(x - 11, y + 4, x + 3, y + 4);
+        g.lineBetween(x - 4, y - 3, x - 4, y + 11);
+        g.fillStyle(0xf97316, 1);
+        for (const [dx, dy] of [[-11, 4], [3, 4], [-4, -3], [-4, 11]] as const) g.fillCircle(x + dx, y + dy, 2);
+        g.fillStyle(0x7dd3fc, 1);
+        g.fillEllipse(x + 8, y - 6, 8, 4);
+        g.fillTriangle(x + 12, y - 6, x + 15, y - 9, x + 15, y - 3);
       } else if (t.improvement === 'forest') {
         // three pine trees
         for (const [dx, dy, s] of [[-8, 4, 1], [8, 4, 1], [0, -3, 1.2]] as const) {
@@ -1549,7 +1585,7 @@ export class MapScene extends Phaser.Scene {
       const home = state.tileOf(unit);
       g.fillStyle(0x000000, 0.4);
       for (const t of state.map.tiles) {
-        if (t === home || this.reach.has(t) || this.targets.has(t)) continue;
+        if (t === home || this.reach.has(t) || this.targets.has(t) || this.unloadAt.has(t)) continue;
         const { x, y } = tileCenter(t);
         g.fillPoints(hexCorners(x, y, SIZE), true);
       }
@@ -1567,6 +1603,17 @@ export class MapScene extends Phaser.Scene {
           g.fillCircle(x, y, 4);
         }
       }
+    }
+    // Where a transport can drop off its passengers: green
+    for (const t of this.unloadAt) {
+      const { x, y } = tileCenter(t);
+      const pts = hexCorners(x, y, SIZE - 3);
+      g.fillStyle(0x22c55e, 0.25);
+      g.fillPoints(pts, true);
+      g.lineStyle(2, 0x4ade80, 0.95);
+      g.strokePoints(pts, true);
+      g.fillStyle(0x4ade80, 1);
+      g.fillTriangle(x - 5, y - 3, x + 5, y - 3, x, y + 4);
     }
     if (this.targets.size > 0 && unit) {
       if (this.reach.size === 0) {
@@ -1775,6 +1822,13 @@ export class MapScene extends Phaser.Scene {
         g.fillRect(x - 11, y + 14, 22 * frac, 2);
       }
       this.unitSprite(n++, UNIT_SPRITE[u.type], x, y);
+      // Passengers on a transport: one white pip each
+      for (let k = 0; k < (u.cargo?.length ?? 0); k++) {
+        badge.fillStyle(0xffffff, 1);
+        badge.lineStyle(1, 0x000000, 0.7);
+        badge.fillCircle(x - 9 + k * 6, y - 13, 2.5);
+        badge.strokeCircle(x - 9 + k * 6, y - 13, 2.5);
+      }
       // Status badge for your units: cyan arrow = on a route, green dot = ready, gray = holding
       if (u.owner === this.me && u.goal) {
         badge.fillStyle(0x22d3ee, 1);
