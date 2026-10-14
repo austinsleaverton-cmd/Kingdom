@@ -29,6 +29,7 @@ export interface Tile {
   buildings: Building[]; // amenities already built
   project: Building | null; // amenity under construction
   projectTurns: number; // turns until it's done
+  palisade?: number; // palisade HP on this tile (missing or 0 = none). Blocks the owner's enemies
 }
 
 export const MAX_HEIGHT = 5;
@@ -132,6 +133,7 @@ export function fixAfterTerrainChange(tile: Tile): void {
   if (tile.terrain === 'water') {
     // Water can be owned, so the land keeps its owner when it floods
     tile.road = false;
+    tile.palisade = 0;
     tile.city = false;
     tile.capital = false;
     tile.hp = 0;
