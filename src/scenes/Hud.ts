@@ -39,6 +39,8 @@ export interface PanelSection {
   bars?: PanelBar[];
   lines?: string[];
   buttons?: PanelButton[];
+  folded?: boolean; // starts folded until the player opens it (their choice is remembered)
+  grid?: boolean; // buttons in two columns
 }
 
 export interface PanelModel {
@@ -125,6 +127,8 @@ const CSS = `
 .k-sel button > span { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .k-sel button small { opacity: 0.7; font-size: 11px; line-height: 1.3; }
 .k-sel button small:empty { display: none; }
+.k-sel .k-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; }
+.k-sel .k-grid button { margin-top: 0; min-width: 0; }
 .k-sel .k-titlebtn { display: inline-block; width: auto; margin: 0 0 0 6px; font-size: 11px; padding: 1px 7px; font-weight: 400; }
 .k-tip { position: fixed; pointer-events: none; background: rgba(0,0,0,0.85); border: 1px solid #555; border-radius: 6px; padding: 6px 8px; font-size: 12px; white-space: pre; display: none; }
 .k-tip .k-bad { color: #f87171; } .k-tip .k-good { color: #4ade80; }
@@ -167,6 +171,7 @@ const CSS = `
   .k-hud button { padding: 6px 8px; }
   .k-sel { top: auto; right: auto; left: 12px; bottom: 120px; width: 210px; max-height: calc(100% - 180px); }
   .k-idle { bottom: 120px; }
+  .k-sel .k-grid { grid-template-columns: 1fr; }
 }
 /* Phones sideways: not much height, so the selection panel runs down the right side and scrolls */
 @media (orientation: landscape) and (max-height: 500px) {
@@ -539,7 +544,7 @@ export class Hud {
       const box = el('k-sec');
       // Sections with a heading can be folded; the choice is remembered per heading
       const key = sec.heading ? `sec:${sec.heading}` : '';
-      const folded = key !== '' && this.prefs[key] === true;
+      const folded = key !== '' && (this.prefs[key] ?? sec.folded ?? false) === true;
       if (sec.heading) {
         const h = document.createElement('h4');
         h.className = 'k-fold';
@@ -568,6 +573,8 @@ export class Hud {
         lines.innerHTML = sec.lines.map(escape).join('<br>');
         box.appendChild(lines);
       }
+      const holder = sec.grid && sec.buttons?.length ? el('k-grid') : box;
+      if (holder !== box) box.appendChild(holder);
       for (const b of sec.buttons ?? []) {
         const btn = button(
           `<span>${b.key ? `<kbd>${b.key}</kbd>` : ''}${escape(b.label)}</span><small>${escape(b.hint)}</small>`,
@@ -576,7 +583,7 @@ export class Hud {
         btn.disabled = !b.enabled;
         btn.title = b.hint;
         if (b.active) btn.classList.add('k-on');
-        box.appendChild(btn);
+        holder.appendChild(btn);
       }
       this.sel.appendChild(box);
     }
