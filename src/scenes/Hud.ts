@@ -91,11 +91,14 @@ const CSS = `
 .k-sel { top: 56px; right: 12px; width: 280px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
 .k-sel .k-lines { font-size: 12px; line-height: 1.45; color: #bbb; margin: 2px 0 6px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
-.k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 8px; margin-top: 8px; }
+.k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 4px; margin-top: 4px; }
 .k-sel .k-sec:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
-.k-sel h4.k-fold { display: flex; justify-content: space-between; cursor: pointer; user-select: none; }
-.k-sel h4.k-fold:hover { color: #cbd5e1; }
-.k-sel h4.k-fold small { text-transform: none; letter-spacing: 0; font-weight: 400; color: #9ca3af; }
+/* Section headers: big, easy-to-hit rows. In the city panel only one section is open at a time. */
+.k-sel h4.k-fold { display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; font-size: 12px; padding: 7px 6px; margin: 0 -6px; border-radius: 5px; color: #a1a1b0; }
+.k-sel h4.k-fold:hover { color: #e5e7eb; background: #1f1f29; }
+.k-sel h4.k-fold.k-open { color: #e5e7eb; }
+.k-sel h4.k-fold .k-chev { display: inline-block; width: 16px; font-size: 13px; color: #6b7280; }
+.k-sel h4.k-fold small { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; color: #9ca3af; }
 .k-sel h4 { margin: 0 0 4px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; font-weight: 600; }
 .k-meter { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #bbb; margin: 2px 0; }
 .k-meter span:first-child { width: 44px; }
@@ -182,6 +185,25 @@ const CSS = `
 
 const UI_KEY = 'kingdom-ui';
 const POS_KEY = 'kingdom-pos';
+const OPEN_KEY = 'kingdom-open-section';
+
+// The one open section in the city panel (Train to start)
+function loadOpenSection(): string | null {
+  try {
+    const v = localStorage.getItem(OPEN_KEY);
+    return v === null ? 'Train' : v || null;
+  } catch {
+    return 'Train';
+  }
+}
+
+function saveOpenSection(name: string | null): void {
+  try {
+    localStorage.setItem(OPEN_KEY, name ?? '');
+  } catch {
+    // ignore
+  }
+}
 
 type Pos = { x: number; y: number };
 
@@ -348,6 +370,7 @@ export class Hud {
   private pass: HTMLDivElement; // hot-seat: "pass the device" screen between people
   private passStart: (() => void) | null = null;
   private dlg: HTMLDivElement; // popup (diplomacy, war news)
+  private openSec: string | null = loadOpenSection(); // panels with many sections show only this one
 
   constructor(handlers: HudHandlers) {
     const style = document.createElement('style');
@@ -540,18 +563,28 @@ export class Hud {
       sub.textContent = model.subtitle;
       this.sel.appendChild(sub);
     }
+    // Lots of sections (the city panel): open one at a time, like an accordion. Fewer: fold each on its own.
+    const accordion = model.sections.filter((s) => s.heading).length >= 4;
     for (const sec of model.sections) {
       const box = el('k-sec');
       // Sections with a heading can be folded; the choice is remembered per heading
       const key = sec.heading ? `sec:${sec.heading}` : '';
-      const folded = key !== '' && (this.prefs[key] ?? sec.folded ?? false) === true;
+      const folded =
+        key !== '' && (accordion ? sec.heading !== this.openSec : (this.prefs[key] ?? sec.folded ?? false) === true);
       if (sec.heading) {
         const h = document.createElement('h4');
-        h.className = 'k-fold';
-        h.innerHTML = `<span>${folded ? '\u25B8' : '\u25BE'} ${escape(sec.heading)}</span>${folded && sec.summary ? `<small>${escape(sec.summary)}</small>` : ''}`;
+        h.className = folded ? 'k-fold' : 'k-fold k-open';
+        h.innerHTML =
+          `<span><i class="k-chev">${folded ? '\u25B8' : '\u25BE'}</i>${escape(sec.heading)}</span>` +
+          (sec.summary ? `<small>${escape(sec.summary)}</small>` : '');
         h.onclick = () => {
-          this.prefs[key] = !folded;
-          saveCollapsed(this.prefs);
+          if (accordion) {
+            this.openSec = folded ? sec.heading! : null;
+            saveOpenSection(this.openSec);
+          } else {
+            this.prefs[key] = !folded;
+            saveCollapsed(this.prefs);
+          }
           this.showPanel(model);
         };
         box.appendChild(h);
