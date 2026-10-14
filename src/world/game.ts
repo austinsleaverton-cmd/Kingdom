@@ -4,7 +4,7 @@ import type { WorldMap } from './map';
 import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
-import { JOB_COST, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
+import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
 
@@ -154,7 +154,7 @@ export const PEACE_RETRY = 3; // an AI said no: wait this long before asking aga
 
 // Fog of war: how far things see (hexes)
 export const UNIT_SIGHT: Record<UnitType, number> = {
-  builder: 2, settler: 2, scout: 4, swordsman: 3, archer: 3, knight: 4, trireme: 3, galleass: 3, transport: 3,
+  builder: 2, settler: 2, scout: 4, swordsman: 3, archer: 3, knight: 4, catapult: 2, trireme: 3, galleass: 3, transport: 3,
 };
 export const CITY_SIGHT = 2; // +1 once a city reaches level 3
 export const START_SIGHT = 4; // everyone starts knowing the land this close to their capital
@@ -200,7 +200,7 @@ export interface AttackPreview {
   reason: string;
   dmg: number; // damage dealt
   counter: number; // damage taken back
-  kind: 'unit' | 'city' | 'none';
+  kind: 'unit' | 'city' | 'palisade' | 'none';
 }
 
 const fail = (reason: string, cost = 0): Check => ({ ok: false, cost, reason });
@@ -564,6 +564,7 @@ export class GameState {
     const out = reachable(this.map, unit, (t) => {
       if (this.unitAt(t)) return true;
       if (this.isClosed(t, unit.owner, unit.type)) return true; // closed border at peace
+      if (this.walledOff(t, unit.owner)) return true; // someone else's palisade
       // Other kingdoms' cities block movement. A destroyed city of someone you're at war with
       // can be walked into (that captures it), but only by capture-capable troops.
       if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
@@ -576,6 +577,11 @@ export class GameState {
       }
     }
     return out;
+  }
+
+  // Another kingdom's palisade: nobody else walks through it (break it first)
+  walledOff(t: Tile, p: PlayerId): boolean {
+    return !!t.palisade && t.owner !== null && t.owner !== p;
   }
 
   // Closed borders: at peace, another kingdom's land (and water) is off limits to everyone but Scouts.
@@ -594,7 +600,7 @@ export class GameState {
       let best: Tile | null = null;
       let bd = Infinity;
       for (const t of this.map.tiles) {
-        if (this.unitAt(t) || !canEnter(t, p, mode) || this.isClosed(t, p, u.type) || (t.city && t.owner !== p)) continue;
+        if (this.unitAt(t) || !canEnter(t, p, mode) || this.isClosed(t, p, u.type) || this.walledOff(t, p) || (t.city && t.owner !== p)) continue;
         const d = hexDistance(here, t);
         if (d < bd) {
           bd = d;
@@ -1237,6 +1243,7 @@ export class GameState {
     if (!simple && this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms or fisheries');
     if (!simple && type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
     if (!simple && type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
+    if (stats.stone && !this.isFree(p) && this.players[p].stone < stats.stone) return fail(`Need ${stats.stone} stone (build mines)`);
     if (stats.train === 0 && !this.spawnTile(city, type)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     const cost = this.unitCost(type, p);
@@ -1250,6 +1257,7 @@ export class GameState {
     if (!c.ok) return null;
     this.players[p].gold -= c.cost;
     const stats = UNIT_STATS[type];
+    if (stats.stone && !this.isFree(p)) this.players[p].stone -= stats.stone;
     if (stats.train > 0) {
       // Metropolis (level 5) trains a turn faster
       const turns = Math.max(1, stats.train - (cityLevel(city) >= MAX_LEVEL ? 1 : 0));
@@ -1340,6 +1348,7 @@ export class GameState {
       const u = this.unitAt(t);
       if (u && u !== unit && (ownBlock || u.owner !== unit.owner)) return true;
       if (this.isClosed(t, unit.owner, unit.type)) return true;
+      if (this.walledOff(t, unit.owner)) return true;
       if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
       return false;
     };
@@ -1463,6 +1472,7 @@ export class GameState {
     if (tile.terrain === 'hills' || tile.improvement === 'forest') m *= 0.8;
     if (tile.terrain === 'mountain') m *= 0.7;
     if (tile.city && tile.owner === defender) m *= 0.75;
+    if (tile.palisade && tile.owner === defender) m *= PALISADE_COVER;
     return m;
   }
 
@@ -1477,6 +1487,7 @@ export class GameState {
     if (!stats.military) return no("This unit can't fight");
     if (unit.owner !== this.current) return no('Not your turn');
     if (unit.acted) return no('Already attacked this turn');
+    if (stats.setup && unit.moves < stats.moves) return no(`${stats.name}s can't fire after moving this turn`);
     const from = this.tileOf(unit);
     const dist = hexDistance(from, target);
     if (dist < 1 || dist > stats.range) return no(`Out of range (${stats.range})`);
@@ -1505,9 +1516,14 @@ export class GameState {
     if (target.city && this.isEnemy(target.owner, unit.owner)) {
       if (target.hp <= 0 && target.shield <= 0) return no(stats.canCapture ? 'Destroyed: move in to capture' : 'Destroyed: send a swordsman or knight');
       const wallMult = unit.type === 'knight' && target.shield > 0 ? KNIGHT_VS_WALLS : 1;
-      const dmg = Math.max(1, Math.round(stats.atk * SIEGE_MULT * wallMult));
+      const dmg = Math.max(1, Math.round(stats.atk * SIEGE_MULT * wallMult * (stats.vsCity ?? 1)));
       const counter = dist === 1 ? CITY_COUNTER + 2 * target.walls : 0;
       return { ok: true, reason: '', dmg, counter, kind: 'city' };
+    }
+    if (target.palisade && target.owner !== null && target.owner !== unit.owner) {
+      if (!this.isEnemy(target.owner, unit.owner)) return no(this.peaceNote(target.owner));
+      const mult = (stats.vsPalisade ?? 1) * (unit.type === 'knight' ? KNIGHT_VS_WALLS : 1);
+      return { ok: true, reason: '', dmg: Math.max(1, Math.round(stats.atk * mult)), counter: 0, kind: 'palisade' };
     }
     return no('Nothing to attack');
   }
@@ -1529,6 +1545,9 @@ export class GameState {
         const aboard = defender.cargo?.length ?? 0;
         this.addLog(`${a.name} destroyed ${dName}${aboard ? ` and the ${aboard} unit${aboard === 1 ? '' : 's'} aboard` : ''}`);
       }
+    } else if (pv.kind === 'palisade') {
+      target.palisade = Math.max(0, (target.palisade ?? 0) - pv.dmg);
+      if (!target.palisade) this.addLog(`${a.name} broke ${this.whose(target.owner!)} palisade`);
     } else {
       const absorbed = Math.min(target.shield, pv.dmg);
       target.shield -= absorbed;
@@ -1610,6 +1629,13 @@ export class GameState {
       case 'mine':
         if (target.improvement === 'mine') return fail('Already a mine');
         if (!improvementFits(target, 'mine')) return fail('Mines need hills or mountains');
+        break;
+      case 'palisade':
+        if (target.city) return fail('Cities have walls instead (city panel)');
+        if (!isLand(target)) return fail("Palisades go on land");
+        if (target.palisade) return fail('Already a palisade');
+        if (!this.cities().some((c) => c.owner === p && hexDistance(c, target) <= PALISADE_RANGE)) return fail(`Only within ${PALISADE_RANGE} hexes of your cities`);
+        if (!this.isFree(p) && this.players[p].stone < PALISADE_STONE) return fail(`Need ${PALISADE_STONE} stone (build mines)`);
         break;
       case 'road':
         if (target.city) return fail('Cities already count as roads');
@@ -1740,6 +1766,10 @@ export class GameState {
       case 'road':
         target.road = true;
         break;
+      case 'palisade':
+        target.palisade = PALISADE_HP;
+        if (!this.isFree(unit.owner)) this.players[unit.owner].stone -= PALISADE_STONE;
+        break;
       case 'raise':
         this.map.raiseHeight(target);
         break;
@@ -1796,6 +1826,12 @@ export class GameState {
       if (t.owner !== p || this.besieged(t)) continue;
       t.hp = Math.min(cityMaxHp(t), t.hp + CITY_REGEN);
       t.shield = Math.min(shieldMax(t), t.shield + CITY_REGEN);
+    }
+    // Damaged palisades get patched up when no enemy troops are close
+    for (const t of this.map.tiles) {
+      if (t.owner !== p || !t.palisade || t.palisade >= PALISADE_HP) continue;
+      const near = this.units.some((u) => UNIT_STATS[u.type].military && this.isEnemy(u.owner, p) && hexDistance(this.tileOf(u), t) <= 2);
+      if (!near) t.palisade = Math.min(PALISADE_HP, t.palisade + PALISADE_REGEN);
     }
     for (const u of this.unitsOf(p)) {
       const stats = UNIT_STATS[u.type];
