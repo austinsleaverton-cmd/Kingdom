@@ -127,7 +127,8 @@ export const HARBOR_FISH = 1; // extra food per worked fishery when its city has
 export const CAPITAL_INCOME = 5;
 export const WIN_SHARE = 0.6;
 export const CLAIM_RADIUS = 3; // can only buy land this many hexes (or fewer) from one of your cities
-export const CLAIM_SCALE = 0.08; // +8% claim price per tile already bought
+export const CLAIM_SCALE = 0.04; // +4% claim price per tile already bought
+export const CLAIM_DIST_SCALE = 0.35; // +35% claim price per hex beyond the first from the buying city
 export const START_GOLD = 10;
 export const CITY_SPACING = 3; // cities must be at least this many hexes apart
 export const STRONG_BONUS = 1.5; // damage multiplier vs the type a unit is strong against
@@ -686,8 +687,14 @@ export class GameState {
     return owner !== null && owner !== p && this.players[owner].alive && this.atWar(owner, p);
   }
 
-  claimCost(tile: Tile, p: PlayerId): number {
-    return Math.round(CLAIM_COST[tile.terrain] * (1 + this.players[p].claims * CLAIM_SCALE));
+  // Price to buy a tile: terrain base, more the farther it is from the buying city (the nearest
+  // claiming city when none is given), plus a small bump per tile already bought.
+  claimCost(tile: Tile, p: PlayerId, city?: Tile | null): number {
+    const from = city ?? this.claimingCity(tile, p);
+    const raw = from ? hexDistance(tile, from) : this.cityDistance(tile, p);
+    const d = Number.isFinite(raw) ? raw : 1;
+    const dist = 1 + Math.max(0, d - 1) * CLAIM_DIST_SCALE;
+    return Math.round(CLAIM_COST[tile.terrain] * dist * (1 + this.players[p].claims * CLAIM_SCALE));
   }
 
   // ---------- war and peace ----------
@@ -1141,7 +1148,7 @@ export class GameState {
           const max = this.claimRadius(city);
           if (d > max) return fail(`Too far: ${d} hexes from this city (max ${max}). Send a settler`);
           if (!this.claimingCity(tile, p, city)) return fail("Must touch this city's land");
-          return withGold(this.claimCost(tile, p));
+          return withGold(this.claimCost(tile, p, city));
         }
         if (!this.touches(tile, p)) return fail('Must border your land');
         if (!this.inClaimRange(tile, p)) {
