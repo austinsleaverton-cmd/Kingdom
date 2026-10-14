@@ -128,6 +128,7 @@ function guideHtml(): string {
       `<table><tr><th>Unit</th><th>Gold</th><th>Food</th><th>Moves</th><th>HP</th><th>Attack</th><th>Notes</th></tr>` +
         `<tr><td>Builder</td><td>${u.builder.cost}</td><td>${u.builder.food}</td><td>${u.builder.moves}</td><td>${u.builder.hp}</td><td>-</td><td>builds, ready at once</td></tr>` +
         `<tr><td>Settler</td><td>grows</td><td>${u.settler.food}</td><td>${u.settler.moves}</td><td>${u.settler.hp}</td><td>-</td><td>founds a city, ${u.settler.train} turns, needs a ${LEVEL_NAMES[(u.settler.minLevel ?? 1) - 1]}</td></tr>` +
+        `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders</td></tr>` +
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr></table>` +
@@ -155,6 +156,7 @@ function guideHtml(): string {
       `<ul><li>Everyone starts at peace. Tap a rival's <b>capital</b> to declare war; only then can you attack their units and cities (and they yours).</li>` +
         `<li>A war lasts at least ${MIN_WAR_TURNS} turns. After that, tap their capital again to offer peace.</li>` +
         `<li>Computer kingdoms decide by how the war is going: who's stronger, whose cities are hurting, how long it has dragged on and unrest at home. If they say no, you can ask again in ${PEACE_RETRY} turns.</li>` +
+        `<li><b>Closed borders</b>: at peace, nobody can enter another kingdom's land or water except <b>Scouts</b>. When peace is made, troops inside the other side's land step back to the closest free hex outside it.</li>` +
         `<li>Peace comes with a ${TRUCE_TURNS}-turn treaty: neither side can declare war again until it runs out.</li>` +
         `<li>The computer won't start wars before a certain turn (see Difficulty) and only fights one war at a time.</li></ul>`,
     ),
@@ -162,7 +164,7 @@ function guideHtml(): string {
       'Fog of war',
       `<ul><li>With rivals in the game, you only see what your land, cities and units can see. Unexplored land is dark.</li>` +
         `<li>Land you've explored stays on the map, slightly dimmed; enemy units there are hidden until you look again.</li>` +
-        `<li>Sight: builders and settlers ${UNIT_SIGHT.builder}, swordsmen and archers ${UNIT_SIGHT.swordsman}, knights ${UNIT_SIGHT.knight}, boats ${UNIT_SIGHT.trireme}, cities ${CITY_SIGHT} (+1 for a ${LEVEL_NAMES[2]}). You start knowing everything within ${START_SIGHT} hexes of your capital.</li>` +
+        `<li>Sight: builders and settlers ${UNIT_SIGHT.builder}, scouts ${UNIT_SIGHT.scout}, swordsmen and archers ${UNIT_SIGHT.swordsman}, knights ${UNIT_SIGHT.knight}, boats ${UNIT_SIGHT.trireme}, cities ${CITY_SIGHT} (+1 for a ${LEVEL_NAMES[2]}). You start knowing everything within ${START_SIGHT} hexes of your capital.</li>` +
         `<li>No fog in a sandbox game.</li></ul>`,
     ),
     sec(
