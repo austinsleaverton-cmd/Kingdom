@@ -1,4 +1,4 @@
-// Start screen (DOM overlay): pick map size, players (people or AI), difficulty, free building, or continue a save.
+// Start screen (DOM overlay): pick map size, players (people or AI), difficulty, free building, easy rules, or continue a save.
 import { DIFFICULTY, MAP_SIZES, MAX_NAME, MAX_OPPONENTS, PLAYER_INFO, defaultOptions, randomSeed } from '../world/game';
 import type { Difficulty, GameOptions, MapSize, Seat } from '../world/game';
 import { clearSave } from '../world/save';
@@ -50,6 +50,7 @@ const CSS = `
 `;
 
 const SEATS_KEY = 'kingdom-seats'; // remembers names between games
+const SIMPLE_KEY = 'kingdom-simple'; // remembers the easy-rules box
 
 function loadSeats(): Seat[] {
   try {
@@ -84,6 +85,7 @@ export class Menu {
   private seatBox!: HTMLDivElement;
   private diffBtns = new Map<Difficulty, HTMLButtonElement>();
   private free: HTMLInputElement;
+  private simple: HTMLInputElement;
   private note: HTMLDivElement;
   private cont: HTMLButtonElement;
   private go!: HTMLButtonElement;
@@ -156,6 +158,28 @@ export class Menu {
     label.appendChild(this.free);
     label.appendChild(document.createTextNode('Free building (people pay no gold)'));
     diffBox.appendChild(label);
+
+    // Easy rules: people can make anything without growing cities first (the AI still plays by the full rules)
+    const simpleLabel = document.createElement('label');
+    this.simple = document.createElement('input');
+    this.simple.type = 'checkbox';
+    try {
+      this.opts.simple = localStorage.getItem(SIMPLE_KEY) === '1';
+    } catch {
+      // ignore
+    }
+    this.simple.onchange = () => {
+      this.opts.simple = this.simple.checked;
+      try {
+        localStorage.setItem(SIMPLE_KEY, this.simple.checked ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      this.refresh();
+    };
+    simpleLabel.appendChild(this.simple);
+    simpleLabel.appendChild(document.createTextNode('Easy rules (no city size, food or happiness limits)'));
+    diffBox.appendChild(simpleLabel);
 
     this.note = document.createElement('div');
     this.note.className = 'k-note';
@@ -298,6 +322,7 @@ export class Menu {
       b.disabled = ais === 0;
     }
     this.free.checked = this.opts.freeBuild;
+    this.simple.checked = !!this.opts.simple;
     const { width, height } = MAP_SIZES[this.opts.size];
     const map = `${width}x${height} map`;
     const aiNote = ais > 0 ? ` ${ais} AI: ${DIFFICULTY[this.opts.difficulty].note}` : '';
