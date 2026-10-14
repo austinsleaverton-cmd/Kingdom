@@ -1,8 +1,8 @@
 // Unit types, movement costs and pathing. No Phaser imports in src/world.
 import type { WorldMap } from './map';
-import type { PlayerId, Terrain, Tile } from './tile';
+import type { Building, PlayerId, Terrain, Tile } from './tile';
 
-export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight';
+export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight' | 'trireme' | 'galleass' | 'transport';
 
 export interface UnitStats {
   name: string;
@@ -17,12 +17,17 @@ export interface UnitStats {
   military: boolean;
   strongVs?: UnitType; // deals bonus damage to this type
   canCapture?: boolean; // can walk into a destroyed enemy city
+  naval?: boolean; // a boat: sails on water and docks in your own cities
+  boatsOnly?: boolean; // can only attack other boats
+  carry?: number; // land units it can carry across water
+  minLevel?: number; // the city must be at least this level to make it
+  needs?: Building; // the city must have this amenity to make it
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
   // food = upkeep: troops eat more than workers
   builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0, hp: 10, atk: 0, range: 0, military: false },
-  settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3, hp: 10, atk: 0, range: 0, military: false },
+  settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3, hp: 10, atk: 0, range: 0, military: false, minLevel: 2 },
   swordsman: {
     name: 'Swordsman', letter: 'Sw', cost: 25, food: 2, moves: 2, train: 2,
     hp: 30, atk: 8, range: 1, military: true, strongVs: 'archer', canCapture: true,
@@ -33,11 +38,25 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   },
   knight: {
     name: 'Knight', letter: 'Kn', cost: 45, food: 3, moves: 4, train: 3,
-    hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true,
+    hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true, minLevel: 3,
+  },
+  // Boats: need a Harbor
+  trireme: {
+    name: 'Trireme', letter: 'Tr', cost: 30, food: 2, moves: 4, train: 2,
+    hp: 30, atk: 9, range: 1, military: true, naval: true, boatsOnly: true, strongVs: 'galleass', needs: 'harbor',
+  },
+  galleass: {
+    name: 'Galleass', letter: 'Ga', cost: 50, food: 3, moves: 3, train: 3,
+    hp: 30, atk: 9, range: 2, military: true, naval: true, needs: 'harbor', minLevel: 4,
+  },
+  transport: {
+    name: 'Transport', letter: 'Tp', cost: 25, food: 1, moves: 4, train: 2,
+    hp: 20, atk: 0, range: 0, military: false, naval: true, carry: 2, needs: 'harbor',
   },
 };
 
 export const TROOPS: UnitType[] = ['swordsman', 'archer', 'knight'];
+export const NAVY: UnitType[] = ['trireme', 'galleass', 'transport'];
 
 export interface Unit {
   id: number;
@@ -52,6 +71,7 @@ export interface Unit {
   uses?: number; // builders on Normal/Hard: jobs left before they retire (undefined = unlimited)
   goal?: { col: number; row: number }; // multi-turn route target: moves itself at the start of each turn
   waited?: number; // turns in a row it was stuck behind one of your units
+  cargo?: Unit[]; // transports: land units on board (they're off the map until unloaded)
 }
 
 // A unit being trained in a city.
@@ -63,10 +83,11 @@ export interface Training {
   turnsLeft: number;
 }
 
-export type Job = 'farm' | 'pasture' | 'forest' | 'mine' | 'road' | 'walls' | 'raise' | 'lower';
+export type Job = 'farm' | 'pasture' | 'forest' | 'mine' | 'fishery' | 'road' | 'walls' | 'raise' | 'lower';
 
 export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm (food)', key: 'F' },
+  { id: 'fishery', label: 'Fishery (food, on water)', key: 'G' },
   { id: 'pasture', label: 'Pasture (horses)', key: 'P' },
   { id: 'forest', label: 'Plant forest (bows)', key: 'T' },
   { id: 'mine', label: 'Mine', key: 'M' },
@@ -75,7 +96,7 @@ export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'lower', label: 'Lower land', key: 'D' },
 ];
 
-export const JOB_COST: Record<Job, number> = { farm: 5, pasture: 6, forest: 4, mine: 8, road: 2, walls: 5, raise: 3, lower: 3 };
+export const JOB_COST: Record<Job, number> = { farm: 5, pasture: 6, forest: 4, mine: 8, fishery: 6, road: 2, walls: 5, raise: 3, lower: 3 };
 
 const TERRAIN_MOVE: Record<Terrain, number> = {
   water: Infinity,
@@ -84,6 +105,21 @@ const TERRAIN_MOVE: Record<Terrain, number> = {
   hills: 2,
   mountain: 3,
 };
+
+// How a unit gets around: land troops walk, boats sail, builders walk and can wade into their own water
+export type MoveMode = 'land' | 'sea' | 'wade';
+
+export function moveMode(type: UnitType): MoveMode {
+  if (UNIT_STATS[type].naval) return 'sea';
+  return type === 'builder' ? 'wade' : 'land';
+}
+
+// Can a unit moving this way ever stand on this tile? (ignores other units)
+export function canEnter(t: Tile, owner: PlayerId | undefined, mode: MoveMode): boolean {
+  if (mode === 'sea') return t.terrain === 'water' || (t.city && owner !== undefined && t.owner === owner);
+  if (t.terrain !== 'water') return true;
+  return mode === 'wade' && owner !== undefined && t.owner === owner;
+}
 
 // Roads (and cities) only speed up their owner: enemy roads are just ground to an invader.
 // owner undefined = anyone's roads count (used for display only).
@@ -94,20 +130,22 @@ const hasRoad = (t: Tile, owner?: PlayerId) => {
 
 export const FOREST_MOVE = 2; // forests are slow to walk through (your own roads still cut through)
 
-export function moveCost(from: Tile, to: Tile, owner?: PlayerId): number {
-  if (to.terrain === 'water') return Infinity;
+export function moveCost(from: Tile, to: Tile, owner?: PlayerId, mode: MoveMode = 'land'): number {
+  if (!canEnter(to, owner, mode)) return Infinity;
+  if (mode === 'sea' || to.terrain === 'water') return 1; // sailing, or a builder wading in
   if (hasRoad(from, owner) && hasRoad(to, owner)) return 0.5;
   if (to.improvement === 'forest' && !(to.road && hasRoad(to, owner))) return Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]);
   return TERRAIN_MOVE[to.terrain];
 }
 
 // Tiles the unit can reach this turn, mapped to moves left on arrival.
-// A unit with full moves can always step onto one adjacent land tile.
+// A unit with full moves can always step onto one adjacent tile it's allowed on.
 export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boolean): Map<Tile, number> {
   const out = new Map<Tile, number>();
   const start = map.get(unit.col, unit.row);
   if (!start || unit.moves <= 0) return out;
   const full = UNIT_STATS[unit.type].moves;
+  const mode = moveMode(unit.type);
   const best = new Map<Tile, number>([[start, unit.moves]]);
   const queue: Tile[] = [start];
   while (queue.length) {
@@ -118,7 +156,7 @@ export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boole
     const left = best.get(cur)!;
     for (const n of map.neighbors(cur)) {
       if (blocked(n)) continue;
-      const cost = moveCost(cur, n, unit.owner);
+      const cost = moveCost(cur, n, unit.owner, mode);
       if (cost === Infinity) continue;
       let after = left - cost;
       if (after < 0) {
@@ -138,7 +176,9 @@ export function reachable(map: WorldMap, unit: Unit, blocked: (t: Tile) => boole
 
 // Cheapest path (by move cost) from the unit to the nearest goal tile. Excludes the start tile.
 // blocked tiles can't be entered. Returns null if no goal can be reached.
-export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (t: Tile) => boolean, owner?: PlayerId): Tile[] | null {
+export function findPath(
+  map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (t: Tile) => boolean, owner?: PlayerId, mode: MoveMode = 'land',
+): Tile[] | null {
   if (goals.has(from)) return [];
   const dist = new Map<Tile, number>([[from, 0]]);
   const prev = new Map<Tile, Tile>();
@@ -183,7 +223,7 @@ export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (
     }
     for (const n of map.neighbors(cur)) {
       if (blocked(n)) continue;
-      const c = moveCost(cur, n, owner);
+      const c = moveCost(cur, n, owner, mode);
       if (c === Infinity) continue;
       const nd = d + c;
       if (nd >= (dist.get(n) ?? Infinity)) continue;
@@ -199,12 +239,13 @@ export function findPath(map: WorldMap, from: Tile, goals: Set<Tile>, blocked: (
 // a unit with full moves can always take one step, even onto costly terrain.
 export function routeTurns(unit: Unit, path: Tile[], from: Tile): number[] {
   const full = UNIT_STATS[unit.type].moves;
+  const mode = moveMode(unit.type);
   let left = unit.moves;
   let turn = 0;
   let cur = from;
   const out: number[] = [];
   for (const t of path) {
-    const c = moveCost(cur, t, unit.owner);
+    const c = moveCost(cur, t, unit.owner, mode);
     if (c <= left) left -= c;
     else if (left === full) left = 0;
     else {
