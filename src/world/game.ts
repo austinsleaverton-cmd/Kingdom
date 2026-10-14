@@ -154,7 +154,7 @@ export const PEACE_RETRY = 3; // an AI said no: wait this long before asking aga
 
 // Fog of war: how far things see (hexes)
 export const UNIT_SIGHT: Record<UnitType, number> = {
-  builder: 2, settler: 2, swordsman: 3, archer: 3, knight: 4, trireme: 3, galleass: 3, transport: 3,
+  builder: 2, settler: 2, scout: 4, swordsman: 3, archer: 3, knight: 4, trireme: 3, galleass: 3, transport: 3,
 };
 export const CITY_SIGHT = 2; // +1 once a city reaches level 3
 export const START_SIGHT = 4; // everyone starts knowing the land this close to their capital
@@ -563,6 +563,7 @@ export class GameState {
     const canCapture = UNIT_STATS[unit.type].canCapture === true;
     const out = reachable(this.map, unit, (t) => {
       if (this.unitAt(t)) return true;
+      if (this.isClosed(t, unit.owner, unit.type)) return true; // closed border at peace
       // Other kingdoms' cities block movement. A destroyed city of someone you're at war with
       // can be walked into (that captures it), but only by capture-capable troops.
       if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
@@ -575,6 +576,40 @@ export class GameState {
       }
     }
     return out;
+  }
+
+  // Closed borders: at peace, another kingdom's land (and water) is off limits to everyone but Scouts.
+  isClosed(t: Tile, p: PlayerId, type: UnitType): boolean {
+    return t.owner !== null && t.owner !== p && this.players[t.owner].alive && !this.atWar(t.owner, p) && !UNIT_STATS[type].scout;
+  }
+
+  // Units standing behind a closed border (peace was just made, or the border grew under them)
+  // get bumped to the closest free hex that's unowned or their own.
+  private expel(p: PlayerId): void {
+    let moved = 0;
+    for (const u of this.unitsOf(p)) {
+      const here = this.tileOf(u);
+      if (!this.isClosed(here, p, u.type)) continue;
+      const mode = moveMode(u.type);
+      let best: Tile | null = null;
+      let bd = Infinity;
+      for (const t of this.map.tiles) {
+        if (this.unitAt(t) || !canEnter(t, p, mode) || this.isClosed(t, p, u.type) || (t.city && t.owner !== p)) continue;
+        const d = hexDistance(here, t);
+        if (d < bd) {
+          bd = d;
+          best = t;
+        }
+      }
+      if (!best) continue;
+      u.col = best.col;
+      u.row = best.row;
+      u.hold = false;
+      this.clearRoute(u);
+      if (this.fog && !this.players[p].isAI) this.markExplored(p, best, UNIT_SIGHT[u.type]);
+      moved++;
+    }
+    if (moved) this.tell(p, `${moved} unit${moved === 1 ? '' : 's'} stepped back over the border (closed at peace)`);
   }
 
   // One of p's transports with a free spot sits on this tile
@@ -594,6 +629,7 @@ export class GameState {
     if (!isLand(tile)) return fail('Unload onto land');
     if (this.unitAt(tile)) return fail('Something is already there');
     if (tile.city && tile.owner !== boat.owner) return fail("Can't unload into someone else's city");
+    if (this.isClosed(tile, boat.owner, boat.cargo[0].type)) return fail(`${this.players[tile.owner!].name}'s border is closed at peace`);
     return { ok: true, cost: 0, reason: '' };
   }
 
@@ -734,6 +770,8 @@ export class GameState {
     delete this.peaceAsked[key];
     this.truces[key] = this.turn;
     this.addLog(`${this.youCap(p)} made peace with ${this.you(q)}`);
+    this.expel(p);
+    this.expel(q);
   }
 
   // Popups waiting for a person (cleared once read)
@@ -1301,6 +1339,7 @@ export class GameState {
     return (t) => {
       const u = this.unitAt(t);
       if (u && u !== unit && (ownBlock || u.owner !== unit.owner)) return true;
+      if (this.isClosed(t, unit.owner, unit.type)) return true;
       if (t.city && t.owner !== null && t.owner !== unit.owner) return t.hp > 0 || !canCapture || !this.isEnemy(t.owner, unit.owner);
       return false;
     };
@@ -1316,6 +1355,9 @@ export class GameState {
       const u = this.unitAt(t);
       return !!u && u !== unit;
     };
+    if (!taken(dest) && !dest.city && this.isClosed(dest, unit.owner, unit.type)) {
+      return fail(`${this.players[dest.owner!].name}'s border is closed at peace: only Scouts can cross`);
+    }
     // Heading for a unit or an enemy city: stop on the best tile next to it (never attacks by itself)
     const nextTo = taken(dest) || blocked(dest);
     if (!nextTo && !canEnter(dest, unit.owner, mode)) {
@@ -1762,6 +1804,7 @@ export class GameState {
       // Units heal on their own land (25% of max HP per turn), not in the field
       if (this.tileOf(u).owner === p) u.hp = Math.min(stats.hp, u.hp + Math.ceil(stats.hp * HOME_HEAL));
     }
+    this.expel(p);
     this.runRoutes(p);
     this.wakeHolders(p);
     this.advanceTraining(p);
