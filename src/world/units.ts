@@ -2,7 +2,7 @@
 import type { WorldMap } from './map';
 import type { Building, PlayerId, Terrain, Tile } from './tile';
 
-export type UnitType = 'builder' | 'settler' | 'swordsman' | 'archer' | 'knight' | 'trireme' | 'galleass' | 'transport';
+export type UnitType = 'builder' | 'settler' | 'scout' | 'swordsman' | 'archer' | 'knight' | 'trireme' | 'galleass' | 'transport';
 
 export interface UnitStats {
   name: string;
@@ -22,12 +22,14 @@ export interface UnitStats {
   carry?: number; // land units it can carry across water
   minLevel?: number; // the city must be at least this level to make it
   needs?: Building; // the city must have this amenity to make it
+  scout?: boolean; // crosses closed borders at peace; hills, mountains and forests cost 1 less
 }
 
 export const UNIT_STATS: Record<UnitType, UnitStats> = {
   // food = upkeep: troops eat more than workers
   builder: { name: 'Builder', letter: 'B', cost: 15, food: 1, moves: 2, train: 0, hp: 10, atk: 0, range: 0, military: false },
   settler: { name: 'Settler', letter: 'S', cost: 0, food: 2, moves: 2, train: 3, hp: 10, atk: 0, range: 0, military: false, minLevel: 2 },
+  scout: { name: 'Scout', letter: 'Sc', cost: 10, food: 1, moves: 3, train: 1, hp: 15, atk: 0, range: 0, military: false, scout: true },
   swordsman: {
     name: 'Swordsman', letter: 'Sw', cost: 25, food: 2, moves: 2, train: 2,
     hp: 30, atk: 8, range: 1, military: true, strongVs: 'archer', canCapture: true,
@@ -55,7 +57,8 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
   },
 };
 
-export const TROOPS: UnitType[] = ['swordsman', 'archer', 'knight'];
+// What a city's Train list offers after Builder and Settler (with rivals in the game)
+export const TROOPS: UnitType[] = ['scout', 'swordsman', 'archer', 'knight'];
 export const NAVY: UnitType[] = ['trireme', 'galleass', 'transport'];
 
 export interface Unit {
@@ -106,11 +109,13 @@ const TERRAIN_MOVE: Record<Terrain, number> = {
   mountain: 3,
 };
 
-// How a unit gets around: land troops walk, boats sail, builders walk and can wade into their own water
-export type MoveMode = 'land' | 'sea' | 'wade';
+// How a unit gets around: land troops walk, boats sail, builders walk and can wade into their own water,
+// scouts walk but take rough ground in stride
+export type MoveMode = 'land' | 'sea' | 'wade' | 'scout';
 
 export function moveMode(type: UnitType): MoveMode {
   if (UNIT_STATS[type].naval) return 'sea';
+  if (UNIT_STATS[type].scout) return 'scout';
   return type === 'builder' ? 'wade' : 'land';
 }
 
@@ -134,8 +139,8 @@ export function moveCost(from: Tile, to: Tile, owner?: PlayerId, mode: MoveMode 
   if (!canEnter(to, owner, mode)) return Infinity;
   if (mode === 'sea' || to.terrain === 'water') return 1; // sailing, or a builder wading in
   if (hasRoad(from, owner) && hasRoad(to, owner)) return 0.5;
-  if (to.improvement === 'forest' && !(to.road && hasRoad(to, owner))) return Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]);
-  return TERRAIN_MOVE[to.terrain];
+  const base = to.improvement === 'forest' && !(to.road && hasRoad(to, owner)) ? Math.max(FOREST_MOVE, TERRAIN_MOVE[to.terrain]) : TERRAIN_MOVE[to.terrain];
+  return mode === 'scout' ? Math.max(1, base - 1) : base; // scouts: rough ground costs 1 less
 }
 
 // Tiles the unit can reach this turn, mapped to moves left on arrival.
