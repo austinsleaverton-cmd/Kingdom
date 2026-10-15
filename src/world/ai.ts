@@ -149,6 +149,7 @@ function pickTroopType(g: GameState, p: PlayerId, city: Tile): UnitType {
   // Knights need horses (pastures) and a big enough city, archers need bows (forests)
   const canHave = (t: UnitType) =>
     (UNIT_STATS[t].minLevel ?? 0) <= cityLevel(city) &&
+    (!UNIT_STATS[t].needs || city.buildings.includes(UNIT_STATS[t].needs!)) &&
     (t === 'knight' ? g.horsesUsed(p) < g.horsesMade(p) : t === 'archer' ? g.bowsUsed(p) < g.bowsMade(p) : true);
   if (cfg.smart) {
     // Counter whatever enemy troops are most common nearby
@@ -160,11 +161,11 @@ function pickTroopType(g: GameState, p: PlayerId, city: Tile): UnitType {
       if (counter && canHave(counter)) return counter;
     }
   }
-  // A couple of Catapults for a war (Normal and Hard): they crack palisades and walls
+  // A couple of Catapults for a war (Normal and Hard): they crack palisades and walls. Only Workshop cities make them.
   if (g.options.difficulty !== 'easy' && g.players.some((q) => q.alive && g.atWar(p, q.id))) {
     const cats = mine.filter((u) => u.type === 'catapult').length + queued(g, p, (t) => t === 'catapult');
     const st = UNIT_STATS.catapult;
-    if (cats < 2 && mine.length >= 3 && (st.minLevel ?? 0) <= cityLevel(city) && g.players[p].stone >= (st.stone ?? 0)) return 'catapult';
+    if (cats < 2 && mine.length >= 3 && canHave('catapult') && g.players[p].stone >= (st.stone ?? 0)) return 'catapult';
   }
   // Default mix: mostly swordsmen (they can capture), some archers, knights when rich
   const archers = mine.filter((u) => u.type === 'archer').length + queued(g, p, (t) => t === 'archer');
@@ -206,7 +207,7 @@ function aiQueue(g: GameState, p: PlayerId): void {
       g.buildWalls(city, p);
       continue;
     }
-    // Nothing else to do: build an amenity if there's spare gold
+    // Nothing else to do: build an amenity if there's spare gold (it goes to the best plot, same as auto-place)
     const b = pickBuilding(g, p, city);
     if (b && g.players[p].gold - BUILDINGS[b].cost >= settlerReserve(g, p) + 10) g.startBuilding(city, b, p);
   }
@@ -225,17 +226,23 @@ function harbors(g: GameState, p: PlayerId): number {
   return myCities(g, p).filter((c) => c.buildings.includes('harbor')).length;
 }
 
-// Unhappy cities get temples and arenas first, hungry kingdoms a granary, otherwise markets
+// Unhappy cities get temples and arenas first, hungry kingdoms a granary or mill, otherwise markets.
+// Plots are limited, so the order matters: the first ones that fit take the space.
 function pickBuilding(g: GameState, p: PlayerId, city: Tile): Building | null {
   const mood = g.mood(city);
   const hungry = g.foodUsed(p) + 2 > g.foodMade(p);
+  const fighting = g.players.some((q) => q.alive && g.atWar(p, q.id));
   const order: Building[] =
     mood === 'unhappy' || mood === 'angry'
-      ? ['temple', 'arena', 'park', 'market', 'granary', 'harbor']
+      ? ['temple', 'arena', 'park', 'market', 'granary', 'mill', 'harbor', 'workshop', 'barracks']
       : hungry
-        ? ['granary', 'harbor', 'market', 'temple', 'park', 'arena']
-        : ['market', 'temple', 'harbor', 'granary', 'park', 'arena'];
-  return order.find((b) => g.buildCheck(city, b, p).ok) ?? null;
+        ? ['granary', 'mill', 'harbor', 'market', 'temple', 'workshop', 'park', 'arena', 'barracks']
+        : fighting
+          ? ['workshop', 'barracks', 'market', 'temple', 'harbor', 'granary', 'mill', 'park', 'arena']
+          : ['market', 'temple', 'harbor', 'workshop', 'granary', 'mill', 'barracks', 'park', 'arena'];
+  // A Mill is only worth it with farms to work
+  const farms = g.cityLand(city).some((t) => t.improvement === 'farm');
+  return order.find((b) => (b !== 'mill' || farms) && g.buildCheck(city, b, p).ok) ?? null;
 }
 
 // ---------- movement helpers ----------

@@ -1,8 +1,9 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
+import { placeExisting, setupPlots } from './city';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
-import { BUILDING_ORDER, LEVEL_POP, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
-import type { PlayerId } from './tile';
+import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
+import type { Building, PlayerId, PlotTerrain } from './tile';
 import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
 
@@ -15,6 +16,10 @@ const MINE = 16;
 const PASTURE = 32;
 const FOREST = 64;
 const FISHERY = 128;
+
+// City View plots: one letter per plot
+const PLOT_CODE: Record<PlotTerrain, string> = { water: 'w', sand: 's', grass: 'g', hills: 'h' };
+const PLOT_FROM: Record<string, PlotTerrain> = { w: 'water', s: 'sand', g: 'grass', h: 'hills' };
 
 interface SaveData {
   version: 3;
@@ -35,6 +40,8 @@ interface SaveData {
   peaceAsked?: Record<string, number>; // pair -> turn an AI refused peace
   explored?: string[]; // fog of war, per player: one '0'/'1' per tile
   palisades?: Record<number, number>; // tile index -> palisade HP
+  // City View, city tile index -> [plot terrain letters, amenity on each plot (BUILDING_ORDER index, -1 none), reserved plot (-1 none)]
+  plots?: Record<number, [string, number[], number]>;
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -69,6 +76,13 @@ export function saveGame(state: GameState): void {
     peaceAsked: state.peaceAsked,
     explored: state.explored.map((a) => Array.from(a).join('')),
     palisades: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.palisade ? [[i, t.palisade]] : []))),
+    plots: Object.fromEntries(
+      state.map.tiles.flatMap((t, i) =>
+        t.city && t.plots.length === PLOT_COUNT
+          ? [[i, [t.plots.map((p) => PLOT_CODE[p]).join(''), t.placed.map((b) => (b ? BUILDING_ORDER.indexOf(b) : -1)), t.projectPlot ?? -1]]]
+          : [],
+      ),
+    ),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -148,6 +162,23 @@ export function loadGame(): GameState | null {
       t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
       t.home = data.homes && data.homes.length === data.tiles.length ? data.homes[i] : null;
       t.palisade = data.palisades?.[i] ?? 0;
+      t.plots = [];
+      t.placed = [];
+      t.projectPlot = null;
+    });
+    // City View plots (second pass: the land around each city has to be loaded first)
+    state.map.tiles.forEach((t, i) => {
+      if (!t.city) return;
+      const saved = data.plots?.[i];
+      if (saved && saved[0].length === PLOT_COUNT && saved[1].length === PLOT_COUNT) {
+        t.plots = saved[0].split('').map((c) => PLOT_FROM[c] ?? 'grass');
+        t.placed = saved[1].map((k): Building | null => (k >= 0 && k < BUILDING_ORDER.length ? BUILDING_ORDER[k] : null));
+        t.projectPlot = t.project && saved[2] >= 0 && saved[2] < PLOT_COUNT ? saved[2] : null;
+      } else {
+        // Older saves: plots from the land around the city, built amenities placed for you
+        setupPlots(state.map, t);
+      }
+      placeExisting(t); // anything built but not on a plot yet gets one
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];
@@ -175,6 +206,10 @@ export function loadGame(): GameState | null {
     state.assignMissingHomes();
     state.cityNames = { ...(data.names ?? {}) };
     state.nameMissingCities();
+    // A half-built amenity from an older save: reserve the plot it will go on
+    for (const c of state.cities()) {
+      if (c.project && c.projectPlot === null && c.owner !== null) c.projectPlot = state.autoPlot(c, c.project, c.owner);
+    }
     // Fog of war: what each kingdom has seen (older saves start with what's in sight now)
     const n = state.map.tiles.length;
     state.explored = state.players.map((_, i) => {
