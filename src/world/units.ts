@@ -46,10 +46,11 @@ export const UNIT_STATS: Record<UnitType, UnitStats> = {
     name: 'Knight', letter: 'Kn', cost: 45, food: 3, moves: 4, train: 3,
     hp: 35, atk: 10, range: 1, military: true, strongVs: 'swordsman', canCapture: true, minLevel: 3,
   },
-  // Siege: wrecks palisades and walls from 2 hexes away, weak in a straight fight, must set up before firing
+  // Siege: wrecks palisades and walls from 2 hexes away, weak in a straight fight, must set up before firing.
+  // Built in a Workshop.
   catapult: {
     name: 'Catapult', letter: 'Ca', cost: 30, food: 2, moves: 2, train: 3,
-    hp: 15, atk: 6, range: 2, military: true, minLevel: 3, stone: 10, vsPalisade: 3, vsCity: 2, setup: true,
+    hp: 15, atk: 6, range: 2, military: true, minLevel: 3, stone: 10, vsPalisade: 3, vsCity: 2, setup: true, needs: 'workshop',
   },
   // Boats: need a Harbor
   trireme: {

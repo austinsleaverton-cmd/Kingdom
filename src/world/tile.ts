@@ -3,7 +3,9 @@
 export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
 export type PlayerId = number; // 0 is always the human player
 export type Improvement = 'farm' | 'mine' | 'pasture' | 'forest' | 'fishery';
-export type Building = 'market' | 'temple' | 'granary' | 'park' | 'arena' | 'harbor';
+export type Building = 'market' | 'temple' | 'granary' | 'park' | 'arena' | 'harbor' | 'barracks' | 'workshop' | 'mill';
+// City View: what a plot around the Keep is like (mountains count as hills)
+export type PlotTerrain = 'water' | 'sand' | 'grass' | 'hills';
 
 export interface Tile {
   col: number;
@@ -30,6 +32,10 @@ export interface Tile {
   project: Building | null; // amenity under construction
   projectTurns: number; // turns until it's done
   palisade?: number; // palisade HP on this tile (missing or 0 = none). Blocks the owner's enemies
+  // City View (city only, empty elsewhere). Plot i faces world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE).
+  plots: PlotTerrain[]; // terrain of each plot, snapshotted when the city is founded
+  placed: (Building | null)[]; // the amenity standing on each plot
+  projectPlot: number | null; // plot reserved for the amenity under construction
 }
 
 export const MAX_HEIGHT = 5;
@@ -48,6 +54,10 @@ export const LEVEL_HP = 10; // extra max hp per level above 1
 
 // Population: a city's level (Village ... Metropolis) comes from how many people live there
 export const LEVEL_POP = [1, 3, 5, 8, 12]; // people needed for level 1..5
+
+// City View: 6 plots around the Keep, opened as the city grows (Village ... Metropolis)
+export const PLOT_COUNT = 6;
+export const PLOTS_BY_LEVEL = [2, 3, 4, 5, 6];
 
 export function levelFromPop(pop: number): number {
   let lvl = 1;
@@ -76,8 +86,13 @@ export interface BuildingInfo {
   culture: number;
   minPop: number;
   coastal?: boolean; // only cities next to water can build it
+  plot?: 'water' | 'hills' | 'grass'; // needs a plot of this kind (no value = any land plot)
+  stone?: number; // stone per turn
   note: string;
 }
+
+export const MILL_FARMS = 3; // a Mill adds 1 food for each worked farm of its city, up to this many
+export const BARRACKS_SPEED = 1; // troops train this many turns faster in a city with a Barracks
 
 export const BUILDINGS: Record<Building, BuildingInfo> = {
   temple: { name: 'Temple', icon: '\u26EA', cost: 30, turns: 3, happy: 2, gold: 0, food: 0, culture: 1, minPop: 1, note: '+2 happy, +1 culture' },
@@ -86,13 +101,25 @@ export const BUILDINGS: Record<Building, BuildingInfo> = {
   park: { name: 'Park', icon: '\u{1F333}', cost: 25, turns: 2, happy: 1, gold: 0, food: 0, culture: 2, minPop: 3, note: '+1 happy, +2 culture' },
   arena: { name: 'Arena', icon: '\u{1F3DF}', cost: 70, turns: 5, happy: 3, gold: 0, food: 0, culture: 1, minPop: 5, note: '+3 happy, +1 culture' },
   harbor: {
-    name: 'Harbor', icon: '\u2693', cost: 40, turns: 3, happy: 0, gold: 1, food: 0, culture: 0, minPop: 2, coastal: true,
-    note: 'builds boats, +1 food per fishery, +1 gold',
+    name: 'Harbor', icon: '\u2693', cost: 40, turns: 3, happy: 0, gold: 1, food: 0, culture: 0, minPop: 2, coastal: true, plot: 'water',
+    note: 'builds boats, +1 food per fishery, +1 gold (water plot)',
+  },
+  barracks: {
+    name: 'Barracks', icon: '\u2694\uFE0F', cost: 35, turns: 3, happy: 0, gold: 0, food: 0, culture: 0, minPop: 2,
+    note: `troops train ${BARRACKS_SPEED} turn faster`,
+  },
+  workshop: {
+    name: 'Workshop', icon: '\u{1F528}', cost: 40, turns: 3, happy: 0, gold: 0, food: 0, culture: 0, minPop: 3, plot: 'hills', stone: 1,
+    note: '+1 stone, builds catapults (hills plot)',
+  },
+  mill: {
+    name: 'Mill', icon: '\u2699\uFE0F', cost: 30, turns: 2, happy: 0, gold: 0, food: 0, culture: 0, minPop: 2, plot: 'grass',
+    note: `+1 food per worked farm, up to ${MILL_FARMS} (grass plot)`,
   },
 };
 
 // New amenities go at the end: saves store built amenities as bits in this order
-export const BUILDING_ORDER: Building[] = ['temple', 'market', 'granary', 'park', 'arena', 'harbor'];
+export const BUILDING_ORDER: Building[] = ['temple', 'market', 'granary', 'park', 'arena', 'harbor', 'barracks', 'workshop', 'mill'];
 
 export function cityMaxHp(tile: Tile): number {
   return (tile.capital ? CAPITAL_HP : CITY_HP) + (cityLevel(tile) - 1) * LEVEL_HP;
@@ -148,6 +175,9 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.buildings = [];
     tile.project = null;
     tile.projectTurns = 0;
+    tile.plots = [];
+    tile.placed = [];
+    tile.projectPlot = null;
   }
 }
 
@@ -193,5 +223,8 @@ export function makeTile(col: number, row: number, height: number): Tile {
     buildings: [],
     project: null,
     projectTurns: 0,
+    plots: [],
+    placed: [],
+    projectPlot: null,
   };
 }
