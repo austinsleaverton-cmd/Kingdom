@@ -1,9 +1,10 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
-import { BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
+import { BARRACKS_SPEED, BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, MILL_FARMS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
+import { bestPlot, cityBonus, describePlacement, noPlotReason, plotFits, plotReason, setupPlots } from './city';
 import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
@@ -329,6 +330,7 @@ export class GameState {
       if (t.city) {
         gold += cityLevel(t) - 1; // bigger cities pay more
         for (const b of t.buildings) gold += BUILDINGS[b].gold;
+        gold += cityBonus(t).gold; // City View placement bonuses
         if (this.mood(t) === 'happy') gold += 1;
       }
     }
@@ -404,10 +406,19 @@ export class GameState {
       else if (t.city) food += CITY_FOOD;
       if (t.city) food += cityLevel(t) - 1;
       if (t.city) for (const b of t.buildings) food += BUILDINGS[b].food;
+      if (t.city) food += cityBonus(t).food + this.millFood(t, worked);
       if (t.improvement === 'farm' && worked.has(t)) food += FARM_FOOD;
       if (t.improvement === 'fishery' && worked.has(t)) food += this.fisheryFood(t);
     }
     return food;
+  }
+
+  // A Mill: +1 food for each worked farm on its city's land (capped)
+  millFood(city: Tile, worked?: Set<Tile>): number {
+    if (!city.buildings.includes('mill') || city.owner === null) return 0;
+    const w = worked ?? this.workedTiles(city.owner);
+    const farms = this.cityLand(city).filter((t) => t.improvement === 'farm' && w.has(t)).length;
+    return Math.min(MILL_FARMS, farms);
   }
 
   // A worked fishery: 2 food, +1 with a Harbor in its city, nothing while enemy ships blockade that city
@@ -466,6 +477,7 @@ export class GameState {
     if (city.capital) parts.push(['Capital', 1]);
     if (!this.players[p].isAI && this.options.difficulty === 'easy') parts.push(['Easy mode', EASY_HAPPY]);
     for (const b of city.buildings) if (BUILDINGS[b].happy) parts.push([BUILDINGS[b].name, BUILDINGS[b].happy]);
+    parts.push(...cityBonus(city).happyParts); // City View placement bonuses (Temple by the Keep)
     const crowd = Math.floor(city.pop / 2);
     if (crowd) parts.push(['Crowding', -crowd]);
     const war = Math.min(3, Math.floor(this.troopsAway(p) / 2));
@@ -530,9 +542,12 @@ export class GameState {
     return this.countTroop(p, 'archer');
   }
 
+  // Worked mines, plus Workshops
   stoneIncome(p: PlayerId): number {
     const worked = this.workedTiles(p);
-    return this.ownedTiles(p).filter((t) => t.improvement === 'mine' && worked.has(t)).length * MINE_STONE;
+    let stone = this.ownedTiles(p).filter((t) => t.improvement === 'mine' && worked.has(t)).length * MINE_STONE;
+    for (const c of this.cities()) if (c.owner === p) for (const b of c.buildings) stone += BUILDINGS[b].stone ?? 0;
+    return stone;
   }
 
   unitsOf(p: PlayerId): Unit[] {
@@ -977,6 +992,7 @@ export class GameState {
   cultureRate(city: Tile): number {
     let n = 1 + Math.floor(city.pop / 3);
     for (const b of city.buildings) n += BUILDINGS[b].culture;
+    n += cityBonus(city).culture; // City View placement bonuses (Park next to the Temple)
     return n;
   }
 
@@ -1021,7 +1037,8 @@ export class GameState {
 
   // ---------- amenities ----------
 
-  buildCheck(city: Tile, b: Building, p: PlayerId = this.current): Check {
+  // plot: a spot picked in the City View. Without one the amenity goes to the best open plot (auto-place).
+  buildCheck(city: Tile, b: Building, p: PlayerId = this.current, plot?: number | null): Check {
     if (this.winner !== null) return fail('Game over');
     if (p !== this.current) return fail('Not your turn');
     if (!city.city || city.owner !== p) return fail('Build in your own city');
@@ -1029,18 +1046,30 @@ export class GameState {
     if (city.buildings.includes(b)) return fail('Already built');
     const busy = this.busyWith(city);
     if (busy) return fail(`Busy ${busy}`);
-    if (city.pop < info.minPop && !this.isSimple(p)) return fail(`Needs ${info.minPop} people`);
+    const simple = this.isSimple(p);
+    if (city.pop < info.minPop && !simple) return fail(`Needs ${info.minPop} people`);
     if (info.coastal && !this.isCoastal(city)) return fail('Needs to be next to water');
+    if (plot !== undefined && plot !== null) {
+      if (!plotFits(city, plot, b, simple)) return fail(plotReason(city, plot, b, simple));
+    } else if (bestPlot(city, b, simple) === null) {
+      return fail(noPlotReason(city, b, simple));
+    }
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
   }
 
-  startBuilding(city: Tile, b: Building, p: PlayerId = this.current): Check {
-    const c = this.buildCheck(city, b, p);
+  // Where an amenity would go if built now (auto-place), or null when there's no room
+  autoPlot(city: Tile, b: Building, p: PlayerId = this.current): number | null {
+    return bestPlot(city, b, this.isSimple(p));
+  }
+
+  startBuilding(city: Tile, b: Building, p: PlayerId = this.current, plot?: number | null): Check {
+    const c = this.buildCheck(city, b, p, plot);
     if (!c.ok) return c;
     this.players[p].gold -= c.cost;
     city.project = b;
     city.projectTurns = BUILDINGS[b].turns;
+    city.projectPlot = plot ?? this.autoPlot(city, b, p); // reserved, so nothing else can take it
     return c;
   }
 
@@ -1050,10 +1079,20 @@ export class GameState {
       c.projectTurns -= 1;
       if (c.projectTurns > 0) continue;
       const b = c.project;
+      let at = c.projectPlot;
       c.project = null;
       c.projectTurns = 0;
+      c.projectPlot = null;
+      // Reserved plot gone (old save, or something odd): take the best free one, ignoring size locks
+      if (at === null || c.placed[at]) at = bestPlot(c, b, true);
+      if (at === null) {
+        const free = c.placed.findIndex((x) => !x);
+        at = free >= 0 ? free : null;
+      }
+      if (at !== null) c.placed[at] = b;
       if (!c.buildings.includes(b)) c.buildings.push(b);
-      this.tell(p, `${this.cityName(c)} finished its ${BUILDINGS[b].name}`);
+      const where = at !== null ? ` on ${describePlacement(c, at, b)}` : '';
+      this.tell(p, `${this.cityName(c)} finished its ${BUILDINGS[b].name}${where}`);
     }
   }
 
@@ -1220,6 +1259,7 @@ export class GameState {
     tile.hp = cityMaxHp(tile);
     tile.walls = 0;
     tile.shield = 0;
+    setupPlots(this.map, tile); // City View: plots take the terrain around the city
     for (const n of this.map.neighbors(tile)) {
       if (n.owner === null && isLand(n)) {
         n.owner = p;
@@ -1243,7 +1283,7 @@ export class GameState {
     const busy = stats.train > 0 ? this.busyWith(city) : '';
     if (busy) return fail(`Busy ${busy}`);
     if (stats.needs && !city.buildings.includes(stats.needs)) {
-      return fail(this.isCoastal(city) ? `Needs a ${BUILDINGS[stats.needs].name}` : 'Only coastal cities build boats');
+      return fail(stats.needs === 'harbor' && !this.isCoastal(city) ? 'Only coastal cities build boats' : `Needs a ${BUILDINGS[stats.needs].name}`);
     }
     const simple = this.isSimple(p);
     if (stats.minLevel && cityLevel(city) < stats.minLevel && !simple) {
@@ -1260,6 +1300,16 @@ export class GameState {
     return gold >= cost ? { ok: true, cost, reason: '' } : fail(`Need ${cost} gold`, cost);
   }
 
+  // Turns a unit takes to train in this city: a Metropolis and a Barracks (troops only) each take a turn off
+  trainTurns(type: UnitType, city: Tile): number {
+    const stats = UNIT_STATS[type];
+    if (stats.train <= 0) return 0;
+    let turns = stats.train;
+    if (cityLevel(city) >= MAX_LEVEL) turns -= 1;
+    if (stats.military && city.buildings.includes('barracks')) turns -= BARRACKS_SPEED;
+    return Math.max(1, turns);
+  }
+
   // Returns the new unit, 'queued' if it needs training time, or null if not allowed.
   recruit(type: UnitType, city: Tile, p: PlayerId = this.current): Unit | 'queued' | null {
     const c = this.recruitCheck(type, city, p);
@@ -1268,9 +1318,7 @@ export class GameState {
     const stats = UNIT_STATS[type];
     if (stats.stone && !this.isFree(p)) this.players[p].stone -= stats.stone;
     if (stats.train > 0) {
-      // Metropolis (level 5) trains a turn faster
-      const turns = Math.max(1, stats.train - (cityLevel(city) >= MAX_LEVEL ? 1 : 0));
-      this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: turns });
+      this.training.push({ type, owner: p, col: city.col, row: city.row, turnsLeft: this.trainTurns(type, city) });
       return 'queued';
     }
     const at = this.spawnTile(city, type)!;
@@ -1591,8 +1639,9 @@ export class GameState {
     city.level = levelFromPop(city.pop);
     city.growth = 0;
     city.culture = 0;
-    city.project = null; // half-built amenities are lost
+    city.project = null; // half-built amenities are lost (finished ones keep their plots)
     city.projectTurns = 0;
+    city.projectPlot = null;
     city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
     city.shield = 0;
     city.wallTurns = 0; // half-built walls are lost
@@ -1974,6 +2023,7 @@ export class GameState {
       best.level = 1;
       best.pop = 1;
       best.hp = cityMaxHp(best);
+      setupPlots(this.map, best); // City View: plots take the terrain around the capital
       // Water next to the capital stays water, so a capital can be coastal (Harbor, boats, fisheries)
       for (const n of this.map.neighbors(best)) {
         if (n.owner === null) {
