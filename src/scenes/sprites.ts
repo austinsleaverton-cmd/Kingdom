@@ -85,6 +85,11 @@ export const UNIT_SPRITE: Record<UnitType, string> = {
   transport: 'px-transport',
 };
 
+// Shared with the City View (citySprites.ts), which draws the same people as SVG pixels
+export { PALETTE };
+export type { Frames };
+export const GRIDS = { FARMER, FISHER, SWORDSMAN, ARCHER, KNIGHT, BUILDER, CATAPULT, SETTLER, TRIREME };
+
 // Paint every sprite once and register a looping animation under the same key
 export function makeSprites(scene: Phaser.Scene): void {
   const all: [string, Frames, number][] = [

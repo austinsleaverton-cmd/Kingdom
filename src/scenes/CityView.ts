@@ -5,6 +5,7 @@ import type { GameState } from '../world/game';
 import { ADJACENCY, TERRAIN_BONUS, bestPlot, cityBonus, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, PlotTerrain, Tile } from '../world/tile';
+import { PX_CSS, builderActors, keepActors, plotActors } from './citySprites';
 
 export interface CityViewHandlers {
   onChange(): void; // something was built: redraw and save
@@ -54,7 +55,7 @@ function ensureStyle(): void {
   if (styled) return;
   styled = true;
   const s = document.createElement('style');
-  s.textContent = CSS;
+  s.textContent = CSS + PX_CSS;
   document.head.appendChild(s);
 }
 
@@ -208,7 +209,7 @@ export class CityView {
     svg +=
       `<g data-plot="keep"><polygon points="${hexPoints(0, 0, R - 2)}" fill="#2a2f3a" stroke="${keepSel ? '#facc15' : '#9ca3af'}" stroke-width="${keepSel ? 4 : 2 + c.walls}"/>` +
       `<text x="0" y="2" font-size="30" text-anchor="middle">\u{1F3F0}</text>` +
-      `<text x="0" y="26" font-size="11" fill="#e5e7eb" text-anchor="middle">Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}</text></g>`;
+      `<text x="0" y="26" font-size="11" fill="#e5e7eb" text-anchor="middle">Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}</text>${keepActors(c.walls)}</g>`;
     for (let i = 0; i < PLOT_COUNT; i++) {
       const [dx, dy] = DIR_XY[i];
       const x = dx * R;
@@ -221,10 +222,12 @@ export class CityView {
       let inner = '';
       if (b) {
         inner = `<text x="${x}" y="${y + 2}" font-size="28" text-anchor="middle">${BUILDINGS[b].icon}</text>` +
-          `<text x="${x}" y="${y + 24}" font-size="11" font-weight="600" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${esc(BUILDINGS[b].name)}</text>`;
+          `<text x="${x}" y="${y + 24}" font-size="11" font-weight="600" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${esc(BUILDINGS[b].name)}</text>` +
+          plotActors(b, x, y, i);
       } else if (proj) {
         inner = `<text x="${x}" y="${y + 2}" font-size="28" text-anchor="middle" opacity="0.45">${BUILDINGS[proj].icon}</text>` +
-          `<text x="${x}" y="${y + 24}" font-size="11" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${c.projectTurns}t left</text>`;
+          `<text x="${x}" y="${y + 24}" font-size="11" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${c.projectTurns}t left</text>` +
+          builderActors(x, y, i);
       } else if (locked) {
         inner = `<text x="${x}" y="${y + 4}" font-size="20" text-anchor="middle">\u{1F512}</text>` +
           `<text x="${x}" y="${y + 24}" font-size="10" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${LEVEL_NAMES[plotLevel(i)]}</text>`;
