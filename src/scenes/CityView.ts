@@ -2,7 +2,7 @@
 // A DOM overlay like the HUD: it reads the world and only changes it through GameState methods.
 // Plot i is drawn in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
 import type { GameState } from '../world/game';
-import { ADJACENCY, TERRAIN_BONUS, bestPlot, cityBonus, openPlots, plotBonus, plotNeighbors, plotTerrain } from '../world/city';
+import { ADJACENCY, TERRAIN_BONUS, bestPlot, cityBonus, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, PlotTerrain, Tile } from '../world/tile';
 
@@ -96,6 +96,12 @@ export function placementNotes(city: Tile, i: number, b: Building): string[] {
 // "+1 gold: Market next to the Harbor" -> "+1 gold"
 export function shortNotes(notes: string[]): string {
   return notes.map((n) => n.split(':')[0]).join(', ');
+}
+
+// Does the city have any plot this amenity can stand on? (no water plot = no Harbor, no hills = no Workshop)
+export function hasPlotFor(city: Tile, b: Building): boolean {
+  const need = BUILDINGS[b].plot;
+  return need ? city.plots.includes(need) : city.plots.some((t) => t !== 'water');
 }
 
 // The city level at which plot i opens
@@ -255,7 +261,7 @@ export class CityView {
       return (
         `<h3>\u{1F3F0} Keep</h3>` +
         `<p>Health ${c.hp}/${cityMaxHp(c)} \u00b7 walls ${c.walls}/${MAX_WALLS}${c.walls ? ` (${c.shield}/${shieldMax(c)})` : ''}. Walls are built from the city panel (Defense).</p>` +
-        `<p>Every plot touches the Keep. Tap a plot to build on it.</p>` +
+        `<p>Tap a plot to build on it. Neighbors matter: see the bonuses below.</p>` +
         `<h3>Bonuses in this city</h3>` +
         (bonus.length ? `<p class="k-good">${bonus.map(esc).join('<br>')}</p>` : `<p>None yet. Put amenities next to the right neighbors to earn extra.</p>`)
       );
@@ -283,17 +289,21 @@ export class CityView {
       const k = plotLevel(i);
       return `<h3>\u{1F512} ${PLOT_NAME[t]} plot</h3><p>Opens when ${esc(s.cityName(c))} grows into a ${LEVEL_NAMES[k]} (${LEVEL_POP[k]} people).</p>`;
     }
-    // Empty plot: everything not built yet, the ones that fit first
-    const rows = BUILDING_ORDER.filter((x) => !c.buildings.includes(x) && c.project !== x).map((x) => {
+    // Empty plot: everything not built yet that this city has a plot for, the ones that fit here first.
+    // While the city is busy the list stays readable (dimmed, with its bonuses) and the reason shows once on top.
+    const busy = s.busyWith(c);
+    const rows = BUILDING_ORDER.filter((x) => !c.buildings.includes(x) && c.project !== x && hasPlotFor(c, x)).map((x) => {
       const check = s.buildCheck(c, x, this.me, i);
-      return { b: x, check, notes: check.ok ? placementNotes(c, i, x) : [], best: check.ok && bestPlot(c, x, simple) === i };
+      const fits = plotFits(c, i, x, simple);
+      return { b: x, check, fits, notes: fits ? placementNotes(c, i, x) : [], best: fits && bestPlot(c, x, simple) === i };
     });
-    rows.sort((a, z) => Number(z.check.ok) - Number(a.check.ok));
+    rows.sort((a, z) => Number(z.check.ok) - Number(a.check.ok) || Number(z.fits) - Number(a.fits));
     const list = rows
-      .map(({ b: x, check, notes, best }) => {
+      .map(({ b: x, check, fits, notes, best }) => {
         const info = BUILDINGS[x];
-        const cost = check.cost ? `${check.cost}g` : 'free';
-        const detail = check.ok ? `${cost} \u00b7 ${info.turns}t \u00b7 ${info.note}` : check.reason;
+        const cost = s.isFree(this.me) ? 'free' : `${info.cost}g`;
+        const busyOnly = !!busy && fits && check.reason.startsWith('Busy');
+        const detail = check.ok || busyOnly ? `${cost} \u00b7 ${info.turns}t \u00b7 ${info.note}` : check.reason;
         return (
           `<button type="button" data-build="${x}"${check.ok ? '' : ' disabled'}${best ? ' class="k-best"' : ''}>` +
           `<b>${info.icon} ${esc(info.name)}${best ? ' \u2605' : ''}</b><small>${esc(detail)}</small>` +
@@ -302,10 +312,9 @@ export class CityView {
         );
       })
       .join('');
-    const busy = s.busyWith(c);
     return (
       `<h3>${PLOT_NAME[t]} plot ${i + 1}</h3>` +
-      `<p>${busy ? `Busy ${esc(busy)}: one project at a time.` : 'Pick what to build here.'}</p>` +
+      `<p>${busy ? `<b>Busy ${esc(busy)}</b>: one project at a time. Here's what each would earn on this plot.` : 'Pick what to build here.'}</p>` +
       `<div class="k-city-list">${list || '<p>Everything is built.</p>'}</div>`
     );
   }

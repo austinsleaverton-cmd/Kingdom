@@ -9,7 +9,7 @@ import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS
 import type { Building, Improvement, Terrain, Tile } from '../world/tile';
 import { JOBS, NAVY, PALISADE_HP, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
-import { CityView, placementNotes, shortNotes, showToast } from './CityView';
+import { CityView, hasPlotFor, placementNotes, shortNotes, showToast } from './CityView';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
 import { Menu } from './Menu';
@@ -18,6 +18,7 @@ import { UNIT_SPRITE, WORKER_SPRITE, makeSprites } from './sprites';
 const SIZE = 28; // hex radius in px
 const SQRT3 = Math.sqrt(3);
 const DRAG_THRESHOLD = 6;
+const DOUBLE_TAP_MS = 320; // two taps on your own city this close together open the City View
 
 const HEIGHT_COLOR = [0x1f5f9e, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
 const TERRAIN_NAME: Record<Terrain, string> = {
@@ -73,6 +74,8 @@ export class MapScene extends Phaser.Scene {
   private unitSprites: Phaser.GameObjects.Sprite[] = [];
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
   private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
+  private cityIcons: Phaser.GameObjects.Text[] = []; // a few amenity icons above each city
+  private lastTap: { tile: Tile; at: number } | null = null; // for double-tap on a city
   private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
   private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
   private hoverPlan: { unitId: number; tile: Tile; plan: RoutePlan } | null = null; // cached for the tooltip
@@ -121,7 +124,10 @@ export class MapScene extends Phaser.Scene {
     const small = this.cameras.main.zoom < WORKER_ZOOM;
     if (small === this.smallZoom) return;
     this.smallZoom = small;
-    if (this.state) this.drawWorkers(this.state);
+    if (this.state) {
+      this.drawWorkers(this.state);
+      this.drawOwners(this.state); // city amenity icons hide when zoomed far out too
+    }
   }
 
   // ---------- flow ----------
@@ -407,6 +413,19 @@ export class MapScene extends Phaser.Scene {
         break;
       }
       case 'select': {
+        // Quick double-tap on your own city: open it (a slower second tap still picks the unit standing there)
+        const now = Date.now();
+        const tap = this.lastTap;
+        this.lastTap = { tile, at: now };
+        if (tile.city && tile.owner === this.me && tap && tap.tile === tile && now - tap.at < DOUBLE_TAP_MS) {
+          this.lastTap = null;
+          this.routePreview = null;
+          this.selectedUnitId = null;
+          this.selected = tile;
+          this.redraw();
+          this.openCity(tile);
+          return;
+        }
         const unit = this.selectedUnit;
         const rival = this.rivalCapital(state, tile);
         if (unit && state.tileOf(unit) === tile) {
@@ -1188,6 +1207,7 @@ export class MapScene extends Phaser.Scene {
     for (const b of BUILDING_ORDER) {
       if (city.buildings.includes(b)) continue;
       if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // inland: no Harbor
+      if (!hasPlotFor(city, b)) continue; // no plot it can stand on (no hills: no Workshop)
       const info = BUILDINGS[b];
       const c = state.buildCheck(city, b, this.me);
       const doing = city.project === b;
@@ -1211,7 +1231,7 @@ export class MapScene extends Phaser.Scene {
       summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${plotsUsed}/${plotsOpen} plots`,
       lines: [
         built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
-        'Buttons pick the best plot for you. Open city (O) to choose the spot yourself.',
+        'Buttons pick the best plot for you. Open city (O or double-tap the city) to choose the spot yourself.',
       ],
       buttons: buildButtons,
       grid: true,
@@ -1573,10 +1593,12 @@ export class MapScene extends Phaser.Scene {
         }
         this.drawCity(g, x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
+        this.cityIcon(names, x, y, t);
         this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
+    for (let i = names; i < this.cityIcons.length; i++) this.cityIcons[i].setVisible(false);
   }
 
   // Explored land that's out of sight right now gets a dark veil
@@ -1631,6 +1653,17 @@ export class MapScene extends Phaser.Scene {
     const bg = `#${color.toString(16).padStart(6, '0')}`;
     const text = `${capital ? '\u2605 ' : ''}${name} ${pop} ${face}`;
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
+  }
+
+  // Up to 3 amenity icons above a city (the latest ones built), so you can read a city's build from the map
+  private cityIcon(i: number, x: number, y: number, t: Tile): void {
+    let label = this.cityIcons[i];
+    if (!label) {
+      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '10px' }).setOrigin(0.5).setDepth(4.1);
+      this.cityIcons.push(label);
+    }
+    const icons = t.buildings.slice(-3).map((b) => BUILDINGS[b].icon).join('');
+    label.setText(icons).setPosition(x, y - (t.capital ? 31 : 21)).setVisible(icons.length > 0 && !this.smallZoom);
   }
 
   // Health bar (only when damaged) with the wall shield bar above it.
