@@ -240,9 +240,13 @@ function pickBuilding(g: GameState, p: PlayerId, city: Tile): Building | null {
         : fighting
           ? ['workshop', 'barracks', 'market', 'temple', 'harbor', 'granary', 'mill', 'park', 'arena']
           : ['market', 'temple', 'harbor', 'workshop', 'granary', 'mill', 'barracks', 'park', 'arena'];
-  // A Mill is only worth it with farms to work
+  // A Mill is only worth it with farms to work. Barracks only for a war, in at most half the cities
+  // (plots are scarce, and faster training doesn't help a city that never trains troops).
   const farms = g.cityLand(city).some((t) => t.improvement === 'farm');
-  return order.find((b) => (b !== 'mill' || farms) && g.buildCheck(city, b, p).ok) ?? null;
+  const cities = myCities(g, p);
+  const barracks = cities.filter((c) => c.buildings.includes('barracks') || c.project === 'barracks').length;
+  const wantBarracks = fighting && barracks < Math.ceil(cities.length / 2);
+  return order.find((b) => (b !== 'mill' || farms) && (b !== 'barracks' || wantBarracks) && g.buildCheck(city, b, p).ok) ?? null;
 }
 
 // ---------- movement helpers ----------

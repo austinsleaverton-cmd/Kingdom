@@ -21,10 +21,11 @@ export const TERRAIN_BONUS: (Amounts & { b: Building; t: PlotTerrain; note: stri
   { b: 'granary', t: 'grass', food: 1, note: 'on grass' },
 ];
 
-// Neighbor bonuses: the amenity next to another one (or the Keep). The bonus goes to the first one.
+// Neighbor bonuses: the amenity next to another one (or the Keep, once ring 2 exists). The bonus goes to the first one.
+// v1 has no Keep rules: every ring-1 plot touches the Keep, so they'd be free.
 export const ADJACENCY: (Amounts & { b: Building; next: Building | 'keep'; note: string })[] = [
-  { b: 'temple', next: 'keep', happy: 1, note: 'by the Keep' },
   { b: 'market', next: 'harbor', gold: 1, note: 'next to the Harbor' },
+  { b: 'mill', next: 'granary', food: 1, note: 'next to the Granary' },
   { b: 'park', next: 'temple', culture: 1, note: 'next to the Temple' },
   { b: 'arena', next: 'market', gold: 1, note: 'next to the Market' },
 ];

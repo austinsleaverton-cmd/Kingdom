@@ -1,12 +1,13 @@
 // The "?" button (top-right, always visible: start screen and in game) and the rules guide it opens.
 // Numbers come straight from src/world so the guide stays right when the rules change.
+import { ADJACENCY, TERRAIN_BONUS } from '../world/city';
 import {
   ANGRY_AT, ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SIGHT, CITY_SPACING, CLAIM_RADIUS,
   DIFFICULTY, EASY_HAPPY, FARM_FOOD, FISHERY_FOOD, HAPPY_AT, HAPPY_BASE, HARBOR_FISH, HOME_HEAL, KNIGHTS_PER_PASTURE, MAX_POP, MINE_STONE,
   MIN_WAR_TURNS, MOOD_FACE, PEACE_RETRY, PILLAGE_GOLD, START_SIGHT, TRUCE_TURNS, UNHAPPY_AT, UNIT_SIGHT, WIN_SHARE, troopUpkeep,
 } from '../world/game';
 import type { Difficulty } from '../world/game';
-import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
+import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
 import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS } from '../world/units';
 
 const CSS = `
@@ -55,6 +56,13 @@ function difficultyTable(): string {
   );
 }
 
+// "Granary on grass: +1 food", "Market next to the Harbor: +1 gold", straight from the rules
+function bonusList(): string {
+  const amount = (r: { gold?: number; food?: number; happy?: number; culture?: number }) =>
+    [r.gold && `+${r.gold} gold`, r.food && `+${r.food} food`, r.happy && `+${r.happy} happy`, r.culture && `+${r.culture} culture`].filter(Boolean).join(', ');
+  return [...TERRAIN_BONUS, ...ADJACENCY].map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${amount(r)}</li>`).join('');
+}
+
 function guideHtml(): string {
   const u = UNIT_STATS;
   const lvl = (n: number | undefined) => (n ? `${LEVEL_NAMES[n - 1]} (${LEVEL_POP[n - 1]} people)` : '');
@@ -78,8 +86,8 @@ function guideHtml(): string {
       'Gold, food, stone',
       `<ul><li><b>Gold</b> each turn: <b>worked improvements only</b> pay terrain gold (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}, water ${YIELD.water}). Bare land and idle improvements pay nothing; roads and palisades alone do not produce gold. Cities separately pay ${CITY_INCOME} each (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets and Harbors, +1 per happy city.</li>` +
         `<li><b>Troops get paid</b> every turn: ${troopUpkeep('swordsman')} gold for a Swordsman or Archer, ${troopUpkeep('knight')} for a Knight, ${troopUpkeep('trireme')} for a Trireme, ${troopUpkeep('galleass')} for a Galleass. Builders, settlers and transports are free.</li>` +
-        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, each worked fishery ${FISHERY_FOOD} (+${HARBOR_FISH} with a Harbor), +1 per city level, Granaries +2. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
-        `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn. Used for city walls, palisades and catapults.</li>` +
+        `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, each worked fishery ${FISHERY_FOOD} (+${HARBOR_FISH} with a Harbor), +1 per city level, Granaries +2, Mills +1 per worked farm. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
+        `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn, each Workshop 1. Used for city walls, palisades and catapults.</li>` +
         `<li><b>Horses</b>: each worked pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each worked forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
     ),
     sec(
@@ -96,8 +104,8 @@ function guideHtml(): string {
       'People',
       `<ul><li>Spare food fills a city's growth bar; a full bar is one more person (up to ${MAX_POP}). Happy cities grow 50% faster.</li>` +
         `<li><b>People are workers</b>: each person works one farm, fishery, mine, pasture or forest on the city's land (the city takes turns between the kinds). Only those worked improvements earn terrain gold. Extra ones sit idle and make nothing until the city grows.</li>` +
-        `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food and health; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
-        `<li>The number on a city's name tag is its people; the face is its mood.</li></ul>`,
+        `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food, health and one more building plot; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
+        `<li>The number on a city's name tag is its people; the face is its mood. The little icons above a city are its latest amenities.</li></ul>`,
     ),
     sec(
       'Happiness',
@@ -109,10 +117,19 @@ function guideHtml(): string {
       `<table><tr><th>Amenity</th><th>Gold</th><th>Turns</th><th>Needs</th><th>Does</th></tr>` +
         BUILDING_ORDER.map((b) => {
           const i = BUILDINGS[b];
-          return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people${i.coastal ? ', next to water' : ''}</td><td>${i.note}</td></tr>`;
+          return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people${i.plot ? `, a ${i.plot} plot` : ''}</td><td>${i.note}</td></tr>`;
         }).join('') +
-        `</table><ul><li>Built from the city panel. While a city builds one it can't train troops or build walls (builders still work).</li>` +
-        `<li>Losing the city loses a half-built amenity; finished ones stay.</li></ul>`,
+        `</table><ul><li>Built from the city panel or the City View. While a city builds one it can't train troops or build walls (builders still work).</li>` +
+        `<li>Losing the city loses a half-built amenity; finished ones stay, on the same plots.</li></ul>`,
+    ),
+    sec(
+      'City View (building plots)',
+      `<ul><li>Every amenity stands on a <b>plot</b> around the city's Keep. There are ${PLOT_COUNT} plots; a ${LEVEL_NAMES[0]} can use ${PLOTS_BY_LEVEL[0]}, and each bigger size opens one more (${LEVEL_NAMES.map((n, k) => `${n} ${PLOTS_BY_LEVEL[k]}`).join(', ')}).</li>` +
+        `<li>Each plot takes the terrain of the map hex in that direction: water next to the city gives a water plot (for a Harbor), hills give a hills plot (for a Workshop). Mountains count as hills.</li>` +
+        `<li><b>Open the city</b>: double-tap your city, press <kbd>O</kbd>, or use Open city in the city panel. Tap a plot to see what fits there and what each building would earn on that exact spot. \u2605 marks the best spot.</li>` +
+        `<li>A quick double-tap opens the city. Tap once, then again a moment later, to pick the unit standing in it.</li>` +
+        `<li>The build buttons in the city panel <b>place it for you</b> on the best open plot, and tell you where it went.</li>` +
+        `<li><b>Placement bonuses</b> (neighbors are the plots on either side):<ul>${bonusList()}</ul></li></ul>`,
     ),
     sec(
       'Builders',
@@ -133,8 +150,9 @@ function guideHtml(): string {
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
-        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]}</td></tr></table>` +
+        `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]} with a Workshop</td></tr></table>` +
         `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
+        `<li>A Barracks trains troops a turn faster (stacks with a ${LEVEL_NAMES[4]}, never under 1 turn).</li>` +
         `<li>Each unit can attack once per turn. Close-up fights hit back.</li>` +
         `<li>Hills, forests and your own cities protect defenders.</li>` +
         `<li>Units heal ${pct(HOME_HEAL)} a turn on your own land (or water), not in the field.</li>` +
@@ -187,7 +205,7 @@ function guideHtml(): string {
       'Controls',
       `<ul><li>Drag to move the map, pinch or scroll to zoom.</li>` +
         `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route, <kbd>Esc</kbd> deselect / menu.</li>` +
-        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land. Troops: <kbd>L</kbd> pillage.</li>` +
+        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land, <kbd>O</kbd> open the City View (or double-tap the city). Troops: <kbd>L</kbd> pillage.</li>` +
         `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>E</kbd> palisade, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li></ul>`,
     ),
   ].join('');
