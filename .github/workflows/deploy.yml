@@ -1,8 +1,11 @@
 name: Deploy to GitHub Pages
 
+# One Pages site per repo, so every deploy builds both branches:
+# main = the live game at the root, dev = the test build at /dev/.
+# Pages replaces the whole site each time, so both must be built together.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -19,17 +22,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          path: dev
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci || npm install
+          cache-dependency-path: |
+            main/package-lock.json
+            dev/package-lock.json
       # vite build only (skips tsc so old unused stub files can't block the deploy)
-      - run: npx vite build
+      - name: Build main (live game)
+        working-directory: main
+        run: |
+          npm ci || npm install
+          npx vite build
+      - name: Build dev (test build, own save slot)
+        working-directory: dev
+        env:
+          VITE_CHANNEL: dev
+        run: |
+          npm ci || npm install
+          npx vite build
+      - name: Put dev under /dev/
+        run: |
+          mkdir -p site/dev
+          cp -r main/dist/. site/
+          cp -r dev/dist/. site/dev/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: site
 
   deploy:
     needs: build
