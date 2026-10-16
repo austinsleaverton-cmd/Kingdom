@@ -2,6 +2,9 @@ import Phaser from 'phaser';
 import { MapScene } from './scenes/MapScene';
 import { installHelp } from './scenes/Help';
 
+// The test build at /dev/ (built with VITE_CHANNEL=dev) says so in the tab / app switcher
+if (import.meta.env.VITE_CHANNEL === 'dev') document.title = `${document.title} (dev)`;
+
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'game',
