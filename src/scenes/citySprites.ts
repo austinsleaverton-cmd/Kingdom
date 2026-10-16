@@ -1,8 +1,10 @@
-// Little pixel people inside the City View: who's at work on each plot (soldiers drilling at the Barracks,
-// a smith at the Workshop, builders on a plot under construction). Same 8-bit style as the map sprites,
-// drawn as SVG pixels so the City View stays plain DOM. Two frames loop with CSS, like the map's animations.
+// Little pixel people inside a city: who's at work on each plot (soldiers drilling at the Barracks,
+// a smith at the Workshop, builders on a plot under construction). Same 8-bit style as the map sprites.
+// The city screen (CityScene.ts) uses them as Phaser sprites: makeCitySprites paints the extra people once
+// and the PLOT_PEOPLE tables say who stands where. The old SVG helpers below are kept for now.
+import Phaser from 'phaser';
 import type { Building } from '../world/tile';
-import { GRIDS, PALETTE } from './sprites';
+import { GRIDS, PALETTE, makeSprites } from './sprites';
 import type { Frames } from './sprites';
 
 const PAL: Record<string, number> = { ...PALETTE, p: 0x7c3aed, u: 0xf5f5f4, d: 0xfacc15 }; // purple, white robe, gold
@@ -31,13 +33,83 @@ const VILLAGER: Frames = [
   ['...mmm..', '...sss..', '...sss..', '..bbbb..', '..sbbs..', '...bb...', '...bb...', '...bb...', '...bb...', '...kk...'],
 ];
 
-interface Actor {
-  f: Frames;
+// ---------- Phaser sprites (city screen) ----------
+
+// One person on the city screen: a sprite key (map sprites from sprites.ts or the extras below) and how fast it loops
+export interface PxActor {
+  key: string;
   fps: number;
   flip?: boolean; // mirrored, so the pair faces each other
 }
 
-// Who's on each plot: one left of the building icon, one right
+const EXTRA: [string, Frames][] = [
+  ['px-smith', SMITH],
+  ['px-merchant', MERCHANT],
+  ['px-priest', PRIEST],
+  ['px-villager', VILLAGER],
+];
+
+// Who's on each plot: one left of the building, one right
+export const PLOT_PEOPLE: Record<Building, PxActor[]> = {
+  barracks: [{ key: 'px-swordsman', fps: 4 }, { key: 'px-swordsman', fps: 4, flip: true }],
+  workshop: [{ key: 'px-smith', fps: 3 }, { key: 'px-catapult', fps: 1.5, flip: true }],
+  mill: [{ key: 'px-farmer', fps: 2.5 }, { key: 'px-settler', fps: 2, flip: true }],
+  granary: [{ key: 'px-farmer', fps: 2.5 }, { key: 'px-settler', fps: 2, flip: true }],
+  market: [{ key: 'px-merchant', fps: 2 }, { key: 'px-villager', fps: 3, flip: true }],
+  harbor: [{ key: 'px-fisher', fps: 1.5 }, { key: 'px-trireme', fps: 2, flip: true }],
+  temple: [{ key: 'px-priest', fps: 1.5 }, { key: 'px-villager', fps: 1, flip: true }],
+  park: [{ key: 'px-villager', fps: 3 }, { key: 'px-villager', fps: 2.5, flip: true }],
+  arena: [{ key: 'px-knight', fps: 2.5 }, { key: 'px-knight', fps: 2.5, flip: true }],
+};
+
+// Two builders hammering away on a plot under construction
+export const BUILDER_PEOPLE: PxActor[] = [{ key: 'px-builder', fps: 3 }, { key: 'px-builder', fps: 3, flip: true }];
+
+// A guard by the Keep, plus an archer on the walls once it has some
+export function keepPeople(walls: number): PxActor[] {
+  return walls > 0 ? [{ key: 'px-archer', fps: 1.5 }, { key: 'px-swordsman', fps: 1.5, flip: true }] : [{ key: 'px-swordsman', fps: 1.5, flip: true }];
+}
+
+// Paint the city-only people once (the map people come from makeSprites) and register their animations
+export function makeCitySprites(scene: Phaser.Scene): void {
+  makeSprites(scene);
+  for (const [key, frames] of EXTRA) {
+    if (!scene.textures.exists(key)) paintPx(scene, key, frames);
+    if (!scene.anims.exists(key)) {
+      scene.anims.create({ key, frames: frames.map((_, i) => ({ key, frame: String(i) })), frameRate: 2, repeat: -1 });
+    }
+  }
+}
+
+function paintPx(scene: Phaser.Scene, key: string, frames: Frames): void {
+  const w = Math.max(...frames.flat().map((r) => r.length));
+  const h = Math.max(...frames.map((f) => f.length));
+  const tex = scene.textures.createCanvas(key, w * frames.length, h);
+  if (!tex) return;
+  const ctx = tex.getContext();
+  frames.forEach((rows, f) => {
+    rows.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        const c = PAL[row[x]];
+        if (c === undefined) continue;
+        ctx.fillStyle = `#${c.toString(16).padStart(6, '0')}`;
+        ctx.fillRect(f * w + x, y, 1, 1);
+      }
+    });
+    tex.add(String(f), 0, f * w, 0, w, h);
+  });
+  tex.refresh();
+  tex.setFilter(Phaser.Textures.FilterMode.NEAREST); // crisp pixels when scaled up
+}
+
+// ---------- SVG versions (the old City View drawing, no longer used by the city screen) ----------
+
+interface Actor {
+  f: Frames;
+  fps: number;
+  flip?: boolean;
+}
+
 const PLOT_ACTORS: Record<Building, Actor[]> = {
   barracks: [{ f: GRIDS.SWORDSMAN, fps: 4 }, { f: GRIDS.SWORDSMAN, fps: 4, flip: true }],
   workshop: [{ f: SMITH, fps: 3 }, { f: GRIDS.CATAPULT, fps: 1.5, flip: true }],

@@ -1,45 +1,46 @@
-// City View: a full-screen look inside one of your cities. Amenities sit on 6 plots around the Keep.
-// A DOM overlay like the HUD: it reads the world and only changes it through GameState methods.
-// Plot i is drawn in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
+// City View: the inside of one of your cities. The ground grid, plots and people are drawn by the Phaser
+// city screen (CityScene.ts, see docs/CITY_BUILDER.md). This file is the DOM around it: the header and the side
+// panel with plot info, bonuses and the build list. It reads the world and only changes it through GameState methods.
+// Plot i sits in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
+import type Phaser from 'phaser';
 import type { GameState } from '../world/game';
 import { ADJACENCY, FACING_BONUS, TERRAIN_BONUS, bestPlot, bonusAmount, cityBonus, facingTile, facingWork, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
+import { gridSize, plotLevel } from '../world/grid';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
-import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
-import { PX_CSS, builderActors, keepActors, plotActors } from './citySprites';
+import type { Building, PlotTerrain, Tile } from '../world/tile';
+import { CITY_SCENE, CityScene } from './CityScene';
+import type { CityPick } from './CityScene';
 
 export interface CityViewHandlers {
   onChange(): void; // something was built: redraw and save
   onClose(): void;
 }
 
-const PLOT_COLOR: Record<PlotTerrain, string> = { water: '#1f5f9e', sand: '#d9c38a', grass: '#6bb352', hills: '#8c7a4c' };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
-// The ring of map hexes outside the plots: what each plot faces
-const OUT_COLOR: Record<Terrain, string> = { water: '#1f5f9e', sand: '#d9c38a', grass: '#6bb352', hills: '#8c7a4c', mountain: '#9a9a9a' };
 const OUT_NAME: Record<Outside, string> = { farm: 'a farm', pasture: 'a pasture', mine: 'a mine', forest: 'a forest', fishery: 'a fishery', road: 'a road' };
-const OUT_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
-const OUT_R = 20; // small hexes
-const R = 52; // hex radius inside the drawing
-const SQ3 = Math.sqrt(3);
-const DIR_XY: [number, number][] = [[SQ3, 0], [SQ3 / 2, -1.5], [-SQ3 / 2, -1.5], [-SQ3, 0], [-SQ3 / 2, 1.5], [SQ3 / 2, 1.5]];
-const OUT_DIST = SQ3 * R + ((R - 2) * SQ3) / 2 + 4 + (OUT_R * SQ3) / 2; // just past each plot's outer edge
+const MAP_SCENE = 'map';
+const Z = 20; // the city screen's layer: anything below it (the HUD) is hidden while a city is open
 
 const CSS = `
-.k-city { position: fixed; inset: 0; z-index: 20; display: none; background: radial-gradient(circle at 50% 35%, #1d2433, #0b0e14 75%);
-  color: #e5e7eb; font: 14px/1.4 system-ui, sans-serif; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-.k-city-wrap { max-width: 920px; margin: 0 auto; padding: max(12px, env(safe-area-inset-top)) 14px 24px; display: flex; flex-direction: column; gap: 10px; box-sizing: border-box; }
-.k-city-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-right: 44px; }
-.k-city-head h2 { margin: 0; font-size: 20px; }
-.k-city-sub { color: #9ca3af; font-size: 13px; }
+.k-city { position: fixed; inset: 0; z-index: ${Z}; display: none; pointer-events: none; color: #e5e7eb; font: 14px/1.4 system-ui, sans-serif; }
+.k-city-head { position: absolute; top: 0; left: 0; right: 0; pointer-events: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: max(10px, env(safe-area-inset-top)) calc(54px + env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); box-sizing: border-box;
+  background: linear-gradient(rgba(11,14,20,0.95), rgba(11,14,20,0.8)); border-bottom: 1px solid #2a2f3a; }
+.k-city-head h2 { margin: 0; font-size: 19px; }
+.k-city-sub { color: #9ca3af; font-size: 12px; }
 .k-city button { background: #262630; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer; }
 .k-city button:hover:not(:disabled) { background: #33333f; }
 .k-city button:disabled { opacity: 0.45; cursor: default; }
 .k-city kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
-.k-city-body { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
-.k-city svg { width: min(430px, 92vw); height: auto; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
-.k-city svg [data-plot] { cursor: pointer; }
-.k-city-side { flex: 1; min-width: 260px; max-width: 430px; background: rgba(15,15,20,0.9); border: 1px solid #333; border-radius: 8px; padding: 10px 12px; box-sizing: border-box; }
+.k-city-head button { white-space: nowrap; flex: none; }
+.k-city-side { position: absolute; pointer-events: auto; left: 0; right: 0; bottom: 0; height: 42vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain; background: rgba(15,15,20,0.95); border: 1px solid #333; border-bottom: none; border-radius: 12px 12px 0 0;
+  padding: 10px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); box-sizing: border-box; }
+@media (min-width: 760px) {
+  .k-city-side { left: auto; right: max(12px, env(safe-area-inset-right)); top: var(--k-city-top, 76px); bottom: 12px; height: auto; width: 370px;
+    border: 1px solid #333; border-radius: 8px; padding: 10px 12px; }
+}
 .k-city-side h3 { margin: 0 0 4px; font-size: 15px; }
 .k-city-side p { margin: 2px 0 8px; font-size: 12px; color: #9ca3af; }
 .k-city-side .k-good { color: #4ade80; }
@@ -49,7 +50,9 @@ const CSS = `
 .k-city-list button small { opacity: 0.8; font-size: 11px; }
 .k-city-list button small.k-good { color: #4ade80; opacity: 1; }
 .k-city-list button.k-best { border-color: #facc15; }
-.k-city-foot { font-size: 12px; color: #8b8b99; text-align: center; max-width: 640px; margin: 0 auto; }
+.k-city-rules { margin-top: 12px; font-size: 12px; color: #8b8b99; }
+.k-city-rules summary { cursor: pointer; color: #9ca3af; }
+.k-city-hint { font-size: 11px; color: #8b8b99; margin-top: 10px; }
 .k-toasts { position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%); z-index: 35; display: flex; flex-direction: column; gap: 6px;
   align-items: center; pointer-events: none; width: min(480px, calc(100vw - 24px)); }
 .k-toast { background: rgba(15,15,20,0.95); border: 1px solid #4ade80; color: #e5e7eb; border-radius: 8px; padding: 8px 12px;
@@ -62,8 +65,14 @@ function ensureStyle(): void {
   if (styled) return;
   styled = true;
   const s = document.createElement('style');
-  s.textContent = CSS + PX_CSS;
+  s.textContent = CSS;
   document.head.appendChild(s);
+}
+
+// The Phaser game, so the City View can switch between the map and the city screen (set once in main.ts)
+let phaser: Phaser.Game | null = null;
+export function attachCityScreen(game: Phaser.Game): void {
+  phaser = game;
 }
 
 let toastBox: HTMLDivElement | null = null;
@@ -112,23 +121,8 @@ export function hasPlotFor(city: Tile, b: Building): boolean {
   return need ? city.plots.includes(need) : city.plots.some((t) => t !== 'water');
 }
 
-// The city level at which plot i opens
-function plotLevel(i: number): number {
-  const k = PLOTS_BY_LEVEL.findIndex((n) => n > i);
-  return k < 0 ? PLOTS_BY_LEVEL.length - 1 : k;
-}
-
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function hexPoints(cx: number, cy: number, r: number): string {
-  const pts: string[] = [];
-  for (let i = 0; i < 6; i++) {
-    const a = ((60 * i - 30) * Math.PI) / 180;
-    pts.push(`${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`);
-  }
-  return pts.join(' ');
 }
 
 function bonusRules(): string {
@@ -159,8 +153,10 @@ export class CityView {
   private state: GameState | null = null;
   private city: Tile | null = null;
   private me = 0;
-  private sel: number | 'keep' = 'keep';
+  private sel: CityPick = 'keep';
   private handlers: CityViewHandlers | null = null;
+  private hidden: HTMLElement[] = []; // HUD pieces tucked away while the city is open
+  private rulesOpen = false;
 
   constructor() {
     ensureStyle();
@@ -175,6 +171,7 @@ export class CityView {
 
   open(state: GameState, city: Tile, me: number, handlers: CityViewHandlers): void {
     if (!city.city || city.owner !== me) return;
+    const again = this.visible;
     this.state = state;
     this.city = city;
     this.me = me;
@@ -184,13 +181,36 @@ export class CityView {
     const free = Array.from({ length: open }, (_, i) => i).find((i) => !city.placed[i] && city.projectPlot !== i);
     this.sel = free ?? 'keep';
     this.root.style.display = 'block';
-    this.root.scrollTop = 0;
-    this.render();
+    if (!again) this.hideOthers();
+    this.render(); // lay out the panel first: the city screen fits itself into the space left over
+    CityScene.link = {
+      state,
+      city,
+      me,
+      sel: () => this.sel,
+      view: () => this.freeArea(),
+      pick: (p) => this.pick(p),
+      close: () => this.close(),
+    };
+    const sm = phaser?.scene;
+    if (!sm) return;
+    if (again) CityScene.refit();
+    else {
+      sm.sleep(MAP_SCENE); // the map stops drawing and listening underneath
+      sm.run(CITY_SCENE); // starts it the first time, wakes it after that
+    }
   }
 
   close(): void {
     if (!this.visible) return;
     this.root.style.display = 'none';
+    this.showOthers();
+    const sm = phaser?.scene;
+    if (sm) {
+      sm.sleep(CITY_SCENE);
+      sm.wake(MAP_SCENE);
+    }
+    CityScene.link = null;
     const h = this.handlers;
     this.handlers = null;
     h?.onClose();
@@ -206,6 +226,44 @@ export class CityView {
     this.render();
   }
 
+  // Tapped on the city screen
+  private pick(p: CityPick): void {
+    if (!this.visible) return;
+    this.sel = p;
+    this.render();
+  }
+
+  // The HUD sits under the old full-screen City View's layer; hide it so the city screen shows through cleanly.
+  // Anything above that layer (the help button, toasts) stays, like before.
+  private hideOthers(): void {
+    this.hidden = [];
+    for (const el of Array.from(document.body.children) as HTMLElement[]) {
+      if (el === this.root || el === toastBox || el.id === 'game' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+      const z = parseInt(getComputedStyle(el).zIndex, 10);
+      if (!Number.isNaN(z) && z > Z) continue;
+      if (el.style.visibility === 'hidden') continue;
+      el.style.visibility = 'hidden';
+      this.hidden.push(el);
+    }
+  }
+
+  private showOthers(): void {
+    for (const el of this.hidden) el.style.visibility = '';
+    this.hidden = [];
+  }
+
+  // Screen area the header and panel leave free (the city screen centers the town in it)
+  private freeArea(): { x: number; y: number; w: number; h: number } {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const head = this.root.querySelector('.k-city-head')?.getBoundingClientRect();
+    const side = this.root.querySelector('.k-city-side')?.getBoundingClientRect();
+    const top = head ? head.bottom : 0;
+    if (side && side.width > 0 && side.width < W * 0.8) return { x: 0, y: top, w: Math.max(0, side.left), h: H - top }; // panel on the right
+    const bottom = side && side.height > 0 ? side.top : H; // panel along the bottom (phones)
+    return { x: 0, y: top, w: W, h: Math.max(0, bottom - top) };
+  }
+
   private render(): void {
     const s = this.state!;
     const c = this.city!;
@@ -216,84 +274,29 @@ export class CityView {
     const nextLvl = PLOTS_BY_LEVEL.findIndex((n) => n > open);
     const more = !simple && open < PLOT_COUNT && nextLvl >= 0 ? ` (${PLOTS_BY_LEVEL[nextLvl]} at ${LEVEL_NAMES[nextLvl]})` : '';
     const gold = s.isFree(this.me) ? 'free building' : `${s.players[this.me].gold} gold`;
+    const size = gridSize(c);
 
     const head =
       `<div class="k-city-head"><div><h2>${esc(s.cityName(c))}</h2>` +
-      `<div class="k-city-sub">${LEVEL_NAMES[lvl - 1]} \u00b7 ${c.pop} people \u00b7 ${used}/${open} plots used${more} \u00b7 ${gold}</div></div>` +
+      `<div class="k-city-sub">${LEVEL_NAMES[lvl - 1]} \u00b7 ${c.pop} people \u00b7 ${used}/${open} plots used${more} \u00b7 ${size}x${size} \u00b7 ${gold}</div></div>` +
       `<button type="button" data-close><kbd>Esc</kbd>Back to map</button></div>`;
+    const rules =
+      `<details class="k-city-rules"${this.rulesOpen ? ' open' : ''}><summary>Placement bonuses</summary>` +
+      `\u2605 = best spot for it \u00b7 ${esc(bonusRules())}</details>` +
+      `<div class="k-city-hint">Tap a plot to pick it. Drag to look around, pinch or scroll to zoom.</div>`;
+    this.root.innerHTML = `${head}<div class="k-city-side">${this.sidePanel(s, c, simple, open)}${rules}</div>`;
 
-    // The drawing: Keep in the middle, 6 plots around it
-    const w = OUT_DIST + OUT_R + 4;
-    const hgt = Math.max(2.5 * R, (OUT_DIST * SQ3) / 2 + OUT_R) + 4;
-    let svg = `<svg viewBox="${(-w).toFixed(1)} ${(-hgt).toFixed(1)} ${(2 * w).toFixed(1)} ${(2 * hgt).toFixed(1)}" xmlns="http://www.w3.org/2000/svg">`;
-    // What's outside: the map hex each plot faces, with its improvement. Lit green when it's paying a bonus.
-    for (let i = 0; i < PLOT_COUNT; i++) {
-      const t = facingTile(c, i);
-      if (!t) continue;
-      const [dx, dy] = DIR_XY[i];
-      const x = (dx / SQ3) * OUT_DIST;
-      const y = (dy / SQ3) * OUT_DIST;
-      const work = t.improvement ?? (t.road ? 'road' : null);
-      const mine = t.owner === c.owner;
-      const b = c.placed[i];
-      const paying = !!b && plotBonus(c, i, b).notes.some((n) => n.includes('facing'));
-      svg +=
-        `<g data-plot="${i}" opacity="${mine ? 1 : 0.45}"><polygon points="${hexPoints(x, y, OUT_R)}" fill="${OUT_COLOR[t.terrain]}" fill-opacity="0.75" ` +
-        `stroke="${paying ? '#4ade80' : '#000'}" stroke-opacity="${paying ? 1 : 0.35}" stroke-width="${paying ? 2.5 : 1}" stroke-dasharray="${mine ? '' : '3 2'}"/>` +
-        (work ? `<text x="${x.toFixed(1)}" y="${(y + 5).toFixed(1)}" font-size="14" text-anchor="middle">${OUT_ICON[work]}</text>` : '') +
-        `</g>`;
-    }
-    const keepSel = this.sel === 'keep';
-    svg +=
-      `<g data-plot="keep"><polygon points="${hexPoints(0, 0, R - 2)}" fill="#2a2f3a" stroke="${keepSel ? '#facc15' : '#9ca3af'}" stroke-width="${keepSel ? 4 : 2 + c.walls}"/>` +
-      `<text x="0" y="2" font-size="30" text-anchor="middle">\u{1F3F0}</text>` +
-      `<text x="0" y="26" font-size="11" fill="#e5e7eb" text-anchor="middle">Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}</text>${keepActors(c.walls)}</g>`;
-    for (let i = 0; i < PLOT_COUNT; i++) {
-      const [dx, dy] = DIR_XY[i];
-      const x = dx * R;
-      const y = dy * R;
-      const t = plotTerrain(c, i);
-      const locked = i >= open;
-      const b = c.placed[i];
-      const proj = c.projectPlot === i ? c.project : null;
-      const isSel = this.sel === i;
-      let inner = '';
-      if (b) {
-        inner = `<text x="${x}" y="${y + 2}" font-size="28" text-anchor="middle">${BUILDINGS[b].icon}</text>` +
-          `<text x="${x}" y="${y + 24}" font-size="11" font-weight="600" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${esc(BUILDINGS[b].name)}</text>` +
-          plotActors(b, x, y, i);
-      } else if (proj) {
-        inner = `<text x="${x}" y="${y + 2}" font-size="28" text-anchor="middle" opacity="0.45">${BUILDINGS[proj].icon}</text>` +
-          `<text x="${x}" y="${y + 24}" font-size="11" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${c.projectTurns}t left</text>` +
-          builderActors(x, y, i);
-      } else if (locked) {
-        inner = `<text x="${x}" y="${y + 4}" font-size="20" text-anchor="middle">\u{1F512}</text>` +
-          `<text x="${x}" y="${y + 24}" font-size="10" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${LEVEL_NAMES[plotLevel(i)]}</text>`;
-      } else {
-        inner = `<text x="${x}" y="${y + 9}" font-size="28" fill="#fff" opacity="0.8" text-anchor="middle">+</text>` +
-          `<text x="${x}" y="${y + 26}" font-size="10" fill="#fff" stroke="#000" stroke-width="2.5" paint-order="stroke" text-anchor="middle">${PLOT_NAME[t]}</text>`;
-      }
-      svg +=
-        `<g data-plot="${i}" opacity="${locked && !b ? 0.45 : 1}"><polygon points="${hexPoints(x, y, R - 2)}" fill="${PLOT_COLOR[t]}" ` +
-        `stroke="${isSel ? '#facc15' : '#000'}" stroke-opacity="${isSel ? 1 : 0.4}" stroke-width="${isSel ? 4 : 1.5}"/>${inner}</g>`;
-    }
-    svg += '</svg>';
-
-    const side = `<div class="k-city-side">${this.sidePanel(s, c, simple, open)}</div>`;
-    const foot = `<div class="k-city-foot">\u2605 = best spot for it \u00b7 Placement bonuses: ${esc(bonusRules())}</div>`;
-    this.root.innerHTML = `<div class="k-city-wrap">${head}<div class="k-city-body">${svg}${side}</div>${foot}</div>`;
+    // Desktop: the panel starts under the header, whatever height it ended up
+    const headEl = this.root.querySelector<HTMLElement>('.k-city-head');
+    if (headEl) this.root.style.setProperty('--k-city-top', `${Math.round(headEl.getBoundingClientRect().bottom) + 10}px`);
 
     this.root.querySelector<HTMLButtonElement>('[data-close]')!.onclick = () => this.close();
-    this.root.querySelectorAll<SVGGElement>('[data-plot]').forEach((g) => {
-      g.addEventListener('click', () => {
-        const v = g.getAttribute('data-plot')!;
-        this.sel = v === 'keep' ? 'keep' : Number(v);
-        this.render();
-      });
-    });
+    const det = this.root.querySelector<HTMLDetailsElement>('.k-city-rules');
+    if (det) det.ontoggle = () => (this.rulesOpen = det.open);
     this.root.querySelectorAll<HTMLButtonElement>('[data-build]').forEach((btn) => {
       btn.onclick = () => this.build(btn.getAttribute('data-build') as Building);
     });
+    CityScene.refresh();
   }
 
   private sidePanel(s: GameState, c: Tile, simple: boolean, open: number): string {
@@ -302,7 +305,7 @@ export class CityView {
       return (
         `<h3>\u{1F3F0} Keep</h3>` +
         `<p>Health ${c.hp}/${cityMaxHp(c)} \u00b7 walls ${c.walls}/${MAX_WALLS}${c.walls ? ` (${c.shield}/${shieldMax(c)})` : ''}. Walls are built from the city panel (Defense).</p>` +
-        `<p>Tap a plot to build on it. Neighbors matter, and so does the map hex each plot faces (the small hexes around the edge).</p>` +
+        `<p>Tap a plot to build on it. Neighbors matter, and so does the map hex each plot faces (the small hexes past the edge of the town).</p>` +
         `<h3>Bonuses in this city</h3>` +
         (bonus.length ? `<p class="k-good">${bonus.map(esc).join('<br>')}</p>` : `<p>None yet. Put amenities next to the right neighbors to earn extra.</p>`)
       );

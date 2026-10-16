@@ -6,16 +6,21 @@
 - PWA: public/manifest.webmanifest + public/sw.js (network-first offline cache). Icons are drawn in scripts/icons.mjs and emitted by a plugin in vite.config.ts (no image files in the repo)
 
 ## Structure (trust this, don't explore to confirm)
-- src/main.ts: Phaser config, boots MapScene, registers the service worker (production only)
+- src/main.ts: Phaser config, boots MapScene (CityScene sleeps until a city opens), registers the service worker (production only)
 - src/world/: pure game logic, no Phaser imports
   - tile.ts: Tile type, terrain from height, yields, claim costs, walls, city levels (growth)
   - map.ts: WorldMap, generation, neighbors, hexDistance, raise/lower
   - units.ts: unit stats, jobs, move costs, reachable(), findPath() + routeTurns() for routes
   - game.ts: GameState: seats/players, turns, economy, claims, cities, training, combat, capture, growth, routes, win checks, DIFFICULTY
+  - city.ts: City View rules: plots, terrain, neighbor/facing bonuses, auto-place
+  - grid.ts: City Builder ground grid: size by highest level reached (7/9/11), plot and road tiles
   - ai.ts: rival AI, uses only public GameState methods
   - save.ts: localStorage save/load (key kingdom-save-v3), fills gaps from older saves
 - src/scenes/: rendering and input only
   - MapScene.ts: hexes, borders, cities, units, overlays, routes, clicks, hover, camera, pinch zoom, hot-seat hand-off
+  - CityScene.ts: the city screen (Phaser): ground grid, Keep, plots, roads, facing markers, people, pan + pinch zoom
+  - CityView.ts: DOM header + side panel for the city screen (plot info, bonuses, build list), sleeps/wakes the map
+  - citySprites.ts: pixel people inside cities
   - Hud.ts: DOM overlay (stats, bottom bar, selection panel sections, tooltip, idle prompt, pass screen, help)
   - Menu.ts: start menu (map size, players list, difficulty)
 - src/game/ and other files in src/scenes/ are old unused stubs (break `npm run build`, safe to delete)
@@ -46,4 +51,5 @@
 
 ## Roadmap
 1-10 done (economy, builders, settlers, walls, troops, AI, difficulty, UI polish, city growth, routes), 11 hot-seat + PWA done
+- In progress: City Builder (docs/CITY_BUILDER.md), ClickUp tasks 3-7, built on the dev branch
 - Next ideas: per-player handicap (kids), troop ranks (XP per troop), new troops (Catapult, Boat, Medic), online play (Cloudflare Worker), terraforming tweaks
