@@ -41,6 +41,11 @@ const UNIT_SCALE = 1.7;
 const WORKER_ZOOM = 0.55; // below this zoom the workers are too small to matter
 const WORKER_OFFSET: Record<Improvement, [number, number]> = { farm: [10, -4], pasture: [1, -7], mine: [12, -3], forest: [13, 7], fishery: [10, -6] };
 
+// Amenity icons on the map sit toward their plot, same as in the city screen.
+// Plot i faces map direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE): screen angle in degrees for each.
+const PLOT_ANGLE = [0, -60, -120, 180, 120, 60];
+const ICON_R = 20; // px from the city center
+
 // select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
@@ -74,7 +79,7 @@ export class MapScene extends Phaser.Scene {
   private unitSprites: Phaser.GameObjects.Sprite[] = [];
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
   private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
-  private cityIcons: Phaser.GameObjects.Text[] = []; // a few amenity icons above each city
+  private cityIcons: Phaser.GameObjects.Text[] = []; // amenity icons around cities, one per amenity, toward its plot
   private lastTap: { tile: Tile; at: number } | null = null; // for double-tap on a city
   private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
   private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
@@ -1553,6 +1558,7 @@ export class MapScene extends Phaser.Scene {
     g.clear();
     const map = state.map;
     let names = 0;
+    let icons = 0;
     for (const t of map.tiles) {
       if (t.owner === null || !this.seen(t)) continue;
       const color = state.players[t.owner].color;
@@ -1593,12 +1599,12 @@ export class MapScene extends Phaser.Scene {
         }
         this.drawCity(g, x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
-        this.cityIcon(names, x, y, t);
+        icons = this.amenityIcons(icons, x, y, t);
         this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
-    for (let i = names; i < this.cityIcons.length; i++) this.cityIcons[i].setVisible(false);
+    for (let i = icons; i < this.cityIcons.length; i++) this.cityIcons[i].setVisible(false);
   }
 
   // Explored land that's out of sight right now gets a dark veil
@@ -1655,15 +1661,28 @@ export class MapScene extends Phaser.Scene {
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
 
-  // Up to 3 amenity icons above a city (the latest ones built), so you can read a city's build from the map
-  private cityIcon(i: number, x: number, y: number, t: Tile): void {
-    let label = this.cityIcons[i];
-    if (!label) {
-      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '10px' }).setOrigin(0.5).setDepth(4.1);
-      this.cityIcons.push(label);
-    }
-    const icons = t.buildings.slice(-3).map((b) => BUILDINGS[b].icon).join('');
-    label.setText(icons).setPosition(x, y - (t.capital ? 31 : 21)).setVisible(icons.length > 0 && !this.smallZoom);
+  // One icon per amenity around the city, toward the plot it stands on (same direction as in the city screen),
+  // so you can read a city's build and layout from the map. Your own amenity under construction shows faded.
+  // Icons sit under units, so a unit standing on the city stays readable. Returns the next free icon.
+  private amenityIcons(n: number, x: number, y: number, t: Tile): number {
+    if (this.smallZoom) return n;
+    const put = (b: Building, plot: number, alpha: number) => {
+      let label = this.cityIcons[n];
+      if (!label) {
+        label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '10px' }).setOrigin(0.5).setDepth(2.9);
+        this.cityIcons.push(label);
+      }
+      const a = Phaser.Math.DegToRad(PLOT_ANGLE[plot % PLOT_ANGLE.length]);
+      const ix = Math.round(x + ICON_R * Math.cos(a));
+      const iy = Math.round(y - 2 + ICON_R * Math.sin(a));
+      label.setText(BUILDINGS[b].icon).setAlpha(alpha).setPosition(ix, iy).setVisible(true);
+      n++;
+    };
+    (t.placed ?? []).forEach((b, i) => {
+      if (b) put(b, i, 1);
+    });
+    if (t.owner === this.me && t.project && t.projectPlot !== null && !t.placed?.[t.projectPlot]) put(t.project, t.projectPlot, 0.45);
+    return n;
   }
 
   // Health bar (only when damaged) with the wall shield bar above it.
