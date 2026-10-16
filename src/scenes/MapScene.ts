@@ -10,6 +10,7 @@ import type { Building, Improvement, Terrain, Tile } from '../world/tile';
 import { JOBS, NAVY, PALISADE_HP, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
 import { CityView, hasPlotFor, placementNotes, shortNotes, showToast } from './CityView';
+import { ART, KEEP_ART, TINY, canDraw, crispCityArt, loadCityArt } from './cityArt';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
 import { Menu } from './Menu';
@@ -41,11 +42,6 @@ const UNIT_SCALE = 1.7;
 const WORKER_ZOOM = 0.55; // below this zoom the workers are too small to matter
 const WORKER_OFFSET: Record<Improvement, [number, number]> = { farm: [10, -4], pasture: [1, -7], mine: [12, -3], forest: [13, 7], fishery: [10, -6] };
 
-// Amenity icons on the map sit toward their plot, same as in the city screen.
-// Plot i faces map direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE): screen angle in degrees for each.
-const PLOT_ANGLE = [0, -60, -120, 180, 120, 60];
-const ICON_R = 20; // px from the city center
-
 // select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
@@ -69,6 +65,8 @@ export class MapScene extends Phaser.Scene {
 
   private terrainGfx!: Phaser.GameObjects.Graphics;
   private ownerGfx!: Phaser.GameObjects.Graphics;
+  private castleGfx!: Phaser.GameObjects.Graphics; // flags and crowns on the castles (or the drawn fallback city)
+  private castles: Phaser.GameObjects.Blitter | null = null; // Kenney castle tiles, one per city (null = art missing)
   private fogGfx!: Phaser.GameObjects.Graphics;
   private overlayGfx!: Phaser.GameObjects.Graphics;
   private unitGfx!: Phaser.GameObjects.Graphics;
@@ -79,7 +77,6 @@ export class MapScene extends Phaser.Scene {
   private unitSprites: Phaser.GameObjects.Sprite[] = [];
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
   private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
-  private cityIcons: Phaser.GameObjects.Text[] = []; // amenity icons around cities, one per amenity, toward its plot
   private lastTap: { tile: Tile; at: number } | null = null; // for double-tap on a city
   private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
   private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
@@ -96,10 +93,19 @@ export class MapScene extends Phaser.Scene {
     super('map');
   }
 
+  // Kenney tilesheets (castle for cities here, the whole town in the city screen). A failed download just
+  // leaves the sheet out and cities fall back to the drawn house.
+  preload(): void {
+    loadCityArt(this);
+  }
+
   create(): void {
     makeSprites(this);
+    crispCityArt(this);
     this.terrainGfx = this.add.graphics().setDepth(0);
     this.ownerGfx = this.add.graphics().setDepth(1);
+    if (this.textures.exists(TINY)) this.castles = this.add.blitter(0, 0, TINY).setDepth(1.1);
+    this.castleGfx = this.add.graphics().setDepth(1.15);
     this.fogGfx = this.add.graphics().setDepth(1.5);
     this.overlayGfx = this.add.graphics().setDepth(2);
     this.unitGfx = this.add.graphics().setDepth(3);
@@ -129,10 +135,7 @@ export class MapScene extends Phaser.Scene {
     const small = this.cameras.main.zoom < WORKER_ZOOM;
     if (small === this.smallZoom) return;
     this.smallZoom = small;
-    if (this.state) {
-      this.drawWorkers(this.state);
-      this.drawOwners(this.state); // city amenity icons hide when zoomed far out too
-    }
+    if (this.state) this.drawWorkers(this.state);
   }
 
   // ---------- flow ----------
@@ -1556,9 +1559,10 @@ export class MapScene extends Phaser.Scene {
   private drawOwners(state: GameState): void {
     const g = this.ownerGfx;
     g.clear();
+    this.castles?.clear();
+    this.castleGfx.clear();
     const map = state.map;
     let names = 0;
-    let icons = 0;
     for (const t of map.tiles) {
       if (t.owner === null || !this.seen(t)) continue;
       const color = state.players[t.owner].color;
@@ -1597,14 +1601,44 @@ export class MapScene extends Phaser.Scene {
           g.lineStyle(1.5 + t.walls * 1.5, 0x9ca3af, 1);
           g.strokePoints(hexCorners(x, y, SIZE - 4), true);
         }
-        this.drawCity(g, x, y, color, t.capital);
+        this.drawCastle(x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
-        icons = this.amenityIcons(icons, x, y, t);
         this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
-    for (let i = icons; i < this.cityIcons.length; i++) this.cityIcons[i].setVisible(false);
+  }
+
+  // A city on the map: the Kenney castle (the same one as the Keep inside the city) with a flag in the owner's
+  // color on top. Capitals get a gold crown on the flagpole. Falls back to the drawn house if the art is missing.
+  private drawCastle(x: number, y: number, color: number, capital: boolean): void {
+    const b = this.castles;
+    const g = this.castleGfx;
+    if (!b || !canDraw(this, KEEP_ART.cells)) {
+      this.drawCity(g, x, y, color, capital);
+      return;
+    }
+    const left = Math.round(x - (KEEP_ART.w * ART) / 2);
+    const top = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
+    for (const c of KEEP_ART.cells) b.create(left + c.x * ART, top + c.y * ART, c.f);
+    // Flag on the battlements
+    const px = Math.round(x);
+    const py = top + 1;
+    const h = 8;
+    g.lineStyle(1.5, 0x2a1d14, 1);
+    g.lineBetween(px, py, px, py - h);
+    g.fillStyle(color, 1);
+    g.fillTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    g.lineStyle(1, 0x111111, 0.85);
+    g.strokeTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    if (capital) {
+      const base = py - h - 1;
+      g.fillStyle(0xfacc15, 1);
+      g.fillRect(px - 4, base - 2, 8, 2);
+      g.fillTriangle(px - 4, base - 2, px - 4, base - 6, px - 2, base - 2);
+      g.fillTriangle(px - 1.5, base - 2, px, base - 7, px + 1.5, base - 2);
+      g.fillTriangle(px + 2, base - 2, px + 4, base - 6, px + 4, base - 2);
+    }
   }
 
   // Explored land that's out of sight right now gets a dark veil
@@ -1659,30 +1693,6 @@ export class MapScene extends Phaser.Scene {
     const bg = `#${color.toString(16).padStart(6, '0')}`;
     const text = `${capital ? '\u2605 ' : ''}${name} ${pop} ${face}`;
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
-  }
-
-  // One icon per amenity around the city, toward the plot it stands on (same direction as in the city screen),
-  // so you can read a city's build and layout from the map. Your own amenity under construction shows faded.
-  // Icons sit under units, so a unit standing on the city stays readable. Returns the next free icon.
-  private amenityIcons(n: number, x: number, y: number, t: Tile): number {
-    if (this.smallZoom) return n;
-    const put = (b: Building, plot: number, alpha: number) => {
-      let label = this.cityIcons[n];
-      if (!label) {
-        label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '10px' }).setOrigin(0.5).setDepth(2.9);
-        this.cityIcons.push(label);
-      }
-      const a = Phaser.Math.DegToRad(PLOT_ANGLE[plot % PLOT_ANGLE.length]);
-      const ix = Math.round(x + ICON_R * Math.cos(a));
-      const iy = Math.round(y - 2 + ICON_R * Math.sin(a));
-      label.setText(BUILDINGS[b].icon).setAlpha(alpha).setPosition(ix, iy).setVisible(true);
-      n++;
-    };
-    (t.placed ?? []).forEach((b, i) => {
-      if (b) put(b, i, 1);
-    });
-    if (t.owner === this.me && t.project && t.projectPlot !== null && !t.placed?.[t.projectPlot]) put(t.project, t.projectPlot, 0.45);
-    return n;
   }
 
   // Health bar (only when damaged) with the wall shield bar above it.
@@ -1860,7 +1870,7 @@ export class MapScene extends Phaser.Scene {
       g.strokeCircle(p.x, p.y, 15);
     } else if (tile.city) {
       g.lineStyle(3, 0xfacc15, 1);
-      g.strokeCircle(x, y - 2, tile.capital ? 21 : 18);
+      g.strokeCircle(x, y - 2, 23);
     }
     this.drawRoute(g);
   }
@@ -1997,6 +2007,7 @@ export class MapScene extends Phaser.Scene {
     if (s.anims.currentAnim?.key !== key) s.play({ key, startFrame: i % 2 });
   }
 
+  // Fallback city (no Kenney art): a little house in the owner's color, with a crown on capitals
   private drawCity(g: Phaser.GameObjects.Graphics, x: number, y: number, color: number, capital: boolean): void {
     const s = capital ? 1.25 : 1;
     g.fillStyle(0x1b1b1b, 1);
