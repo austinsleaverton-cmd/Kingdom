@@ -10,9 +10,6 @@ export const GRID_SIZES = [7, 9, 11, 11, 11];
 // Plot i sits in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), one tile each
 export const PLOT_TILES: readonly (readonly [number, number])[] = [[2, 0], [1, -2], [-1, -2], [-2, 0], [-1, 2], [1, 2]];
 
-// The 1-tile road from the Keep to plot i
-export const ROAD_TILES: readonly (readonly [number, number])[] = [[1, 0], [1, -1], [-1, -1], [-1, 0], [-1, 1], [1, 1]];
-
 // Highest level the city has ever reached: the grid follows this, so it never shrinks when a city loses a level
 export function gridLevel(city: Tile): number {
   return Math.max(city.gridLevel ?? 0, cityLevel(city));
@@ -37,11 +34,11 @@ export function plotAtTile(dx: number, dy: number): number | null {
   return i < 0 ? null : i;
 }
 
-// Keep, plots and their roads: nothing else can go there (decorations come in task 5)
+// The Keep and the plots: nothing else can go there. Every other tile is open ground for decorations and
+// the paths you paint yourself (task 5). There are no built-in roads.
 export function reservedTile(dx: number, dy: number): boolean {
   if (dx === 0 && dy === 0) return true;
-  if (plotAtTile(dx, dy) !== null) return true;
-  return ROAD_TILES.some(([x, y]) => x === dx && y === dy);
+  return plotAtTile(dx, dy) !== null;
 }
 
 // The city level (index into LEVEL_NAMES) at which plot i opens

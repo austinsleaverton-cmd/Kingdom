@@ -2,13 +2,13 @@
 
 Run the kingdom on the map, then zoom into a city and build it out like a real town. Extends `docs/CITY_VIEW.md`: the rules there (6 plots, terrain, neighbors, facing, auto-place, scoring) stay exactly as they are. This adds a ground grid around them, free-placed decorations, real art and a zoom transition.
 
-**Status:** spec approved. Building starts with task 3 (city screen).
+**Status:** spec approved. Task 3 (city screen) is on dev.
 
 ## Goals
 
 - The city looks like a town, not a diagram.
 - Buildings stay snapped to plots, so placement, neighbor and facing bonuses keep working with zero rule changes.
-- Decorations are the creative part: put them anywhere open.
+- Decorations and paths are the creative part: put them anywhere open.
 - Never forced: a player who never opens a city loses nothing on Easy / Free Play, and only a small beauty bonus on Normal+.
 
 ## Ground grid
@@ -44,11 +44,12 @@ The Keep is the center tile. Each building is **one tile** (one plot = one tile,
 | 4 | SW | (-1, 2) |
 | 5 | SE | (1, 2) |
 
-- Plot tiles, the Keep tile and a 1-tile road from the Keep to each plot are **reserved**: no decorations there. Everything else is open ground.
+- Only the Keep tile and the 6 plot tiles are **reserved**. Everything else is open ground (42 tiles on a 7x7 Village).
+- **No built-in roads.** A new city is the Keep and its plots on grass. Streets are paths the player paints (see Decorations).
 - Plot neighbors stay index-based (`plotNeighbors(i)`: ring neighbors + Keep). The grid is visual; `src/world/city.ts` scoring does not change.
 - Plot terrain shows as the plot tile's ground (water plot = water tile, hills = dirt/rock, sand, grass).
-- **Facing hexes:** the map hex each plot faces is drawn as a small marker on the grid edge in that direction (same info and green "paying" outline as City View today).
-- Locked plots: lock icon on the tile + the level name, like now.
+- **Facing hexes:** the map hex each plot faces is drawn as a small marker on the grid edge in that direction. Faint by default, green with a dotted line when it's paying a bonus, outlined when its plot is selected.
+- Locked plots: faint outline, small lock icon and the level name.
 
 ## Decorations
 
@@ -61,6 +62,14 @@ The Keep is the center tile. Each building is **one tile** (one plot = one tile,
 - Instant: decorations don't use the city's project slot and don't take turns.
 - Only in your own cities, on your turn (hot-seat safe: acts as `state.current`).
 
+### Paths (painted roads)
+
+- Pick **Path** in the tray and **drag** across tiles to paint a line of path (a tap paints one tile). Drag over painted path with the eraser (or Path selected again on a painted tile) to clear it.
+- Paths only go on open ground, never on the Keep, a plot or another decoration.
+- **Auto-join:** each path tile connects to the path tiles next to it, and to the Keep and any plot it touches, so straights, corners, T's and crossroads draw themselves. Fences join the same way.
+- **Free on every difficulty** and **no beauty**: paths are for looks only, so a big road network never costs or earns anything.
+- While Path is selected, a faint tile grid shows so lines are easy to place.
+
 ### Starter set (v1)
 
 Starting list, judged once it's on screen (add/cut freely in task 5).
@@ -71,7 +80,7 @@ Starting list, judged once it's on screen (add/cut freely in task 5).
 | Bush | nature | |
 | Flower bed | nature | |
 | Rock | nature | |
-| Path tile | path | paints ground, counts as a decoration |
+| Path | path | painted by dragging, auto-joins, free, no beauty |
 | Fence | build | auto-joins to neighbor fences |
 | Well | build | |
 | Lamp post | build | |
@@ -89,21 +98,21 @@ Starting list, judged once it's on screen (add/cut freely in task 5).
 | Normal | 2g each (Statue 6g, Fountain 10g) |
 | Hard | 3g each (Statue 8g, Fountain 12g) |
 
-Tray shows the price on each item. Not enough gold = item dimmed with the reason.
+Paths are free in every mode. Tray shows the price on each item. Not enough gold = item dimmed with the reason.
 
 ### Beauty (happiness)
 
 - **Normal and up only.** On Easy and Free Play decorations are just for looks: no bonus, and the beauty line is hidden.
-- `beauty = number of decorations in the city` (Statue counts 2, Fountain 3).
+- `beauty = number of decorations in the city` (Statue counts 2, Fountain 3). **Paths count 0.**
 - Bonus: **+1 happy per 8 beauty, max +2.** Shows in `happinessParts` as `Beautiful streets`.
-- Why 8, not 6 (paper check): a Temple gives +2 happy but costs 30-40g, takes turns and uses the project slot. At 1 per 6, +2 happy cost 24g on Normal, instant, no slot: too cheap next to a Temple. At 1 per 8 it's 32g on Normal / 48g on Hard (small decos), about Temple price with no slot, which feels like a fair trade for the clicking. Path tiles count, so to stop path spam from being the cheapest route, a city's paths count at most 4 beauty.
+- Why 8, not 6 (paper check): a Temple gives +2 happy but costs 30-40g, takes turns and uses the project slot. At 1 per 6, +2 happy cost 24g on Normal, instant, no slot: too cheap next to a Temple. At 1 per 8 it's 32g on Normal / 48g on Hard (small decos), about Temple price with no slot, which feels like a fair trade for the clicking.
 - Small on purpose: nice to have, never the reason you win.
 - One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Retune after real playtests and the AI test games.
 
 ### Scope
 
-- **Per city.** Decorations belong to the city they're in and can't move between cities.
-- Captured city: decorations stay with the city (the new owner gets them and their beauty).
+- **Per city.** Decorations and paths belong to the city they're in and can't move between cities.
+- Captured city: decorations and paths stay with the city (the new owner gets them and their beauty).
 
 ### AI
 
@@ -112,8 +121,8 @@ Tray shows the price on each item. Not enough gold = item dimmed with the reason
   - Only with spare gold after its normal build/train decision for the turn (never instead of troops, walls or buildings).
   - Not while at war or with enemy troops within 2 hexes of the city.
   - Keeps a reserve (doesn't drop below 40g) so it can still react.
-  - Stops at the cap (16 beauty, where the bonus maxes out). Paths count at most 4 like for players.
-  - Places on random open tiles, skipping the Keep's roads, using `GameState.placeDeco` (same rules as people).
+  - Stops at the cap (16 beauty, where the bonus maxes out).
+  - Places on random open tiles using `GameState.placeDeco` (same rules as people). It doesn't paint paths (they add no beauty).
 - Check in the AI test games that Hard doesn't get noticeably weaker from it.
 
 ## Saved data
@@ -122,10 +131,11 @@ On the city tile (`Tile`, city only):
 
 ```ts
 gridLevel: number;            // highest city level ever reached (1-5), drives grid size
-deco: [number, number, number][]; // [dx, dy, kind] relative to the Keep, kind = index into DECO_ORDER
+deco: [number, number, number][]; // [dx, dy, kind] relative to the Keep, kind = index into DECO_ORDER (paths included)
 ```
 
 - `DECO_ORDER` in `src/world/city.ts`: new decorations only ever go on the end, so old saves keep their meaning (same rule as `BUILDING_ORDER`).
+- Path joins aren't saved: they're worked out from the neighbors when drawing.
 - Save: new optional `deco` field next to `plots` in `save.ts` (tile index -> `gridLevel`, flat deco list). Same key, `kingdom-save-v3`.
 - **Old saves:** `gridLevel = cityLevel(city)`, `deco = []`. Nothing else to migrate: plots and buildings are untouched.
 - On load, any decoration on a reserved or out-of-grid tile is dropped (safety net, shouldn't happen).
@@ -137,7 +147,7 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 | Thing | Pack | What to use |
 | --- | --- | --- |
 | Open ground | Tiny Town | grass (+ 1-2 grass variants scattered by a seeded hash so it doesn't look tiled) |
-| Road / path | Tiny Town | dirt path tiles |
+| Painted path | Tiny Town | dirt path tiles: straight, corner, T, cross and end pieces for auto-join |
 | Water plot | Tiny Town / RPG | water tile with edge pieces |
 | Hills plot | RPG | dirt/rock ground |
 | Sand plot | RPG | sand ground |
@@ -167,26 +177,26 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 - New Phaser scene `src/scenes/CityScene.ts` draws the grid, buildings, decorations and people (Phaser handles sprite sheets, drag and pinch far better than the current SVG).
 - `MapScene` sleeps while the city is open, wakes on the way out (same plan `CITY_VIEW.md` already had).
 - The **side panel stays DOM**: the build list, plot info and bonuses from `CityView.ts` are reused as a panel; the SVG drawing is retired.
-- World logic stays in `src/world` (`placeDeco`, `moveDeco`, `removeDeco` on `GameState`, all validated there).
+- World logic stays in `src/world` (`placeDeco`, `moveDeco`, `removeDeco`, `paintPath` on `GameState`, all validated there).
 
 ## Phones
 
 - Max 11x11 = 121 ground tiles + up to ~100 decorations + 7 buildings: tiny for Phaser.
-- Ground drawn once into a static layer (Phaser `TilemapLayer` or a cached render texture); only redrawn when the grid grows or a path tile changes.
+- Ground drawn once into a static layer (Phaser `TilemapLayer` or a cached render texture); only redrawn when the grid grows or a path changes.
 - Decorations and buildings are plain sprites from one texture atlas per pack (2 textures total, preloaded in `BootScene`).
 - Pixel art: `pixelArt: true` / nearest-neighbor scaling, integer zoom steps for crisp tiles.
 - Tap targets at least 40px: default zoom fits the grid to the screen width, so a 7x7 tile is big and an 11x11 tile is still ~32px with zoom-in available.
-- Drag starts after a short hold (150ms) or 8px of movement so panning and dragging don't fight.
+- Drag starts after a short hold (150ms) or 8px of movement so panning and dragging don't fight. With Path selected, a one-finger drag paints instead of panning; two fingers still pan and zoom.
 - MapScene sleeps (not just hidden) so it isn't rendering underneath.
-- Saves only on change (place/move/remove), not every frame.
+- Saves only on change (place/move/remove/paint), not every frame.
 
 ## Build order (matches the ClickUp City Builder list)
 
-3. **City screen** (task 3): new `CityScene` with the ground grid, `gridLevel` (grows 7/9/11, never shrinks, old-save migration), roads, Keep, 6 one-tile plots with buildings, facing markers, pan/pinch zoom. Side panel and pixel people kept. Opens/closes the same ways (double-tap, O, Open city, Esc). Uses the current drawn art. Replaces the SVG drawing.
-4. **Kenney art** (task 4): load the sheets in `BootScene`, `CITY_ART` table for buildings, plot terrain, roads and the decoration palette, nearest-neighbor scaling, fallback if a sprite is missing, preview image.
-5. **Decorate mode** (task 5): `deco`, `DECO_ORDER`, `placeDeco` / `moveDeco` / `removeDeco`, costs by difficulty, save + old-save migration, tray UI (tap to place, drag to move, remove). Cosmetic only at this point.
+3. **City screen** (task 3): new `CityScene` with the ground grid, `gridLevel` (grows 7/9/11, never shrinks, old-save migration), Keep, 6 one-tile plots with buildings, facing markers, pan/pinch zoom. No built-in roads. Side panel and pixel people kept. Opens/closes the same ways (double-tap, O, Open city, Esc). Uses the current drawn art. Replaces the SVG drawing.
+4. **Kenney art** (task 4): load the sheets in `BootScene`, `CITY_ART` table for buildings, plot terrain, path pieces and the decoration palette, nearest-neighbor scaling, fallback if a sprite is missing, preview image.
+5. **Decorate mode** (task 5): `deco`, `DECO_ORDER`, `placeDeco` / `moveDeco` / `removeDeco` / `paintPath`, path painting by dragging with auto-join, costs by difficulty (paths free), save + old-save migration, tray UI (tap to place, drag to move, remove). Cosmetic only at this point.
 6. **Zoom transition** (task 6): pinch/scroll in and out between map and city, animation, camera restore, reduced motion.
-7. **Beauty bonus + Hard AI** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths max 4), `Beautiful streets` line, Hard AI decorating, AI test games with Hard decorating on and off, help section in `Help.ts`, grid-growth toast, tune from your playtest.
+7. **Beauty bonus + Hard AI** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths count 0), `Beautiful streets` line, Hard AI decorating, AI test games with Hard decorating on and off, help section in `Help.ts`, grid-growth toast, tune from your playtest.
 
 Each step should pass `npx vite build` and the AI test games before moving on.
 
@@ -195,6 +205,7 @@ Each step should pass `npx vite build` and the AI test games before moving on.
 - Grid grows with city level: 7x7, 9x9, 11x11 (cap). Never shrinks.
 - 1-tile buildings, one per plot.
 - 11x11 extra space is decorations only for v1.
+- No built-in roads: players paint paths by dragging. Paths auto-join, are free everywhere and add no beauty.
 - Beauty: +1 happy per 8 beauty, max +2, on Normal+ only. Off on Easy / Free Play.
 - Cost: free on Easy / Free Play, a little gold on Normal+.
 - Decorations are per city.
@@ -213,3 +224,4 @@ Each step should pass `npx vite build` and the AI test games before moving on.
 - Seasonal/animated decorations (smoking chimneys, swaying trees).
 - Read-only peek at other kingdoms' cities with their decorations.
 - Copy a layout from one city to another (doesn't break "per city": it's a template, not a move).
+- Paths that do something (like a road bonus), only if the game ever needs it.

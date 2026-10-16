@@ -1,13 +1,14 @@
 // City screen: the inside of one of your cities as its own Phaser scene (docs/CITY_BUILDER.md).
-// A grassy town square with the Keep dead center, the 6 plots as one tile each, a dirt street from the Keep to every plot,
-// and the map hex each plot faces as a small marker just past the edge. Drag to pan, pinch or wheel to zoom.
+// A grassy town square with the Keep dead center and the 6 plots as one tile each (no built-in roads: you paint
+// your own paths in decorate mode, task 5), and the map hex each plot faces as a small marker just past the edge.
+// Drag to pan, pinch or wheel to zoom.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building,
 // so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
 import type { GameState } from '../world/game';
 import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
-import { PLOT_TILES, ROAD_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
+import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
 import type { PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
@@ -37,8 +38,6 @@ const PERSON_SCALE = 1.5;
 const GRASS = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
 const GRASS_DARK = 0x58993f;
-const DIRT = 0xb08a58;
-const DIRT_EDGE = 0x8a6a3e;
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x8c7a4c };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x8c7a4c, mountain: 0x9a9a9a };
@@ -357,9 +356,6 @@ export class CityScene extends Phaser.Scene {
       }
     }
 
-    // Streets: one continuous dirt path from the Keep, through its road tile, to each plot
-    this.streets(g);
-
     // Keep: a stone yard, walls drawn as a thicker grey rim per level
     g.fillStyle(0x6b7280, 1);
     g.fillCircle(0, 0, T * 0.62);
@@ -382,8 +378,6 @@ export class CityScene extends Phaser.Scene {
       const proj = c.projectPlot === i ? c.project : null;
       if (locked && !b) {
         // Locked: a faint outline of the plot to come, small lock and level name
-        g.fillStyle(GRASS, 1); // cover the street end so the faint plot reads as empty ground
-        g.fillRoundedRect(x - T / 2 + 3, y - T / 2 + 3, T - 6, T - 6, 8);
         this.plotGround(g, x, y, t, 0.22);
         this.txt(x, y - 4, '\u{1F512}', 12, { alpha: 0.55 });
         this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.6, small: true });
@@ -447,28 +441,7 @@ export class CityScene extends Phaser.Scene {
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
   }
 
-  // Keep -> road tile -> plot for every plot, drawn as one wide dirt path with a darker edge and round corners
-  private streets(g: Phaser.GameObjects.Graphics): void {
-    const paths = PLOT_TILES.map((p, i) => [[0, 0], ROAD_TILES[i], p] as const);
-    const pass = (w: number, color: number, alpha: number) => {
-      g.lineStyle(w, color, alpha);
-      g.fillStyle(color, alpha);
-      for (const pts of paths) {
-        for (let k = 0; k < pts.length - 1; k++) g.lineBetween(pts[k][0] * T, pts[k][1] * T, pts[k + 1][0] * T, pts[k + 1][1] * T);
-        for (const [x, y] of pts) g.fillCircle(x * T, y * T, w / 2); // round joints, no gaps at the bends
-      }
-    };
-    pass(T * 0.42, DIRT_EDGE, 1);
-    pass(T * 0.32, DIRT, 1);
-    // A few pebbles along the way
-    g.fillStyle(DIRT_EDGE, 0.6);
-    for (const [rx, ry] of ROAD_TILES) {
-      g.fillCircle(rx * T - 5, ry * T + 4, 1.6);
-      g.fillCircle(rx * T + 6, ry * T - 3, 1.3);
-    }
-  }
-
-  // Seeded, so the same city always looks the same. Skips the Keep yard, plots, streets and the tiles hugging them.
+  // Seeded, so the same city always looks the same. Skips the Keep yard, plots and the tiles hugging them.
   private drawScenery(r: number, seed: number): void {
     const g = this.scenery;
     g.clear();
