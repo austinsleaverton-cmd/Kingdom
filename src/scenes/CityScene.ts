@@ -1,8 +1,9 @@
 // City screen: the inside of one of your cities as its own Phaser scene (docs/CITY_BUILDER.md).
-// A grassy town square with the Keep dead center and the 6 plots as one tile each (no built-in roads: you paint
-// your own paths in decorate mode, task 5), and the map hex each plot faces as a small marker just past the edge.
-// Drag to pan, pinch or wheel to zoom.
-// Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles. If a sheet or a tile is missing, that
+// A grassy town with the castle (the Keep) in the middle and the 6 plots as one tile each (no built-in roads:
+// you paint your own paths in decorate mode, task 5), and the map hex each plot faces as a small marker just
+// past the edge. Drag to pan, pinch or wheel to zoom.
+// Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles, styled after Kenney's Tiny Town sample:
+// full houses on the grass, a towered castle, tree clumps along the edge. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building,
 // so a drag or a pinch can never build anything by accident.
@@ -16,10 +17,10 @@ import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
 import type { PxActor } from './citySprites';
 import {
-  ART, BUILDING_ART, GRASS, HILL_ROCK, KEEP_ART, PLOT_GROUND, RPG, SCENERY, TINY,
+  ART, BUILDING_ART, BUILT_GROUND, CASTLE_ART, GRASS, PLOT_GROUND, RPG, SCENERY, TINY, WATER_LIFT,
   canDraw, crispCityArt, hasFrame, loadCityArt,
 } from './cityArt';
-import type { Cell, Pic, Sheet } from './cityArt';
+import type { Cell, Sheet } from './cityArt';
 
 export const CITY_SCENE = 'city';
 export type CityPick = number | 'keep';
@@ -41,7 +42,11 @@ const MARKER_R = T * 0.3; // facing marker size
 const DRAG_PX = 8; // movement before a press counts as a pan, not a tap
 const LABEL_MIN = 30; // tile size on screen (px) below which names hide (icons stay)
 const PERSON_SCALE = 1.5;
-const NAME_Y = T / 2 + 1; // building names sit on the bottom edge of their plot
+const NAME_Y = T / 2 + 1; // names sit on the bottom edge of their plot
+// The castle: its box in world px around the city center (tapping anywhere on it picks the Keep)
+const CASTLE_LEFT = -(CASTLE_ART.w * ART) / 2;
+const CASTLE_TOP = -40;
+const CASTLE_BOTTOM = CASTLE_TOP + CASTLE_ART.h * ART;
 
 const GRASS_COLOR = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
@@ -125,7 +130,7 @@ export class CityScene extends Phaser.Scene {
     if (s?.ready && s.sys.isActive()) s.show();
   }
 
-  // Runs once, the first time a city opens. A sheet that fails to download is simply left out.
+  // The map loads the sheets first; this only matters if the city screen ever starts on its own
   preload(): void {
     loadCityArt(this);
   }
@@ -318,7 +323,7 @@ export class CityScene extends Phaser.Scene {
     });
   }
 
-  // What's under a screen point: a facing marker (counts as its plot), a plot tile or the Keep
+  // What's under a screen point: a facing marker (counts as its plot), the castle, or a plot tile
   private pickAt(sx: number, sy: number): number | 'keep' | null {
     const link = CityScene.link;
     if (!link) return null;
@@ -329,6 +334,7 @@ export class CityScene extends Phaser.Scene {
       const [mx, my] = markerAt(i, r);
       if (Math.hypot(w.x - mx * T, w.y - my * T) < T * 0.45) return i; // a bit bigger than the marker, easier to hit
     }
+    if (w.x >= CASTLE_LEFT && w.x <= -CASTLE_LEFT && w.y >= CASTLE_TOP && w.y <= CASTLE_BOTTOM) return 'keep';
     const dx = Math.round(w.x / T);
     const dy = Math.round(w.y / T);
     if (Math.abs(dx) > r || Math.abs(dy) > r) return null;
@@ -352,15 +358,16 @@ export class CityScene extends Phaser.Scene {
     for (const k of cells) this.bob(layer, k.s, k.f, left + k.x * ART, top + k.y * ART, alpha);
   }
 
-  // A building centered on its plot (shifted left to make room for its prop). False = use the emoji instead.
-  private building(b: Building, x: number, y: number, alpha: number): boolean {
-    const pic: Pic = BUILDING_ART[b];
-    const all = pic.prop ? [...pic.cells, pic.prop] : pic.cells;
-    if (!canDraw(this, all)) return false;
-    const left = x - (pic.w * ART) / 2 - (pic.prop ? 7 : 0);
-    const top = y - (pic.h * ART) / 2 - 4;
-    this.cells('obj', pic.cells, left, top, alpha);
-    if (pic.prop) this.bob('obj', pic.prop.s, pic.prop.f, x + 9, y - 3, alpha);
+  // A building filling its plot (centered at x, y), with its props alongside. False = use the emoji instead.
+  private building(b: Building, x: number, y: number, t: PlotTerrain, alpha: number): boolean {
+    const pic = BUILDING_ART[b];
+    const under = BUILT_GROUND[t];
+    if (!canDraw(this, [...pic.cells, ...pic.props, ...under])) return false;
+    const left = x - T / 2;
+    const top = y - T / 2;
+    this.cells('ground', under, left, top, alpha);
+    this.cells('obj', pic.cells, left, top - (t === 'water' ? WATER_LIFT : 0), alpha);
+    this.cells('obj', pic.props, left, top, alpha);
     return true;
   }
 
@@ -403,23 +410,27 @@ export class CityScene extends Phaser.Scene {
       this.drawnGrass(g, r, seed);
     }
 
-    // Keep: a stone yard with the castle gate (walls level in the label)
-    g.fillStyle(0x6b7280, 1);
-    g.fillCircle(0, 0, T * 0.62);
-    if (canDraw(this, KEEP_ART.cells)) {
-      this.cells('obj', KEEP_ART.cells, -(KEEP_ART.w * ART) / 2, -(KEEP_ART.h * ART) / 2 - 2);
-      this.txt(0, NAME_Y, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
+    // Scenery first, so the castle and buildings stand in front of any tree that leans over them
+    this.drawScenery(r, seed);
+
+    // The Keep: the towered castle, or a stone yard with an emoji if the art is missing
+    const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
+    if (canDraw(this, CASTLE_ART.cells)) {
+      this.cells('obj', CASTLE_ART.cells, CASTLE_LEFT, CASTLE_TOP);
+      if (sel === 'keep') this.txt(0, CASTLE_BOTTOM + 7, keepName, 9, { label: true });
     } else {
+      g.fillStyle(0x6b7280, 1);
+      g.fillCircle(0, 0, T * 0.62);
       g.fillStyle(0x2a2f3a, 1);
       g.fillRoundedRect(-T / 2 + 2, -T / 2 + 2, T - 4, T - 4, 8);
       g.lineStyle(2 + c.walls * 1.5, 0x9ca3af, 1);
       g.strokeRoundedRect(-T / 2 + 3, -T / 2 + 3, T - 6, T - 6, 8);
       this.txt(0, -5, '\u{1F3F0}', 24);
-      this.txt(0, 15, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
+      this.txt(0, 15, keepName, 9, { label: true });
     }
     this.crowd(keepPeople(c.walls), 0, 0, 3);
 
-    // The 6 plots
+    // The 6 plots. Building names only show on the selected plot (the panel has the rest), like Kenney's sample.
     for (let i = 0; i < PLOT_COUNT; i++) {
       const [tx, ty] = PLOT_TILES[i];
       const x = tx * T;
@@ -428,6 +439,7 @@ export class CityScene extends Phaser.Scene {
       const locked = i >= open;
       const b = c.placed[i];
       const proj = c.projectPlot === i ? c.project : null;
+      const picked = sel === i;
       if (locked && !b) {
         // Locked: a faint outline of the plot to come, small lock and level name
         this.plotGround(g, x, y, t, 0.25);
@@ -435,30 +447,31 @@ export class CityScene extends Phaser.Scene {
         this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.7, small: true });
         continue;
       }
-      this.plotGround(g, x, y, t, 1);
       if (b) {
-        if (this.building(b, x, y, 1)) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
-        else {
+        if (this.building(b, x, y, t, 1)) {
+          if (picked) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
+        } else {
+          this.plotGround(g, x, y, t, 1);
           this.txt(x, y - 6, BUILDINGS[b].icon, 22);
           this.txt(x, y + 13, BUILDINGS[b].name, 10, { label: true });
         }
         this.crowd(PLOT_PEOPLE[b], x, y, i);
       } else if (proj) {
-        // Under construction: a see-through version of what's going up
-        if (this.building(proj, x, y, 0.45)) this.txt(x, y + NAME_Y, `${c.projectTurns}t left`, 10, { label: true });
+        // Under construction: a see-through version of what's going up, with the turns left
+        if (this.building(proj, x, y, t, 0.45)) this.txt(x, y + NAME_Y, `${c.projectTurns}t left`, 10, { label: true });
         else {
+          this.plotGround(g, x, y, t, 1);
           this.txt(x, y - 6, BUILDINGS[proj].icon, 22, { alpha: 0.45 });
           this.txt(x, y + 13, `${c.projectTurns}t left`, 10, { label: true });
         }
         this.crowd(BUILDER_PEOPLE, x, y, i);
       } else {
+        // Open plot: its ground (dirt lot, pond, sand or hills) with a + to build
+        this.plotGround(g, x, y, t, 1);
         this.txt(x, y - 5, '+', 26, { alpha: 0.85 });
         this.txt(x, y + 14, PLOT_NAME[t], 9, { label: true });
       }
     }
-
-    // Scenery: trees, bushes, rocks and flowers on open ground, just for looks (cleared once you can decorate, task 5)
-    this.drawScenery(r, seed);
 
     // What each plot faces on the map: a small hex past the edge. Faint unless it's paying a bonus (green)
     // or its plot is selected (white outline).
@@ -488,13 +501,18 @@ export class CityScene extends Phaser.Scene {
       if (work) this.txt(x, y, OUT_ICON[work], 10, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
-    // Selection
+    // Selection: around the castle for the Keep, around the plot otherwise
     this.selG.clear();
-    const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
+    const box = sel === 'keep' && canDraw(this, CASTLE_ART.cells)
+      ? { x: CASTLE_LEFT - 2, y: CASTLE_TOP - 2, w: -2 * CASTLE_LEFT + 4, h: CASTLE_BOTTOM - CASTLE_TOP + 4 }
+      : (() => {
+          const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
+          return { x: sx * T - T / 2 + 1, y: sy * T - T / 2 + 1, w: T - 2, h: T - 2 };
+        })();
     this.selG.lineStyle(6, 0x000000, 0.4);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 6);
+    this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
     this.selG.lineStyle(3, 0xfacc15, 1);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 6);
+    this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
@@ -524,7 +542,8 @@ export class CityScene extends Phaser.Scene {
     }
   }
 
-  // Seeded, so the same city always looks the same. Skips the Keep yard, plots and the tiles hugging them.
+  // Seeded, so the same city always looks the same. Skips the castle, plots and the tiles hugging them.
+  // Rows go top to bottom so lower trees overlap the ones behind them.
   private drawScenery(r: number, seed: number): void {
     const g = this.scenery;
     g.clear();
@@ -538,8 +557,7 @@ export class CityScene extends Phaser.Scene {
         if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
         const roll = hash01(dx, dy, seed, 10);
         if (art) {
-          if (roll > 0.5) continue;
-          this.artScenery(dx, dy, seed, roll);
+          this.artScenery(dx, dy, seed, roll, Math.max(Math.abs(dx), Math.abs(dy)) === r);
           continue;
         }
         if (roll > 0.42) continue;
@@ -553,27 +571,44 @@ export class CityScene extends Phaser.Scene {
     }
   }
 
-  // One tile of Kenney scenery: tree groves (a few in autumn colors), a bush with a flower, pebbles or flowers
-  private artScenery(dx: number, dy: number, seed: number, roll: number): void {
-    const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * ART;
-    const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * ART;
+  // One tile of Kenney scenery. Along the edge: thick clumps of round trees, like the woods in Kenney's sample.
+  // Inside: tall trees (a few in autumn colors), bushes, sprouts, mushrooms, bare patches and flowers.
+  private artScenery(dx: number, dy: number, seed: number, roll: number, edge: boolean): void {
+    const cx = dx * T;
+    const cy = dy * T;
+    if (edge && roll < 0.45) {
+      const autumn = hash01(dx, dy, seed, 17) < 0.15;
+      for (let j = 0; j < 4; j++) {
+        const across = j % 2 === 0 ? 3 : 2;
+        for (let i = 0; i < across; i++) {
+          const jx = (hash01(dx * 7 + i, dy * 7 + j, seed, 30) - 0.5) * 4;
+          const jy = (hash01(dx * 7 + i, dy * 7 + j, seed, 31) - 0.5) * 3;
+          this.bob('obj', 't', autumn ? SCENERY.smallAutumn : SCENERY.small, cx - 23 + i * 15 + (j % 2) * 7 + jx, cy - 30 + j * 11 + jy);
+        }
+      }
+      return;
+    }
+    if (roll > 0.5) return;
+    const x = cx + (hash01(dx, dy, seed, 11) - 0.5) * ART;
+    const y = cy + (hash01(dx, dy, seed, 12) - 0.5) * ART;
     const flower = (salt: number) => SCENERY.flowers[Math.floor(hash01(dx, dy, seed, salt) * SCENERY.flowers.length)];
     const tall = (px: number, py: number, autumn: boolean) => {
       this.bob('obj', 't', autumn ? SCENERY.autumnTop : SCENERY.tallTop, px - 8, py - 24);
       this.bob('obj', 't', autumn ? SCENERY.autumnBottom : SCENERY.tallBottom, px - 8, py - 8);
     };
     if (roll < 0.22) {
-      const autumn = hash01(dx, dy, seed, 17) < 0.15;
-      if (hash01(dx, dy, seed, 13) < 0.6) tall(x, y, autumn);
-      else this.bob('obj', 't', autumn ? SCENERY.smallAutumn : SCENERY.small, x - 8, y - 12);
+      tall(x, y, hash01(dx, dy, seed, 17) < 0.15);
       if (roll < 0.12) tall(x + 11, y + 8, false);
-      if (roll < 0.06) this.bob('obj', 't', SCENERY.small, x - 17, y + 4);
-    } else if (roll < 0.32) {
+    } else if (roll < 0.3) {
       this.bob('obj', 't', SCENERY.bush, x - 8, y - 8);
       const f = flower(15);
       this.bob('obj', f.s, f.f, x + 6, y);
-    } else if (roll < 0.4) {
-      this.bob('obj', SCENERY.rock.s, SCENERY.rock.f, x - 8, y - 8);
+    } else if (roll < 0.35) {
+      this.bob('obj', 't', SCENERY.sprout, x - 8, y - 8);
+    } else if (roll < 0.38) {
+      this.bob('obj', 't', SCENERY.mushrooms, x - 8, y - 8);
+    } else if (roll < 0.43) {
+      this.cells('ground', SCENERY.dirt, x - 16, y - 16);
     } else {
       const a = flower(15);
       const b = flower(16);
@@ -616,12 +651,12 @@ export class CityScene extends Phaser.Scene {
     g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
-  // A plot's own ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim
+  // An open plot's ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim
   private plotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
     const cells = PLOT_GROUND[t];
     if (canDraw(this, cells)) {
       this.cells('ground', cells, x - T / 2, y - T / 2, alpha);
-      if (t === 'hills') this.bob('ground', HILL_ROCK.s, HILL_ROCK.f, x + 6, y + 6, alpha);
+      if (t === 'hills') this.bob('ground', 'r', 614, x + 6, y + 6, alpha);
       return;
     }
     const l = x - T / 2 + 3;
