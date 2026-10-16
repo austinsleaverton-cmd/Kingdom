@@ -1,13 +1,13 @@
 // City screen: the inside of one of your cities as its own Phaser scene (docs/CITY_BUILDER.md).
-// A square ground grid with the Keep dead center, the 6 plots as one tile each, a road from the Keep to every plot,
-// and the map hex each plot faces as a small marker just past the grid edge. Drag to pan, pinch or wheel to zoom.
+// A grassy town square with the Keep dead center, the 6 plots as one tile each, a dirt street from the Keep to every plot,
+// and the map hex each plot faces as a small marker just past the edge. Drag to pan, pinch or wheel to zoom.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building,
 // so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
 import type { GameState } from '../world/game';
 import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
-import { PLOT_TILES, ROAD_TILES, gridRadius, plotAtTile, plotLevel } from '../world/grid';
+import { PLOT_TILES, ROAD_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
 import type { PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
@@ -28,14 +28,17 @@ export interface CityLink {
 }
 
 const T = 56; // tile size in world px
-const MARKER_OUT = 0.95; // facing markers sit this many tiles past the grid edge
+const MARKER_OUT = 0.85; // facing markers sit this many tiles past the edge
+const MARKER_R = T * 0.3; // facing marker size
 const DRAG_PX = 8; // movement before a press counts as a pan, not a tap
 const LABEL_MIN = 34; // tile size on screen (px) below which names hide (icons stay)
 const PERSON_SCALE = 1.5;
 
-const GRASS = [0x5fa646, 0x66ad4c, 0x6cb452];
-const ROAD = 0xa98455;
-const ROAD_EDGE = 0x7f6038;
+const GRASS = 0x62a948;
+const GRASS_LIGHT = 0x6db552;
+const GRASS_DARK = 0x58993f;
+const DIRT = 0xb08a58;
+const DIRT_EDGE = 0x8a6a3e;
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x8c7a4c };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x8c7a4c, mountain: 0x9a9a9a };
@@ -58,10 +61,11 @@ function hexPts(cx: number, cy: number, rad: number): Phaser.Math.Vector2[] {
   return pts;
 }
 
-// Same grass pattern every time you open the same city
-function grassAt(dx: number, dy: number, seed: number): number {
-  const h = Math.imul(dx + 101, 73856093) ^ Math.imul(dy + 211, 19349663) ^ seed;
-  return GRASS[((h >>> 0) % 7) % GRASS.length];
+// Same pattern every time you open the same city: a 0..1 number per tile and salt
+function hash01(dx: number, dy: number, seed: number, salt: number): number {
+  let h = Math.imul(dx + 101, 73856093) ^ Math.imul(dy + 211, 19349663) ^ Math.imul(salt + 7, 83492791) ^ seed;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
 export class CityScene extends Phaser.Scene {
@@ -69,6 +73,7 @@ export class CityScene extends Phaser.Scene {
   private static instance: CityScene | null = null;
 
   private ground!: Phaser.GameObjects.Graphics;
+  private scenery!: Phaser.GameObjects.Graphics;
   private marks!: Phaser.GameObjects.Graphics;
   private selG!: Phaser.GameObjects.Graphics;
   private texts: Phaser.GameObjects.Text[] = [];
@@ -110,6 +115,7 @@ export class CityScene extends Phaser.Scene {
     makeCitySprites(this);
     this.cameras.main.setBackgroundColor('#141a26');
     this.ground = this.add.graphics().setDepth(0);
+    this.scenery = this.add.graphics().setDepth(1.5);
     this.marks = this.add.graphics().setDepth(1);
     this.selG = this.add.graphics().setDepth(4);
     this.ready = true;
@@ -148,13 +154,13 @@ export class CityScene extends Phaser.Scene {
     return v;
   }
 
-  // Whole grid plus the facing markers fits the free part of the screen, Keep in the middle of it
+  // Whole town plus the facing markers fits the free part of the screen, Keep in the middle of it
   private fit(): void {
     const link = CityScene.link;
     if (!link) return;
     const cam = this.cameras.main;
     const v = this.view();
-    const extent = (gridRadius(link.city) + MARKER_OUT + 0.7) * 2 * T;
+    const extent = (gridRadius(link.city) + MARKER_OUT + 0.6) * 2 * T;
     const z = Phaser.Math.Clamp(Math.min(v.w / extent, v.h / extent), 0.25, 3);
     this.minZoom = z * 0.75;
     this.maxZoom = Math.max(z * 4, 2.5);
@@ -184,7 +190,7 @@ export class CityScene extends Phaser.Scene {
     };
   }
 
-  // Never lose the town: the middle of the view stays over the grid
+  // Never lose the town: the middle of the view stays over it
   private clampCam(): void {
     const link = CityScene.link;
     if (!link) return;
@@ -295,7 +301,7 @@ export class CityScene extends Phaser.Scene {
     for (let i = 0; i < PLOT_COUNT; i++) {
       if (!facingTile(link.city, i)) continue;
       const [mx, my] = markerAt(i, r);
-      if (Math.hypot(w.x - mx * T, w.y - my * T) < T * 0.5) return i;
+      if (Math.hypot(w.x - mx * T, w.y - my * T) < T * 0.45) return i; // a bit bigger than the marker, easier to hit
     }
     const dx = Math.round(w.x / T);
     const dy = Math.round(w.y / T);
@@ -313,49 +319,54 @@ export class CityScene extends Phaser.Scene {
     const sel = link.sel();
     const r = gridRadius(c);
     const open = openPlots(c, s.isSimple(link.me));
+    const seed = c.col * 92821 + c.row * 68917;
     this.nText = 0;
     this.nPeople = 0;
     this.labels = [];
 
-    // Ground: a raised square of grass with a dark edge and a soft shadow
+    // Ground: one soft field of grass (no tile lines; the grid only shows when placing things, task 5)
     const g = this.ground;
     g.clear();
     const half = (r + 0.5) * T;
     g.fillStyle(0x000000, 0.35);
-    g.fillRect(-half + 6, -half + 10, 2 * half, 2 * half);
-    g.fillStyle(0x2f5a24, 1);
-    g.fillRect(-half - 5, -half - 5, 2 * half + 10, 2 * half + 10);
-    const seed = c.col * 92821 + c.row * 68917;
+    g.fillRoundedRect(-half + 6, -half + 10, 2 * half, 2 * half, 22);
+    g.fillStyle(0x3d6e2c, 1);
+    g.fillRoundedRect(-half - 4, -half - 4, 2 * half + 8, 2 * half + 8, 24);
+    g.fillStyle(GRASS, 1);
+    g.fillRoundedRect(-half, -half, 2 * half, 2 * half, 20);
+    // Soft patches of lighter and darker grass so the field doesn't look flat or tiled
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
-        g.fillStyle(grassAt(dx, dy, seed), 1);
-        g.fillRect(dx * T - T / 2, dy * T - T / 2, T, T);
+        const a = hash01(dx, dy, seed, 1);
+        if (a > 0.55) continue;
+        const ox = (hash01(dx, dy, seed, 2) - 0.5) * T * 0.6;
+        const oy = (hash01(dx, dy, seed, 3) - 0.5) * T * 0.6;
+        g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
+        g.fillEllipse(dx * T + ox, dy * T + oy, T * (0.7 + a), T * (0.45 + a * 0.6));
       }
     }
-    g.lineStyle(1, 0x000000, 0.07);
-    for (let k = -r; k <= r + 1; k++) {
-      g.lineBetween(k * T - T / 2, -half, k * T - T / 2, half);
-      g.lineBetween(-half, k * T - T / 2, half, k * T - T / 2);
+    // Little grass tufts
+    g.fillStyle(0x4f8a39, 0.7);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (reservedTile(dx, dy) || hash01(dx, dy, seed, 4) > 0.5) continue;
+        const x = dx * T + (hash01(dx, dy, seed, 5) - 0.5) * T * 0.7;
+        const y = dy * T + (hash01(dx, dy, seed, 6) - 0.5) * T * 0.7;
+        g.fillTriangle(x - 3, y + 2, x - 1, y - 4, x + 1, y + 2);
+        g.fillTriangle(x, y + 2, x + 2, y - 5, x + 4, y + 2);
+      }
     }
 
-    // Roads from the Keep to each plot
-    for (const [dx, dy] of ROAD_TILES) {
-      const x = dx * T;
-      const y = dy * T;
-      g.fillStyle(ROAD_EDGE, 1);
-      g.fillRect(x - T / 2 + 4, y - T / 2 + 4, T - 8, T - 8);
-      g.fillStyle(ROAD, 1);
-      g.fillRect(x - T / 2 + 6, y - T / 2 + 6, T - 12, T - 12);
-      g.fillStyle(ROAD_EDGE, 0.5);
-      g.fillCircle(x - 8, y + 5, 2);
-      g.fillCircle(x + 9, y - 6, 1.5);
-    }
+    // Streets: one continuous dirt path from the Keep, through its road tile, to each plot
+    this.streets(g);
 
-    // Keep: stone tile, walls drawn as a thicker grey rim per level
+    // Keep: a stone yard, walls drawn as a thicker grey rim per level
+    g.fillStyle(0x6b7280, 1);
+    g.fillCircle(0, 0, T * 0.62);
     g.fillStyle(0x2a2f3a, 1);
-    g.fillRoundedRect(-T / 2 + 2, -T / 2 + 2, T - 4, T - 4, 6);
+    g.fillRoundedRect(-T / 2 + 2, -T / 2 + 2, T - 4, T - 4, 8);
     g.lineStyle(2 + c.walls * 1.5, 0x9ca3af, 1);
-    g.strokeRoundedRect(-T / 2 + 3, -T / 2 + 3, T - 6, T - 6, 6);
+    g.strokeRoundedRect(-T / 2 + 3, -T / 2 + 3, T - 6, T - 6, 8);
     this.txt(0, -5, '\u{1F3F0}', 28);
     this.txt(0, 17, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
     this.crowd(keepPeople(c.walls), 0, 0, 3);
@@ -369,8 +380,16 @@ export class CityScene extends Phaser.Scene {
       const locked = i >= open;
       const b = c.placed[i];
       const proj = c.projectPlot === i ? c.project : null;
-      const dim = locked && !b ? 0.45 : 1;
-      this.plotGround(g, x, y, t, dim);
+      if (locked && !b) {
+        // Locked: a faint outline of the plot to come, small lock and level name
+        g.fillStyle(GRASS, 1); // cover the street end so the faint plot reads as empty ground
+        g.fillRoundedRect(x - T / 2 + 3, y - T / 2 + 3, T - 6, T - 6, 8);
+        this.plotGround(g, x, y, t, 0.22);
+        this.txt(x, y - 4, '\u{1F512}', 12, { alpha: 0.55 });
+        this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.6, small: true });
+        continue;
+      }
+      this.plotGround(g, x, y, t, 1);
       if (b) {
         this.txt(x, y - 6, BUILDINGS[b].icon, 26);
         this.txt(x, y + 15, BUILDINGS[b].name, 10, { label: true });
@@ -379,16 +398,17 @@ export class CityScene extends Phaser.Scene {
         this.txt(x, y - 6, BUILDINGS[proj].icon, 26, { alpha: 0.45 });
         this.txt(x, y + 15, `${c.projectTurns}t left`, 10, { label: true });
         this.crowd(BUILDER_PEOPLE, x, y, i);
-      } else if (locked) {
-        this.txt(x, y - 5, '\u{1F512}', 18, { alpha: 0.85 });
-        this.txt(x, y + 15, LEVEL_NAMES[plotLevel(i)], 9, { label: true });
       } else {
         this.txt(x, y - 5, '+', 28, { alpha: 0.85 });
         this.txt(x, y + 16, PLOT_NAME[t], 9, { label: true });
       }
     }
 
-    // What each plot faces on the map: a small hex past the edge, lit green when it's paying a bonus
+    // Scenery: trees, bushes and rocks on open ground, just for looks (cleared once you can decorate, task 5)
+    this.drawScenery(r, seed);
+
+    // What each plot faces on the map: a small hex past the edge. Faint unless it's paying a bonus (green)
+    // or its plot is selected (white outline).
     const m = this.marks;
     m.clear();
     for (let i = 0; i < PLOT_COUNT; i++) {
@@ -397,31 +417,110 @@ export class CityScene extends Phaser.Scene {
       const [mx, my] = markerAt(i, r);
       const x = mx * T;
       const y = my * T;
-      const mine = t.owner === c.owner;
       const b = c.placed[i];
       const paying = !!b && plotBonus(c, i, b).notes.some((n) => n.includes('facing'));
-      // dotted guide from the plot out to its marker
-      const [px, py] = PLOT_TILES[i];
-      this.dots(m, px * T, py * T, x, y, paying ? 0x4ade80 : 0xffffff, paying ? 0.55 : 0.18);
-      const pts = hexPts(x, y, T * 0.42);
-      m.fillStyle(OUT_COLOR[t.terrain], mine ? 0.85 : 0.4);
+      const picked = sel === i;
+      if (paying) {
+        const [px, py] = PLOT_TILES[i];
+        this.dots(m, px * T, py * T, x, y, 0x4ade80, 0.6);
+      }
+      const pts = hexPts(x, y, MARKER_R);
+      m.fillStyle(OUT_COLOR[t.terrain], paying ? 0.9 : picked ? 0.6 : 0.25);
       m.fillPoints(pts, true);
-      m.lineStyle(paying ? 3 : 1.5, paying ? 0x4ade80 : 0x000000, paying ? 1 : 0.4);
-      m.strokePoints(pts, true);
+      if (paying || picked) {
+        m.lineStyle(paying ? 2.5 : 1.5, paying ? 0x4ade80 : 0xffffff, paying ? 1 : 0.7);
+        m.strokePoints(pts, true);
+      }
       const work = t.improvement ?? (t.road ? 'road' : null);
-      if (work) this.txt(x, y, OUT_ICON[work], 15, { alpha: mine ? 1 : 0.5 });
+      if (work) this.txt(x, y, OUT_ICON[work], 11, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
     // Selection
     this.selG.clear();
     const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
     this.selG.lineStyle(7, 0x000000, 0.4);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 7);
+    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 8);
     this.selG.lineStyle(3.5, 0xfacc15, 1);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 7);
+    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 8);
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
+  }
+
+  // Keep -> road tile -> plot for every plot, drawn as one wide dirt path with a darker edge and round corners
+  private streets(g: Phaser.GameObjects.Graphics): void {
+    const paths = PLOT_TILES.map((p, i) => [[0, 0], ROAD_TILES[i], p] as const);
+    const pass = (w: number, color: number, alpha: number) => {
+      g.lineStyle(w, color, alpha);
+      g.fillStyle(color, alpha);
+      for (const pts of paths) {
+        for (let k = 0; k < pts.length - 1; k++) g.lineBetween(pts[k][0] * T, pts[k][1] * T, pts[k + 1][0] * T, pts[k + 1][1] * T);
+        for (const [x, y] of pts) g.fillCircle(x * T, y * T, w / 2); // round joints, no gaps at the bends
+      }
+    };
+    pass(T * 0.42, DIRT_EDGE, 1);
+    pass(T * 0.32, DIRT, 1);
+    // A few pebbles along the way
+    g.fillStyle(DIRT_EDGE, 0.6);
+    for (const [rx, ry] of ROAD_TILES) {
+      g.fillCircle(rx * T - 5, ry * T + 4, 1.6);
+      g.fillCircle(rx * T + 6, ry * T - 3, 1.3);
+    }
+  }
+
+  // Seeded, so the same city always looks the same. Skips the Keep yard, plots, streets and the tiles hugging them.
+  private drawScenery(r: number, seed: number): void {
+    const g = this.scenery;
+    g.clear();
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
+        if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
+        const roll = hash01(dx, dy, seed, 10);
+        if (roll > 0.42) continue;
+        const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
+        const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
+        if (roll < 0.2) this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
+        else if (roll < 0.33) this.bush(g, x, y);
+        else this.rock(g, x, y);
+        // Sometimes a second, smaller tree: little groves read better than single trees
+        if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
+      }
+    }
+  }
+
+  private tree(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number): void {
+    g.fillStyle(0x000000, 0.18);
+    g.fillEllipse(x + 2, y + 12 * s, 22 * s, 7 * s);
+    g.fillStyle(0x5b3a1e, 1);
+    g.fillRect(x - 2 * s, y + 2 * s, 4 * s, 10 * s);
+    g.fillStyle(0x2f6b2a, 1);
+    g.fillCircle(x, y - 3 * s, 11 * s);
+    g.fillStyle(0x3d8434, 1);
+    g.fillCircle(x - 3 * s, y - 6 * s, 7 * s);
+    g.fillStyle(0x4f9a43, 0.8);
+    g.fillCircle(x - 5 * s, y - 8 * s, 3 * s);
+  }
+
+  private bush(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+    g.fillStyle(0x000000, 0.15);
+    g.fillEllipse(x + 1, y + 5, 20, 6);
+    g.fillStyle(0x356f2c, 1);
+    g.fillCircle(x - 5, y, 6);
+    g.fillCircle(x + 5, y, 6);
+    g.fillCircle(x, y - 3, 7);
+    g.fillStyle(0xe25c7a, 0.9);
+    g.fillCircle(x - 3, y - 4, 1.5);
+    g.fillCircle(x + 4, y - 1, 1.5);
+  }
+
+  private rock(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+    g.fillStyle(0x000000, 0.15);
+    g.fillEllipse(x + 1, y + 4, 16, 5);
+    g.fillStyle(0x8b8f96, 1);
+    g.fillEllipse(x, y, 14, 9);
+    g.fillStyle(0xb3b7bd, 1);
+    g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
   // A plot's own ground (its map terrain) with a little fence-colored rim so plots read as building spots
@@ -430,7 +529,7 @@ export class CityScene extends Phaser.Scene {
     const top = y - T / 2 + 3;
     const s = T - 6;
     g.fillStyle(PLOT_COLOR[t], alpha);
-    g.fillRoundedRect(l, top, s, s, 6);
+    g.fillRoundedRect(l, top, s, s, 8);
     if (t === 'water') {
       g.lineStyle(1.5, 0x7dd3fc, 0.5 * alpha);
       g.lineBetween(x - 16, y - 12, x - 6, y - 12);
@@ -447,13 +546,13 @@ export class CityScene extends Phaser.Scene {
       g.fillCircle(x + 10, y + 12, 1.5);
     }
     g.lineStyle(2, 0x3b2a17, 0.55 * alpha);
-    g.strokeRoundedRect(l, top, s, s, 6);
+    g.strokeRoundedRect(l, top, s, s, 8);
   }
 
   private dots(g: Phaser.GameObjects.Graphics, x1: number, y1: number, x2: number, y2: number, color: number, alpha: number): void {
     const len = Math.hypot(x2 - x1, y2 - y1);
     const start = T * 0.55; // from the plot's edge
-    const end = len - T * 0.42; // to the marker's edge
+    const end = len - MARKER_R; // to the marker's edge
     g.fillStyle(color, alpha);
     for (let d = start; d < end; d += 9) {
       const f = d / len;
@@ -461,7 +560,8 @@ export class CityScene extends Phaser.Scene {
     }
   }
 
-  private txt(x: number, y: number, s: string, size: number, o: { label?: boolean; alpha?: number } = {}): Phaser.GameObjects.Text {
+  // label: bold with an outline, hides when zoomed far out. small: plain small text that always shows.
+  private txt(x: number, y: number, s: string, size: number, o: { label?: boolean; small?: boolean; alpha?: number } = {}): Phaser.GameObjects.Text {
     let t = this.texts[this.nText];
     if (!t) {
       t = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', color: '#ffffff' }).setOrigin(0.5).setResolution(2);
@@ -471,7 +571,7 @@ export class CityScene extends Phaser.Scene {
     t.setText(s)
       .setFontSize(size)
       .setFontStyle(o.label ? 'bold' : '')
-      .setStroke('#000000', o.label ? 3 : 0)
+      .setStroke('#000000', o.label ? 3 : o.small ? 2 : 0)
       .setAlpha(o.alpha ?? 1)
       .setPosition(x, y)
       .setDepth(o.label ? 3.5 : 2)
