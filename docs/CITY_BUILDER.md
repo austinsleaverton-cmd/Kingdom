@@ -2,7 +2,7 @@
 
 Run the kingdom on the map, then zoom into a city and build it out like a real town. Extends `docs/CITY_VIEW.md`: the rules there (6 plots, terrain, neighbors, facing, auto-place, scoring) stay exactly as they are. This adds a ground grid around them, free-placed decorations, real art and a zoom transition.
 
-**Status:** spec only. Nothing built yet.
+**Status:** spec approved. Building starts with task 3 (city screen).
 
 ## Goals
 
@@ -63,7 +63,7 @@ The Keep is the center tile. Each building is **one tile** (one plot = one tile,
 
 ### Starter set (v1)
 
-Starting list, judged once it's on screen (add/cut freely in step 5).
+Starting list, judged once it's on screen (add/cut freely in task 5).
 
 | Decoration | Kind | Notes |
 | --- | --- | --- |
@@ -150,13 +150,13 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 | Statue, fountain, banner | RPG | direct tiles (banner tinted to player color) |
 | Construction | Tiny Town | scaffold/fence + existing pixel builders from `citySprites.ts` |
 
-- Exact tile indices live in one table, `CITY_ART` in `src/scenes/cityArt.ts`, picked in build step 1 by checking the sheets. Swapping art = editing that table.
+- Exact tile indices live in one table, `CITY_ART` in `src/scenes/cityArt.ts`, picked in task 4 by checking the sheets. Swapping art = editing that table.
 - Pixel people from `citySprites.ts` stay (they already match the 8-bit look).
 - Licenses are CC0, nothing to credit, but keep the `License.txt` files.
 
 ## Zoom transition
 
-- **In:** pinch / scroll zoom on the map past the max map zoom while centered on your own city, or the existing **Open city** button / double-tap. Short (~350ms) zoom + fade: the map camera zooms toward the city hex, then the city fades in at the same screen spot and settles.
+- **In:** pinch / scroll zoom on the map past the max map zoom while centered on your own city, or the existing **Open city** button / double-tap / O key. Short (~350ms) zoom + fade: the map camera zooms toward the city hex, then the city fades in at the same screen spot and settles.
 - **Out:** pinch out past the city's min zoom, the Back button, or Esc. Reverse animation, map returns exactly where you were (camera position and zoom saved before going in).
 - Enemy / unexplored cities: zooming in just stops at max map zoom, like now.
 - Inside the city: pan and pinch zoom within the grid bounds (clamped so you can't lose the town).
@@ -164,7 +164,7 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 
 ### Scene setup
 
-- New Phaser scene `src/scenes/CityScene.ts` draws the grid, buildings, decorations and people from the Kenney sheets (Phaser handles sprite sheets, drag and pinch far better than the current SVG).
+- New Phaser scene `src/scenes/CityScene.ts` draws the grid, buildings, decorations and people (Phaser handles sprite sheets, drag and pinch far better than the current SVG).
 - `MapScene` sleeps while the city is open, wakes on the way out (same plan `CITY_VIEW.md` already had).
 - The **side panel stays DOM**: the build list, plot info and bonuses from `CityView.ts` are reused as a panel; the SVG drawing is retired.
 - World logic stays in `src/world` (`placeDeco`, `moveDeco`, `removeDeco` on `GameState`, all validated there).
@@ -180,13 +180,13 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 - MapScene sleeps (not just hidden) so it isn't rendering underneath.
 - Saves only on change (place/move/remove), not every frame.
 
-## Build order
+## Build order (matches the ClickUp City Builder list)
 
-1. **Data + rules:** `gridLevel`, `deco`, `DECO_ORDER`, place/move/remove, costs, beauty bonus, Hard AI decorating, save + old-save migration. Pick `CITY_ART` tile ids. Run the AI test games (Hard with and without decorating) to sanity-check beauty and gold use.
-2. **CityScene grid:** ground, roads, Keep, 6 plots with buildings, facing markers, pan/zoom. Side panel wired up. Replaces the SVG drawing.
-3. **Decorations UI:** tray, tap to place, drag to move, remove, prices, beauty line.
-4. **Zoom transition:** pinch in/out from the map, animation, camera restore.
-5. **Polish + balance:** grid growth toast, help section in `Help.ts`, phone testing, review the starter set on screen, beauty tuning from your playtest.
+3. **City screen** (task 3): new `CityScene` with the ground grid, `gridLevel` (grows 7/9/11, never shrinks, old-save migration), roads, Keep, 6 one-tile plots with buildings, facing markers, pan/pinch zoom. Side panel and pixel people kept. Opens/closes the same ways (double-tap, O, Open city, Esc). Uses the current drawn art. Replaces the SVG drawing.
+4. **Kenney art** (task 4): load the sheets in `BootScene`, `CITY_ART` table for buildings, plot terrain, roads and the decoration palette, nearest-neighbor scaling, fallback if a sprite is missing, preview image.
+5. **Decorate mode** (task 5): `deco`, `DECO_ORDER`, `placeDeco` / `moveDeco` / `removeDeco`, costs by difficulty, save + old-save migration, tray UI (tap to place, drag to move, remove). Cosmetic only at this point.
+6. **Zoom transition** (task 6): pinch/scroll in and out between map and city, animation, camera restore, reduced motion.
+7. **Beauty bonus + Hard AI** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths max 4), `Beautiful streets` line, Hard AI decorating, AI test games with Hard decorating on and off, help section in `Help.ts`, grid-growth toast, tune from your playtest.
 
 Each step should pass `npx vite build` and the AI test games before moving on.
 
@@ -202,8 +202,8 @@ Each step should pass `npx vite build` and the AI test games before moving on.
 
 ## Still open (answer when you can see it)
 
-1. **Starter set:** add/cut once the decorations are on screen (step 3).
-2. **Beauty numbers:** confirm or retune after your playtest.
+1. **Starter set:** add/cut once the decorations are on screen (task 5).
+2. **Beauty numbers:** confirm or retune after your playtest (task 7).
 
 ## v2 (not now)
 
