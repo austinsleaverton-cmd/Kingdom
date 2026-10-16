@@ -36,6 +36,8 @@ export interface Tile {
   plots: PlotTerrain[]; // terrain of each plot, snapshotted when the city is founded
   placed: (Building | null)[]; // the amenity standing on each plot
   projectPlot: number | null; // plot reserved for the amenity under construction
+  // City Builder (city only): highest level ever reached, drives the ground grid size (see world/grid.ts)
+  gridLevel?: number;
 }
 
 export const MAX_HEIGHT = 5;
@@ -178,6 +180,7 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.plots = [];
     tile.placed = [];
     tile.projectPlot = null;
+    tile.gridLevel = 0;
   }
 }
 
@@ -226,5 +229,6 @@ export function makeTile(col: number, row: number, height: number): Tile {
     plots: [],
     placed: [],
     projectPlot: null,
+    gridLevel: 0,
   };
 }

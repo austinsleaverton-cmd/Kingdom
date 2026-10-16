@@ -2,7 +2,8 @@
 import { linkPlots, placeExisting, setupPlots } from './city';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
-import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
+import { gridLevel, syncGrid } from './grid';
+import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityLevel, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
 import type { Building, PlayerId, PlotTerrain } from './tile';
 import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
@@ -43,6 +44,8 @@ interface SaveData {
   palisades?: Record<number, number>; // tile index -> palisade HP
   // City View, city tile index -> [plot terrain letters, amenity on each plot (BUILDING_ORDER index, -1 none), reserved plot (-1 none)]
   plots?: Record<number, [string, number[], number]>;
+  // City Builder, city tile index -> highest level ever reached (grid size). Older saves: the city's level now
+  grid?: Record<number, number>;
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -58,6 +61,8 @@ export interface SaveSummary {
 }
 
 export function saveGame(state: GameState): void {
+  // A city that just grew keeps its bigger grid even if it loses a level later
+  for (const t of state.map.tiles) if (t.city) syncGrid(t);
   const data: SaveData = {
     version: 3,
     options: state.options,
@@ -84,6 +89,7 @@ export function saveGame(state: GameState): void {
           : [],
       ),
     ),
+    grid: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.city ? [[i, gridLevel(t)]] : []))),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -163,6 +169,9 @@ export function loadGame(): GameState | null {
       t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
       t.home = data.homes && data.homes.length === data.tiles.length ? data.homes[i] : null;
       t.palisade = data.palisades?.[i] ?? 0;
+      // City Builder grid: older saves start at the city's level now (never smaller than that)
+      const g = Number(data.grid?.[i] ?? 0);
+      t.gridLevel = t.city ? Math.max(Number.isFinite(g) ? Math.min(5, Math.floor(g)) : 0, cityLevel(t)) : 0;
       t.plots = [];
       t.placed = [];
       t.projectPlot = null;

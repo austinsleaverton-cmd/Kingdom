@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { MapScene } from './scenes/MapScene';
+import { CityScene } from './scenes/CityScene';
+import { attachCityScreen } from './scenes/CityView';
 import { installHelp } from './scenes/Help';
 
 // The test build at /dev/ (built with VITE_CHANNEL=dev) says so in the tab / app switcher
@@ -16,10 +18,12 @@ const config: Phaser.Types.Core.GameConfig = {
     mode: Phaser.Scale.RESIZE,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [MapScene],
+  // The map starts; the city screen sleeps until you open a city
+  scene: [MapScene, CityScene],
 };
 
 export const game = new Phaser.Game(config);
+attachCityScreen(game); // lets the City View switch between the map and the city screen
 installHelp(); // the "?" button and rules guide
 
 // iOS can leave the page scrolled or the canvas mis-sized after rotating, so taps land in the
