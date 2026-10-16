@@ -1,6 +1,6 @@
 // The "?" button (top-right, always visible: start screen and in game) and the rules guide it opens.
 // Numbers come straight from src/world so the guide stays right when the rules change.
-import { ADJACENCY, TERRAIN_BONUS } from '../world/city';
+import { ADJACENCY, FACING_BONUS, TERRAIN_BONUS, bonusAmount } from '../world/city';
 import {
   ANGRY_AT, ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SIGHT, CITY_SPACING, CLAIM_RADIUS,
   DIFFICULTY, EASY_HAPPY, FARM_FOOD, FISHERY_FOOD, HAPPY_AT, HAPPY_BASE, HARBOR_FISH, HOME_HEAL, KNIGHTS_PER_PASTURE, MAX_POP, MINE_STONE,
@@ -61,6 +61,11 @@ function bonusList(): string {
   const amount = (r: { gold?: number; food?: number; happy?: number; culture?: number }) =>
     [r.gold && `+${r.gold} gold`, r.food && `+${r.food} food`, r.happy && `+${r.happy} happy`, r.culture && `+${r.culture} culture`].filter(Boolean).join(', ');
   return [...TERRAIN_BONUS, ...ADJACENCY].map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${amount(r)}</li>`).join('');
+}
+
+// "Workshop facing a mine: +1 stone"
+function facingList(): string {
+  return FACING_BONUS.map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${bonusAmount(r)}</li>`).join('');
 }
 
 function guideHtml(): string {
@@ -129,7 +134,8 @@ function guideHtml(): string {
         `<li><b>Open the city</b>: double-tap your city, press <kbd>O</kbd>, or use Open city in the city panel. Tap a plot to see what fits there and what each building would earn on that exact spot. \u2605 marks the best spot.</li>` +
         `<li>A quick double-tap opens the city. Tap once, then again a moment later, to pick the unit standing in it.</li>` +
         `<li>The build buttons in the city panel <b>place it for you</b> on the best open plot, and tell you where it went.</li>` +
-        `<li><b>Placement bonuses</b> (neighbors are the plots on either side):<ul>${bonusList()}</ul></li></ul>`,
+        `<li><b>Placement bonuses</b> (neighbors are the plots on either side):<ul>${bonusList()}</ul></li>` +
+        `<li><b>Facing bonuses</b>: each plot faces the map hex in its direction (the small hexes around the edge of the City View). An improvement or road there, on your land, helps the building on that plot. It's live: if it gets pillaged, the bonus stops until it's rebuilt.<ul>${facingList()}</ul></li></ul>`,
     ),
     sec(
       'Builders',

@@ -2,9 +2,10 @@
 // A DOM overlay like the HUD: it reads the world and only changes it through GameState methods.
 // Plot i is drawn in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
 import type { GameState } from '../world/game';
-import { ADJACENCY, TERRAIN_BONUS, bestPlot, cityBonus, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
+import { ADJACENCY, FACING_BONUS, TERRAIN_BONUS, bestPlot, bonusAmount, cityBonus, facingTile, facingWork, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
+import type { Outside } from '../world/city';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
-import type { Building, PlotTerrain, Tile } from '../world/tile';
+import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { PX_CSS, builderActors, keepActors, plotActors } from './citySprites';
 
 export interface CityViewHandlers {
@@ -14,9 +15,15 @@ export interface CityViewHandlers {
 
 const PLOT_COLOR: Record<PlotTerrain, string> = { water: '#1f5f9e', sand: '#d9c38a', grass: '#6bb352', hills: '#8c7a4c' };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
+// The ring of map hexes outside the plots: what each plot faces
+const OUT_COLOR: Record<Terrain, string> = { water: '#1f5f9e', sand: '#d9c38a', grass: '#6bb352', hills: '#8c7a4c', mountain: '#9a9a9a' };
+const OUT_NAME: Record<Outside, string> = { farm: 'a farm', pasture: 'a pasture', mine: 'a mine', forest: 'a forest', fishery: 'a fishery', road: 'a road' };
+const OUT_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
+const OUT_R = 20; // small hexes
 const R = 52; // hex radius inside the drawing
 const SQ3 = Math.sqrt(3);
 const DIR_XY: [number, number][] = [[SQ3, 0], [SQ3 / 2, -1.5], [-SQ3 / 2, -1.5], [-SQ3, 0], [-SQ3 / 2, 1.5], [SQ3 / 2, 1.5]];
+const OUT_DIST = SQ3 * R + ((R - 2) * SQ3) / 2 + 4 + (OUT_R * SQ3) / 2; // just past each plot's outer edge
 
 const CSS = `
 .k-city { position: fixed; inset: 0; z-index: 20; display: none; background: radial-gradient(circle at 50% 35%, #1d2433, #0b0e14 75%);
@@ -130,7 +137,21 @@ function bonusRules(): string {
   return [
     ...TERRAIN_BONUS.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${amount(r)}`),
     ...ADJACENCY.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${amount(r)}`),
+    ...FACING_BONUS.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${bonusAmount(r)}`),
   ].join(' \u00b7 ');
+}
+
+// "Looks out on a mine (your land): a Workshop here gets +1 stone"
+function facingLine(c: Tile, i: number): string {
+  const t = facingTile(c, i);
+  if (!t) return '';
+  const work = facingWork(c, i);
+  const theirs = t.owner !== null && t.owner !== c.owner;
+  const what = work ? OUT_NAME[work] : t.improvement ? OUT_NAME[t.improvement] : t.road ? 'a road' : `bare ${t.terrain}`;
+  const where = t.owner === null ? 'unclaimed' : theirs ? "someone else's land" : 'your land';
+  const fans = FACING_BONUS.filter((r) => r.imp === work || (r.imp === 'road' && work !== null && t.road));
+  const tip = fans.length ? `: ${fans.map((r) => `${BUILDINGS[r.b].name} ${bonusAmount(r)}`).join(', ')}` : t.owner === c.owner ? '' : ' (no bonus until it\'s yours)';
+  return `<p>Faces ${what} on ${where}${tip}.</p>`;
 }
 
 export class CityView {
@@ -202,9 +223,26 @@ export class CityView {
       `<button type="button" data-close><kbd>Esc</kbd>Back to map</button></div>`;
 
     // The drawing: Keep in the middle, 6 plots around it
-    const w = 1.5 * SQ3 * R + 6;
-    const hgt = 2.5 * R + 6;
+    const w = OUT_DIST + OUT_R + 4;
+    const hgt = Math.max(2.5 * R, (OUT_DIST * SQ3) / 2 + OUT_R) + 4;
     let svg = `<svg viewBox="${(-w).toFixed(1)} ${(-hgt).toFixed(1)} ${(2 * w).toFixed(1)} ${(2 * hgt).toFixed(1)}" xmlns="http://www.w3.org/2000/svg">`;
+    // What's outside: the map hex each plot faces, with its improvement. Lit green when it's paying a bonus.
+    for (let i = 0; i < PLOT_COUNT; i++) {
+      const t = facingTile(c, i);
+      if (!t) continue;
+      const [dx, dy] = DIR_XY[i];
+      const x = (dx / SQ3) * OUT_DIST;
+      const y = (dy / SQ3) * OUT_DIST;
+      const work = t.improvement ?? (t.road ? 'road' : null);
+      const mine = t.owner === c.owner;
+      const b = c.placed[i];
+      const paying = !!b && plotBonus(c, i, b).notes.some((n) => n.includes('facing'));
+      svg +=
+        `<g data-plot="${i}" opacity="${mine ? 1 : 0.45}"><polygon points="${hexPoints(x, y, OUT_R)}" fill="${OUT_COLOR[t.terrain]}" fill-opacity="0.75" ` +
+        `stroke="${paying ? '#4ade80' : '#000'}" stroke-opacity="${paying ? 1 : 0.35}" stroke-width="${paying ? 2.5 : 1}" stroke-dasharray="${mine ? '' : '3 2'}"/>` +
+        (work ? `<text x="${x.toFixed(1)}" y="${(y + 5).toFixed(1)}" font-size="14" text-anchor="middle">${OUT_ICON[work]}</text>` : '') +
+        `</g>`;
+    }
     const keepSel = this.sel === 'keep';
     svg +=
       `<g data-plot="keep"><polygon points="${hexPoints(0, 0, R - 2)}" fill="#2a2f3a" stroke="${keepSel ? '#facc15' : '#9ca3af'}" stroke-width="${keepSel ? 4 : 2 + c.walls}"/>` +
@@ -264,7 +302,7 @@ export class CityView {
       return (
         `<h3>\u{1F3F0} Keep</h3>` +
         `<p>Health ${c.hp}/${cityMaxHp(c)} \u00b7 walls ${c.walls}/${MAX_WALLS}${c.walls ? ` (${c.shield}/${shieldMax(c)})` : ''}. Walls are built from the city panel (Defense).</p>` +
-        `<p>Tap a plot to build on it. Neighbors matter: see the bonuses below.</p>` +
+        `<p>Tap a plot to build on it. Neighbors matter, and so does the map hex each plot faces (the small hexes around the edge).</p>` +
         `<h3>Bonuses in this city</h3>` +
         (bonus.length ? `<p class="k-good">${bonus.map(esc).join('<br>')}</p>` : `<p>None yet. Put amenities next to the right neighbors to earn extra.</p>`)
       );
@@ -277,6 +315,7 @@ export class CityView {
       const notes = plotBonus(c, i, b).notes;
       return (
         `<h3>${info.icon} ${esc(info.name)}</h3><p>${esc(info.note)} \u00b7 ${PLOT_NAME[t]} plot ${i + 1}</p>` +
+        facingLine(c, i) +
         (notes.length ? `<p class="k-good">${notes.map(esc).join('<br>')}</p>` : `<p>No placement bonus here.</p>`)
       );
     }
@@ -290,7 +329,7 @@ export class CityView {
     }
     if (i >= open) {
       const k = plotLevel(i);
-      return `<h3>\u{1F512} ${PLOT_NAME[t]} plot</h3><p>Opens when ${esc(s.cityName(c))} grows into a ${LEVEL_NAMES[k]} (${LEVEL_POP[k]} people).</p>`;
+      return `<h3>\u{1F512} ${PLOT_NAME[t]} plot</h3><p>Opens when ${esc(s.cityName(c))} grows into a ${LEVEL_NAMES[k]} (${LEVEL_POP[k]} people).</p>${facingLine(c, i)}`;
     }
     // Empty plot: everything not built yet that this city has a plot for, the ones that fit here first.
     // While the city is busy the list stays readable (dimmed, with its bonuses) and the reason shows once on top.
@@ -317,6 +356,7 @@ export class CityView {
       .join('');
     return (
       `<h3>${PLOT_NAME[t]} plot ${i + 1}</h3>` +
+      facingLine(c, i) +
       `<p>${busy ? `<b>Busy ${esc(busy)}</b>: one project at a time. Here's what each would earn on this plot.` : 'Pick what to build here.'}</p>` +
       `<div class="k-city-list">${list || '<p>Everything is built.</p>'}</div>`
     );
