@@ -1,5 +1,5 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
-import { placeExisting, setupPlots } from './city';
+import { linkPlots, placeExisting, setupPlots } from './city';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
 import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
@@ -178,6 +178,7 @@ export function loadGame(): GameState | null {
         // Older saves: plots from the land around the city, built amenities placed for you
         setupPlots(state.map, t);
       }
+      linkPlots(state.map, t); // which map hex each plot faces (for facing bonuses)
       placeExisting(t); // anything built but not on a plot yet gets one
     });
     state.players.forEach((p, i) => {

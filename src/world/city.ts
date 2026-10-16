@@ -2,7 +2,7 @@
 // Pure functions on tiles: no Phaser, no GameState. See docs/CITY_VIEW.md.
 import type { WorldMap } from './map';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, MAX_LEVEL, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel } from './tile';
-import type { Building, PlotTerrain, Tile } from './tile';
+import type { Building, Improvement, PlotTerrain, Tile } from './tile';
 
 // What a placement adds on top of the amenity's normal stats
 export interface PlotBonus {
@@ -10,15 +10,29 @@ export interface PlotBonus {
   food: number;
   happy: number;
   culture: number;
+  stone: number;
+  horses: number; // room for more Knights
   notes: string[]; // "+1 gold: Market next to the Harbor"
   happyParts: [string, number][]; // for the happiness breakdown
 }
 
-type Amounts = { gold?: number; food?: number; happy?: number; culture?: number };
+type Amounts = { gold?: number; food?: number; happy?: number; culture?: number; stone?: number; horses?: number };
 
 // Terrain bonuses: the amenity on this kind of plot
 export const TERRAIN_BONUS: (Amounts & { b: Building; t: PlotTerrain; note: string })[] = [
   { b: 'granary', t: 'grass', food: 1, note: 'on grass' },
+];
+
+// Facing bonuses: each plot faces the map hex in its direction. What's built out there (on your land) helps.
+// Live: pillage the mine and the Workshop loses its bonus until it's rebuilt.
+export type Outside = Improvement | 'road';
+export const FACING_BONUS: (Amounts & { b: Building; imp: Outside; note: string })[] = [
+  { b: 'workshop', imp: 'mine', stone: 1, note: 'facing a mine' },
+  { b: 'mill', imp: 'farm', food: 1, note: 'facing a farm' },
+  { b: 'barracks', imp: 'pasture', horses: 1, note: 'facing a pasture' },
+  { b: 'harbor', imp: 'fishery', food: 1, note: 'facing a fishery' },
+  { b: 'park', imp: 'forest', culture: 1, note: 'facing a forest' },
+  { b: 'market', imp: 'road', gold: 1, note: 'facing a road' },
 ];
 
 // Neighbor bonuses: the amenity next to another one (or the Keep, once ring 2 exists). The bonus goes to the first one.
@@ -30,7 +44,7 @@ export const ADJACENCY: (Amounts & { b: Building; next: Building | 'keep'; note:
   { b: 'arena', next: 'market', gold: 1, note: 'next to the Market' },
 ];
 
-const empty = (): PlotBonus => ({ gold: 0, food: 0, happy: 0, culture: 0, notes: [], happyParts: [] });
+const empty = (): PlotBonus => ({ gold: 0, food: 0, happy: 0, culture: 0, stone: 0, horses: 0, notes: [], happyParts: [] });
 
 function amountText(a: Amounts): string {
   const parts: string[] = [];
@@ -38,7 +52,13 @@ function amountText(a: Amounts): string {
   if (a.food) parts.push(`+${a.food} food`);
   if (a.happy) parts.push(`+${a.happy} happy`);
   if (a.culture) parts.push(`+${a.culture} culture`);
+  if (a.stone) parts.push(`+${a.stone} stone`);
+  if (a.horses) parts.push(`+${a.horses} horse${a.horses === 1 ? '' : 's'}`);
   return parts.join(', ');
+}
+
+export function bonusAmount(a: Amounts): string {
+  return amountText(a);
 }
 
 function addTo(out: PlotBonus, a: Amounts, label: string): void {
@@ -46,6 +66,8 @@ function addTo(out: PlotBonus, a: Amounts, label: string): void {
   out.food += a.food ?? 0;
   out.happy += a.happy ?? 0;
   out.culture += a.culture ?? 0;
+  out.stone += a.stone ?? 0;
+  out.horses += a.horses ?? 0;
   out.notes.push(`${amountText(a)}: ${label}`);
   if (a.happy) out.happyParts.push([label, a.happy]);
 }
@@ -61,8 +83,27 @@ export function snapshotPlots(map: WorldMap, city: Tile): PlotTerrain[] {
   return out;
 }
 
+// The map hex each plot faces (kept per city, so bonuses follow what's built out there right now)
+const OUTSIDE = new WeakMap<Tile, (Tile | null)[]>();
+
+export function linkPlots(map: WorldMap, city: Tile): void {
+  OUTSIDE.set(city, Array.from({ length: PLOT_COUNT }, (_, i) => map.neighborAt(city, i)));
+}
+
+export function facingTile(city: Tile, i: number): Tile | null {
+  return OUTSIDE.get(city)?.[i] ?? null;
+}
+
+// What useful thing plot i looks out on: an improvement or a road on the city owner's land
+export function facingWork(city: Tile, i: number): Outside | null {
+  const t = facingTile(city, i);
+  if (!t || t.owner === null || t.owner !== city.owner) return null;
+  return t.improvement ?? (t.road ? 'road' : null);
+}
+
 // A new city: plots from the land around it, nothing built
 export function setupPlots(map: WorldMap, city: Tile): void {
+  linkPlots(map, city);
   city.plots = snapshotPlots(map, city);
   city.placed = new Array<Building | null>(PLOT_COUNT).fill(null);
   city.projectPlot = null;
@@ -136,6 +177,12 @@ export function plotBonus(city: Tile, i: number, b: Building, layout: (Building 
   const name = BUILDINGS[b].name;
   const t = plotTerrain(city, i);
   for (const r of TERRAIN_BONUS) if (r.b === b && r.t === t) addTo(out, r, `${name} ${r.note}`);
+  const t2 = facingTile(city, i);
+  const outside = facingWork(city, i);
+  for (const r of FACING_BONUS) {
+    if (r.b !== b || !outside) continue;
+    if (r.imp === outside || (r.imp === 'road' && t2?.road)) addTo(out, r, `${name} ${r.note}`);
+  }
   const near = plotNeighbors(i).map((k) => layout[k] ?? null);
   for (const r of ADJACENCY) {
     if (r.b !== b) continue;
@@ -154,13 +201,15 @@ export function cityBonus(city: Tile): PlotBonus {
     out.food += pb.food;
     out.happy += pb.happy;
     out.culture += pb.culture;
+    out.stone += pb.stone;
+    out.horses += pb.horses;
     out.notes.push(...pb.notes);
     out.happyParts.push(...pb.happyParts);
   });
   return out;
 }
 
-const worth = (p: PlotBonus) => p.gold + p.food + p.happy + p.culture * 0.5;
+const worth = (p: PlotBonus) => p.gold + p.food + p.happy + p.stone + p.culture * 0.5 + p.horses * 0.5;
 
 // How good plot i is for amenity b: its own bonus, plus what it adds to its neighbors,
 // minus a little for using up a special plot another amenity needs (hills for a Workshop, grass for a Mill)
