@@ -2,6 +2,8 @@
 // A grassy town square with the Keep dead center and the 6 plots as one tile each (no built-in roads: you paint
 // your own paths in decorate mode, task 5), and the map hex each plot faces as a small marker just past the edge.
 // Drag to pan, pinch or wheel to zoom.
+// Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles. If a sheet or a tile is missing, that
+// piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building,
 // so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -10,9 +12,14 @@ import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
 import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
-import type { PlotTerrain, Terrain, Tile } from '../world/tile';
+import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
 import type { PxActor } from './citySprites';
+import {
+  ART, BUILDING_ART, GRASS, HILL_ROCK, KEEP_ART, PLOT_GROUND, RPG, SCENERY, TINY,
+  canDraw, crispCityArt, hasFrame, loadCityArt,
+} from './cityArt';
+import type { Cell, Pic, Sheet } from './cityArt';
 
 export const CITY_SCENE = 'city';
 export type CityPick = number | 'keep';
@@ -28,20 +35,23 @@ export interface CityLink {
   close(): void; // Esc / O
 }
 
-const T = 56; // tile size in world px
+const T = ART * 3; // tile size in world px: 3x3 Kenney tiles
 const MARKER_OUT = 0.85; // facing markers sit this many tiles past the edge
 const MARKER_R = T * 0.3; // facing marker size
 const DRAG_PX = 8; // movement before a press counts as a pan, not a tap
-const LABEL_MIN = 34; // tile size on screen (px) below which names hide (icons stay)
+const LABEL_MIN = 30; // tile size on screen (px) below which names hide (icons stay)
 const PERSON_SCALE = 1.5;
+const NAME_Y = T / 2 + 1; // building names sit on the bottom edge of their plot
 
-const GRASS = 0x62a948;
+const GRASS_COLOR = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
 const GRASS_DARK = 0x58993f;
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x8c7a4c };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x8c7a4c, mountain: 0x9a9a9a };
 const OUT_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
+
+type Layer = 'ground' | 'obj';
 
 // Facing marker i in tile units: past the edge in plot i's world direction (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE)
 function markerAt(i: number, r: number): [number, number] {
@@ -75,6 +85,11 @@ export class CityScene extends Phaser.Scene {
   private scenery!: Phaser.GameObjects.Graphics;
   private marks!: Phaser.GameObjects.Graphics;
   private selG!: Phaser.GameObjects.Graphics;
+  // Kenney tiles, one blitter per sheet and layer (missing sheet = null, the drawn fallback is used)
+  private blit: Record<Layer, Record<Sheet, Phaser.GameObjects.Blitter | null>> = {
+    ground: { t: null, r: null },
+    obj: { t: null, r: null },
+  };
   private texts: Phaser.GameObjects.Text[] = [];
   private nText = 0;
   private labels: Phaser.GameObjects.Text[] = []; // name labels, hidden when zoomed far out
@@ -110,13 +125,25 @@ export class CityScene extends Phaser.Scene {
     if (s?.ready && s.sys.isActive()) s.show();
   }
 
+  // Runs once, the first time a city opens. A sheet that fails to download is simply left out.
+  preload(): void {
+    loadCityArt(this);
+  }
+
   create(): void {
     makeCitySprites(this);
+    crispCityArt(this);
     this.cameras.main.setBackgroundColor('#141a26');
     this.ground = this.add.graphics().setDepth(0);
     this.scenery = this.add.graphics().setDepth(1.5);
     this.marks = this.add.graphics().setDepth(1);
     this.selG = this.add.graphics().setDepth(4);
+    const sheets: [Sheet, string][] = [['t', TINY], ['r', RPG]];
+    for (const [s, key] of sheets) {
+      if (!this.textures.exists(key)) continue;
+      this.blit.ground[s] = this.add.blitter(0, 0, key).setDepth(s === 't' ? 0.4 : 0.45);
+      this.blit.obj[s] = this.add.blitter(0, 0, key).setDepth(s === 't' ? 1.6 : 1.65);
+    }
     this.ready = true;
     this.setupInput();
     const onResize = () => {
@@ -160,9 +187,9 @@ export class CityScene extends Phaser.Scene {
     const cam = this.cameras.main;
     const v = this.view();
     const extent = (gridRadius(link.city) + MARKER_OUT + 0.6) * 2 * T;
-    const z = Phaser.Math.Clamp(Math.min(v.w / extent, v.h / extent), 0.25, 3);
+    const z = Phaser.Math.Clamp(Math.min(v.w / extent, v.h / extent), 0.25, 4);
     this.minZoom = z * 0.75;
-    this.maxZoom = Math.max(z * 4, 2.5);
+    this.maxZoom = Math.max(z * 4, 3);
     cam.setZoom(z);
     this.lookAt(0, 0);
     this.bigLabels = z * T >= LABEL_MIN;
@@ -309,6 +336,34 @@ export class CityScene extends Phaser.Scene {
     return plotAtTile(dx, dy);
   }
 
+  // ---------- Kenney tiles ----------
+
+  // One art tile with its top-left at (x, y). False if that tile isn't available.
+  private bob(layer: Layer, s: Sheet, f: number, x: number, y: number, alpha = 1): boolean {
+    const b = this.blit[layer][s];
+    if (!b || !hasFrame(this, s, f)) return false;
+    const bob = b.create(Math.round(x), Math.round(y), f);
+    if (alpha < 1) bob.setAlpha(alpha);
+    return true;
+  }
+
+  // A picture with its top-left at (left, top); cells are in art tiles
+  private cells(layer: Layer, cells: readonly Cell[], left: number, top: number, alpha = 1): void {
+    for (const k of cells) this.bob(layer, k.s, k.f, left + k.x * ART, top + k.y * ART, alpha);
+  }
+
+  // A building centered on its plot (shifted left to make room for its prop). False = use the emoji instead.
+  private building(b: Building, x: number, y: number, alpha: number): boolean {
+    const pic: Pic = BUILDING_ART[b];
+    const all = pic.prop ? [...pic.cells, pic.prop] : pic.cells;
+    if (!canDraw(this, all)) return false;
+    const left = x - (pic.w * ART) / 2 - (pic.prop ? 7 : 0);
+    const top = y - (pic.h * ART) / 2 - 4;
+    this.cells('obj', pic.cells, left, top, alpha);
+    if (pic.prop) this.bob('obj', pic.prop.s, pic.prop.f, x + 9, y - 3, alpha);
+    return true;
+  }
+
   // ---------- drawing ----------
 
   private redraw(): void {
@@ -322,49 +377,46 @@ export class CityScene extends Phaser.Scene {
     this.nText = 0;
     this.nPeople = 0;
     this.labels = [];
+    for (const layer of Object.values(this.blit)) for (const b of Object.values(layer)) b?.clear();
 
-    // Ground: one soft field of grass (no tile lines; the grid only shows when placing things, task 5)
+    // Ground: one field of grass (no tile lines; the grid only shows when placing things, task 5)
     const g = this.ground;
     g.clear();
     const half = (r + 0.5) * T;
+    const artGrass = hasFrame(this, 't', GRASS.plain) && hasFrame(this, 't', GRASS.tufts) && hasFrame(this, 't', GRASS.flowers);
     g.fillStyle(0x000000, 0.35);
-    g.fillRoundedRect(-half + 6, -half + 10, 2 * half, 2 * half, 22);
+    g.fillRoundedRect(-half + 6, -half + 10, 2 * half, 2 * half, artGrass ? 6 : 22);
     g.fillStyle(0x3d6e2c, 1);
-    g.fillRoundedRect(-half - 4, -half - 4, 2 * half + 8, 2 * half + 8, 24);
-    g.fillStyle(GRASS, 1);
-    g.fillRoundedRect(-half, -half, 2 * half, 2 * half, 20);
-    // Soft patches of lighter and darker grass so the field doesn't look flat or tiled
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const a = hash01(dx, dy, seed, 1);
-        if (a > 0.55) continue;
-        const ox = (hash01(dx, dy, seed, 2) - 0.5) * T * 0.6;
-        const oy = (hash01(dx, dy, seed, 3) - 0.5) * T * 0.6;
-        g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
-        g.fillEllipse(dx * T + ox, dy * T + oy, T * (0.7 + a), T * (0.45 + a * 0.6));
+    g.fillRoundedRect(-half - 4, -half - 4, 2 * half + 8, 2 * half + 8, artGrass ? 6 : 24);
+    g.fillStyle(GRASS_COLOR, 1);
+    g.fillRoundedRect(-half, -half, 2 * half, 2 * half, artGrass ? 2 : 20);
+    if (artGrass) {
+      const n = (2 * r + 1) * 3;
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) {
+          const v = hash01(i, j, seed, 20);
+          const f = v < 0.02 ? GRASS.flowers : v < 0.3 ? GRASS.tufts : GRASS.plain;
+          this.bob('ground', 't', f, -half + i * ART, -half + j * ART);
+        }
       }
-    }
-    // Little grass tufts
-    g.fillStyle(0x4f8a39, 0.7);
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (reservedTile(dx, dy) || hash01(dx, dy, seed, 4) > 0.5) continue;
-        const x = dx * T + (hash01(dx, dy, seed, 5) - 0.5) * T * 0.7;
-        const y = dy * T + (hash01(dx, dy, seed, 6) - 0.5) * T * 0.7;
-        g.fillTriangle(x - 3, y + 2, x - 1, y - 4, x + 1, y + 2);
-        g.fillTriangle(x, y + 2, x + 2, y - 5, x + 4, y + 2);
-      }
+    } else {
+      this.drawnGrass(g, r, seed);
     }
 
-    // Keep: a stone yard, walls drawn as a thicker grey rim per level
+    // Keep: a stone yard with the castle gate (walls level in the label)
     g.fillStyle(0x6b7280, 1);
     g.fillCircle(0, 0, T * 0.62);
-    g.fillStyle(0x2a2f3a, 1);
-    g.fillRoundedRect(-T / 2 + 2, -T / 2 + 2, T - 4, T - 4, 8);
-    g.lineStyle(2 + c.walls * 1.5, 0x9ca3af, 1);
-    g.strokeRoundedRect(-T / 2 + 3, -T / 2 + 3, T - 6, T - 6, 8);
-    this.txt(0, -5, '\u{1F3F0}', 28);
-    this.txt(0, 17, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
+    if (canDraw(this, KEEP_ART.cells)) {
+      this.cells('obj', KEEP_ART.cells, -(KEEP_ART.w * ART) / 2, -(KEEP_ART.h * ART) / 2 - 2);
+      this.txt(0, NAME_Y, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
+    } else {
+      g.fillStyle(0x2a2f3a, 1);
+      g.fillRoundedRect(-T / 2 + 2, -T / 2 + 2, T - 4, T - 4, 8);
+      g.lineStyle(2 + c.walls * 1.5, 0x9ca3af, 1);
+      g.strokeRoundedRect(-T / 2 + 3, -T / 2 + 3, T - 6, T - 6, 8);
+      this.txt(0, -5, '\u{1F3F0}', 24);
+      this.txt(0, 15, `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`, 9, { label: true });
+    }
     this.crowd(keepPeople(c.walls), 0, 0, 3);
 
     // The 6 plots
@@ -378,27 +430,34 @@ export class CityScene extends Phaser.Scene {
       const proj = c.projectPlot === i ? c.project : null;
       if (locked && !b) {
         // Locked: a faint outline of the plot to come, small lock and level name
-        this.plotGround(g, x, y, t, 0.22);
-        this.txt(x, y - 4, '\u{1F512}', 12, { alpha: 0.55 });
-        this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.6, small: true });
+        this.plotGround(g, x, y, t, 0.25);
+        this.txt(x, y - 4, '\u{1F512}', 12, { alpha: 0.6 });
+        this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.7, small: true });
         continue;
       }
       this.plotGround(g, x, y, t, 1);
       if (b) {
-        this.txt(x, y - 6, BUILDINGS[b].icon, 26);
-        this.txt(x, y + 15, BUILDINGS[b].name, 10, { label: true });
+        if (this.building(b, x, y, 1)) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
+        else {
+          this.txt(x, y - 6, BUILDINGS[b].icon, 22);
+          this.txt(x, y + 13, BUILDINGS[b].name, 10, { label: true });
+        }
         this.crowd(PLOT_PEOPLE[b], x, y, i);
       } else if (proj) {
-        this.txt(x, y - 6, BUILDINGS[proj].icon, 26, { alpha: 0.45 });
-        this.txt(x, y + 15, `${c.projectTurns}t left`, 10, { label: true });
+        // Under construction: a see-through version of what's going up
+        if (this.building(proj, x, y, 0.45)) this.txt(x, y + NAME_Y, `${c.projectTurns}t left`, 10, { label: true });
+        else {
+          this.txt(x, y - 6, BUILDINGS[proj].icon, 22, { alpha: 0.45 });
+          this.txt(x, y + 13, `${c.projectTurns}t left`, 10, { label: true });
+        }
         this.crowd(BUILDER_PEOPLE, x, y, i);
       } else {
-        this.txt(x, y - 5, '+', 28, { alpha: 0.85 });
-        this.txt(x, y + 16, PLOT_NAME[t], 9, { label: true });
+        this.txt(x, y - 5, '+', 26, { alpha: 0.85 });
+        this.txt(x, y + 14, PLOT_NAME[t], 9, { label: true });
       }
     }
 
-    // Scenery: trees, bushes and rocks on open ground, just for looks (cleared once you can decorate, task 5)
+    // Scenery: trees, bushes, rocks and flowers on open ground, just for looks (cleared once you can decorate, task 5)
     this.drawScenery(r, seed);
 
     // What each plot faces on the map: a small hex past the edge. Faint unless it's paying a bonus (green)
@@ -426,39 +485,100 @@ export class CityScene extends Phaser.Scene {
         m.strokePoints(pts, true);
       }
       const work = t.improvement ?? (t.road ? 'road' : null);
-      if (work) this.txt(x, y, OUT_ICON[work], 11, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
+      if (work) this.txt(x, y, OUT_ICON[work], 10, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
     // Selection
     this.selG.clear();
     const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
-    this.selG.lineStyle(7, 0x000000, 0.4);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 8);
-    this.selG.lineStyle(3.5, 0xfacc15, 1);
-    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 8);
+    this.selG.lineStyle(6, 0x000000, 0.4);
+    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 6);
+    this.selG.lineStyle(3, 0xfacc15, 1);
+    this.selG.strokeRoundedRect(sx * T - T / 2 + 1, sy * T - T / 2 + 1, T - 2, T - 2, 6);
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
+  }
+
+  // Fallback grass (no Kenney sheet): soft light and dark patches plus little tufts
+  private drawnGrass(g: Phaser.GameObjects.Graphics, r: number, seed: number): void {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const a = hash01(dx, dy, seed, 1);
+        if (a > 0.55) continue;
+        const ox = (hash01(dx, dy, seed, 2) - 0.5) * T * 0.6;
+        const oy = (hash01(dx, dy, seed, 3) - 0.5) * T * 0.6;
+        g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
+        g.fillEllipse(dx * T + ox, dy * T + oy, T * (0.7 + a), T * (0.45 + a * 0.6));
+      }
+    }
+    g.fillStyle(0x4f8a39, 0.7);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (reservedTile(dx, dy) || hash01(dx, dy, seed, 4) > 0.5) continue;
+        const x = dx * T + (hash01(dx, dy, seed, 5) - 0.5) * T * 0.7;
+        const y = dy * T + (hash01(dx, dy, seed, 6) - 0.5) * T * 0.7;
+        g.fillTriangle(x - 3, y + 2, x - 1, y - 4, x + 1, y + 2);
+        g.fillTriangle(x, y + 2, x + 2, y - 5, x + 4, y + 2);
+      }
+    }
   }
 
   // Seeded, so the same city always looks the same. Skips the Keep yard, plots and the tiles hugging them.
   private drawScenery(r: number, seed: number): void {
     const g = this.scenery;
     g.clear();
+    const art = canDraw(this, [
+      { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
+      { s: 't', f: SCENERY.small, x: 0, y: 0 }, { s: 't', f: SCENERY.bush, x: 0, y: 0 },
+    ]);
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
         if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
         const roll = hash01(dx, dy, seed, 10);
+        if (art) {
+          if (roll > 0.5) continue;
+          this.artScenery(dx, dy, seed, roll);
+          continue;
+        }
         if (roll > 0.42) continue;
         const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
         const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
         if (roll < 0.2) this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
         else if (roll < 0.33) this.bush(g, x, y);
         else this.rock(g, x, y);
-        // Sometimes a second, smaller tree: little groves read better than single trees
         if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
       }
+    }
+  }
+
+  // One tile of Kenney scenery: tree groves (a few in autumn colors), a bush with a flower, pebbles or flowers
+  private artScenery(dx: number, dy: number, seed: number, roll: number): void {
+    const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * ART;
+    const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * ART;
+    const flower = (salt: number) => SCENERY.flowers[Math.floor(hash01(dx, dy, seed, salt) * SCENERY.flowers.length)];
+    const tall = (px: number, py: number, autumn: boolean) => {
+      this.bob('obj', 't', autumn ? SCENERY.autumnTop : SCENERY.tallTop, px - 8, py - 24);
+      this.bob('obj', 't', autumn ? SCENERY.autumnBottom : SCENERY.tallBottom, px - 8, py - 8);
+    };
+    if (roll < 0.22) {
+      const autumn = hash01(dx, dy, seed, 17) < 0.15;
+      if (hash01(dx, dy, seed, 13) < 0.6) tall(x, y, autumn);
+      else this.bob('obj', 't', autumn ? SCENERY.smallAutumn : SCENERY.small, x - 8, y - 12);
+      if (roll < 0.12) tall(x + 11, y + 8, false);
+      if (roll < 0.06) this.bob('obj', 't', SCENERY.small, x - 17, y + 4);
+    } else if (roll < 0.32) {
+      this.bob('obj', 't', SCENERY.bush, x - 8, y - 8);
+      const f = flower(15);
+      this.bob('obj', f.s, f.f, x + 6, y);
+    } else if (roll < 0.4) {
+      this.bob('obj', SCENERY.rock.s, SCENERY.rock.f, x - 8, y - 8);
+    } else {
+      const a = flower(15);
+      const b = flower(16);
+      this.bob('obj', a.s, a.f, x - 8, y - 8);
+      this.bob('obj', b.s, b.f, x + 2, y + 2);
     }
   }
 
@@ -496,30 +616,36 @@ export class CityScene extends Phaser.Scene {
     g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
-  // A plot's own ground (its map terrain) with a little fence-colored rim so plots read as building spots
+  // A plot's own ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim
   private plotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
+    const cells = PLOT_GROUND[t];
+    if (canDraw(this, cells)) {
+      this.cells('ground', cells, x - T / 2, y - T / 2, alpha);
+      if (t === 'hills') this.bob('ground', HILL_ROCK.s, HILL_ROCK.f, x + 6, y + 6, alpha);
+      return;
+    }
     const l = x - T / 2 + 3;
     const top = y - T / 2 + 3;
     const s = T - 6;
     g.fillStyle(PLOT_COLOR[t], alpha);
-    g.fillRoundedRect(l, top, s, s, 8);
+    g.fillRoundedRect(l, top, s, s, 7);
     if (t === 'water') {
       g.lineStyle(1.5, 0x7dd3fc, 0.5 * alpha);
-      g.lineBetween(x - 16, y - 12, x - 6, y - 12);
-      g.lineBetween(x + 4, y - 4, x + 15, y - 4);
-      g.lineBetween(x - 12, y + 6, x - 2, y + 6);
+      g.lineBetween(x - 14, y - 10, x - 5, y - 10);
+      g.lineBetween(x + 3, y - 3, x + 13, y - 3);
+      g.lineBetween(x - 10, y + 5, x - 2, y + 5);
     } else if (t === 'hills') {
       g.fillStyle(0x6f6038, alpha);
-      g.fillEllipse(x - 12, y + 12, 16, 8);
-      g.fillEllipse(x + 13, y + 14, 14, 7);
+      g.fillEllipse(x - 10, y + 10, 14, 7);
+      g.fillEllipse(x + 11, y + 12, 12, 6);
     } else if (t === 'sand') {
       g.fillStyle(0xb9a46e, alpha);
-      g.fillCircle(x - 15, y - 14, 1.5);
-      g.fillCircle(x + 14, y - 10, 1.5);
-      g.fillCircle(x + 10, y + 12, 1.5);
+      g.fillCircle(x - 13, y - 12, 1.5);
+      g.fillCircle(x + 12, y - 9, 1.5);
+      g.fillCircle(x + 9, y + 10, 1.5);
     }
     g.lineStyle(2, 0x3b2a17, 0.55 * alpha);
-    g.strokeRoundedRect(l, top, s, s, 8);
+    g.strokeRoundedRect(l, top, s, s, 7);
   }
 
   private dots(g: Phaser.GameObjects.Graphics, x1: number, y1: number, x2: number, y2: number, color: number, alpha: number): void {
@@ -527,9 +653,9 @@ export class CityScene extends Phaser.Scene {
     const start = T * 0.55; // from the plot's edge
     const end = len - MARKER_R; // to the marker's edge
     g.fillStyle(color, alpha);
-    for (let d = start; d < end; d += 9) {
+    for (let d = start; d < end; d += 8) {
       const f = d / len;
-      g.fillCircle(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, 1.6);
+      g.fillCircle(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, 1.5);
     }
   }
 
@@ -537,7 +663,7 @@ export class CityScene extends Phaser.Scene {
   private txt(x: number, y: number, s: string, size: number, o: { label?: boolean; small?: boolean; alpha?: number } = {}): Phaser.GameObjects.Text {
     let t = this.texts[this.nText];
     if (!t) {
-      t = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', color: '#ffffff' }).setOrigin(0.5).setResolution(2);
+      t = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', color: '#ffffff' }).setOrigin(0.5).setResolution(3);
       this.texts.push(t);
     }
     this.nText++;
@@ -557,7 +683,7 @@ export class CityScene extends Phaser.Scene {
   private crowd(list: PxActor[], x: number, y: number, seed: number): void {
     list.forEach((a, k) => {
       const side = list.length === 1 || k === 1 ? 1 : -1;
-      this.person(a, x + side * 19, y + T / 2 - 3, seed + k);
+      this.person(a, x + side * 20, y + T / 2 - 2, seed + k);
     });
   }
 
