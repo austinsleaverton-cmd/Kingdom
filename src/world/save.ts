@@ -7,7 +7,8 @@ import type { Building, PlayerId, PlotTerrain } from './tile';
 import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
 
-const KEY = 'kingdom-save-v3';
+// The test build at /dev/ shares browser storage with the live game, so it gets its own slot
+const KEY = import.meta.env.VITE_CHANNEL === 'dev' ? 'kingdom-save-v3-dev' : 'kingdom-save-v3';
 const CITY = 1;
 const CAPITAL = 2;
 const ROAD = 4;
