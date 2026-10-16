@@ -477,7 +477,7 @@ export class GameState {
     if (city.capital) parts.push(['Capital', 1]);
     if (!this.players[p].isAI && this.options.difficulty === 'easy') parts.push(['Easy mode', EASY_HAPPY]);
     for (const b of city.buildings) if (BUILDINGS[b].happy) parts.push([BUILDINGS[b].name, BUILDINGS[b].happy]);
-    parts.push(...cityBonus(city).happyParts); // City View placement bonuses (Temple by the Keep)
+    parts.push(...cityBonus(city).happyParts); // City View placement bonuses (Park next to the Temple)
     const crowd = Math.floor(city.pop / 2);
     if (crowd) parts.push(['Crowding', -crowd]);
     const war = Math.min(3, Math.floor(this.troopsAway(p) / 2));
@@ -527,7 +527,9 @@ export class GameState {
   }
 
   horsesMade(p: PlayerId): number {
-    return this.countImp(p, 'pasture') * KNIGHTS_PER_PASTURE;
+    let extra = 0; // Barracks facing a pasture
+    for (const c of this.cities()) if (c.owner === p) extra += cityBonus(c).horses;
+    return this.countImp(p, 'pasture') * KNIGHTS_PER_PASTURE + extra;
   }
 
   horsesUsed(p: PlayerId): number {
@@ -542,11 +544,15 @@ export class GameState {
     return this.countTroop(p, 'archer');
   }
 
-  // Worked mines, plus Workshops
+  // Worked mines, plus Workshops (and their facing bonus)
   stoneIncome(p: PlayerId): number {
     const worked = this.workedTiles(p);
     let stone = this.ownedTiles(p).filter((t) => t.improvement === 'mine' && worked.has(t)).length * MINE_STONE;
-    for (const c of this.cities()) if (c.owner === p) for (const b of c.buildings) stone += BUILDINGS[b].stone ?? 0;
+    for (const c of this.cities()) {
+      if (c.owner !== p) continue;
+      for (const b of c.buildings) stone += BUILDINGS[b].stone ?? 0;
+      stone += cityBonus(c).stone; // Workshop facing a mine
+    }
     return stone;
   }
 
