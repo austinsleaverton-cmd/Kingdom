@@ -13,7 +13,7 @@ Run the kingdom on the map, then zoom into a city and build it out like a real t
 
 ## Ground grid
 
-Square tile grid (Kenney packs are square 16px tiles), Keep dead center. Odd sizes so the Keep is always the exact middle.
+Square tile grid (Kenney packs are square 16px tiles), Keep dead center. Odd sizes so the Keep is always the exact middle. Grows with the city.
 
 | City level | Grid | New ground |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ Square tile grid (Kenney packs are square 16px tiles), Keep dead center. Odd siz
 - Grid size comes from the **highest level the city has ever reached** (`city.gridLevel`), not the current level. Capture drops a level, but the grid never shrinks, so decorations are never stranded or deleted.
 - New rings arrive as open ground (grass, see Art). Log/toast: `Riverton grew: more room to build (9x9)`.
 - Simple mode: same growth as everyone else (plots are already all open there; the grid is just space).
+- 11x11 is the cap for v1. The extra space is for decorations only (no ring-2 plots yet).
 
 ### Coordinates
 
@@ -32,7 +33,7 @@ Square tile grid (Kenney packs are square 16px tiles), Keep dead center. Odd siz
 
 ### Where the Keep and the 6 plots sit
 
-The Keep is the center tile. Each plot is one tile, laid out to match its world direction so the city still "faces" the map like City View does today:
+The Keep is the center tile. Each building is **one tile** (one plot = one tile, keep it simple). Plots are laid out to match their world direction so the city still "faces" the map like City View does today:
 
 | Plot | Direction | Tile (dx, dy) |
 | --- | --- | --- |
@@ -43,7 +44,7 @@ The Keep is the center tile. Each plot is one tile, laid out to match its world 
 | 4 | SW | (-1, 2) |
 | 5 | SE | (1, 2) |
 
-- Plot tiles, the Keep tile and a 1-tile cross of **road** from the Keep to each plot are **reserved**: no decorations there. Everything else is open ground.
+- Plot tiles, the Keep tile and a 1-tile road from the Keep to each plot are **reserved**: no decorations there. Everything else is open ground.
 - Plot neighbors stay index-based (`plotNeighbors(i)`: ring neighbors + Keep). The grid is visual; `src/world/city.ts` scoring does not change.
 - Plot terrain shows as the plot tile's ground (water plot = water tile, hills = dirt/rock, sand, grass).
 - **Facing hexes:** the map hex each plot faces is drawn as a small marker on the grid edge in that direction (same info and green "paying" outline as City View today).
@@ -61,6 +62,8 @@ The Keep is the center tile. Each plot is one tile, laid out to match its world 
 - Only in your own cities, on your turn (hot-seat safe: acts as `state.current`).
 
 ### Starter set (v1)
+
+Starting list, judged once it's on screen (add/cut freely in step 5).
 
 | Decoration | Kind | Notes |
 | --- | --- | --- |
@@ -92,15 +95,26 @@ Tray shows the price on each item. Not enough gold = item dimmed with the reason
 
 - **Normal and up only.** On Easy and Free Play decorations are just for looks: no bonus, and the beauty line is hidden.
 - `beauty = number of decorations in the city` (Statue counts 2, Fountain 3).
-- Bonus: **+1 happy per 6 beauty, max +2.** Shows in `happinessParts` as `Beautiful streets`.
+- Bonus: **+1 happy per 8 beauty, max +2.** Shows in `happinessParts` as `Beautiful streets`.
+- Why 8, not 6 (paper check): a Temple gives +2 happy but costs 30-40g, takes turns and uses the project slot. At 1 per 6, +2 happy cost 24g on Normal, instant, no slot: too cheap next to a Temple. At 1 per 8 it's 32g on Normal / 48g on Hard (small decos), about Temple price with no slot, which feels like a fair trade for the clicking. Path tiles count, so to stop path spam from being the cheapest route, a city's paths count at most 4 beauty.
 - Small on purpose: nice to have, never the reason you win.
-- One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Tune in playtests.
+- One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Retune after real playtests and the AI test games.
 
 ### Scope
 
 - **Per city.** Decorations belong to the city they're in and can't move between cities.
 - Captured city: decorations stay with the city (the new owner gets them and their beauty).
-- AI: does not place decorations in v1 (no beauty for AI cities). Simple and fair; revisit if Hard needs the edge.
+
+### AI
+
+- **Easy / Normal AI:** no decorations.
+- **Hard AI decorates**, so it has a real gold sink:
+  - Only with spare gold after its normal build/train decision for the turn (never instead of troops, walls or buildings).
+  - Not while at war or with enemy troops within 2 hexes of the city.
+  - Keeps a reserve (doesn't drop below 40g) so it can still react.
+  - Stops at the cap (16 beauty, where the bonus maxes out). Paths count at most 4 like for players.
+  - Places on random open tiles, skipping the Keep's roads, using `GameState.placeDeco` (same rules as people).
+- Check in the AI test games that Hard doesn't get noticeably weaker from it.
 
 ## Saved data
 
@@ -168,32 +182,33 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 
 ## Build order
 
-1. **Data + rules:** `gridLevel`, `deco`, `DECO_ORDER`, place/move/remove, costs, beauty bonus, save + old-save migration. Pick `CITY_ART` tile ids.
+1. **Data + rules:** `gridLevel`, `deco`, `DECO_ORDER`, place/move/remove, costs, beauty bonus, Hard AI decorating, save + old-save migration. Pick `CITY_ART` tile ids. Run the AI test games (Hard with and without decorating) to sanity-check beauty and gold use.
 2. **CityScene grid:** ground, roads, Keep, 6 plots with buildings, facing markers, pan/zoom. Side panel wired up. Replaces the SVG drawing.
 3. **Decorations UI:** tray, tap to place, drag to move, remove, prices, beauty line.
 4. **Zoom transition:** pinch in/out from the map, animation, camera restore.
-5. **Polish + balance:** grid growth toast, help section in `Help.ts`, phone testing, beauty tuning.
+5. **Polish + balance:** grid growth toast, help section in `Help.ts`, phone testing, review the starter set on screen, beauty tuning from your playtest.
 
 Each step should pass `npx vite build` and the AI test games before moving on.
 
 ## Decided
 
 - Grid grows with city level: 7x7, 9x9, 11x11 (cap). Never shrinks.
-- Beauty: small happiness bonus on Normal+, off on Easy / Free Play.
+- 1-tile buildings, one per plot.
+- 11x11 extra space is decorations only for v1.
+- Beauty: +1 happy per 8 beauty, max +2, on Normal+ only. Off on Easy / Free Play.
 - Cost: free on Easy / Free Play, a little gold on Normal+.
 - Decorations are per city.
+- Hard AI decorates with spare gold; Easy / Normal AI don't.
 
-## Open questions
+## Still open (answer when you can see it)
 
-1. **Grid trigger:** city level (Village/Town/City, as written) or something else, like walls level?
-2. **Building footprint:** buildings are 1 tile each so plots stay simple. OK, or do you want bigger 2x2 buildings (needs a bigger starting grid, probably 9x9 at Village)?
-3. **AI decorations:** leave AI cities bare in v1, or let Hard AI auto-decorate for the beauty bonus?
-4. **Starter set:** anything to add or cut from the 12 decorations?
-5. **Beauty numbers:** +1 happy per 6 beauty, max +2. Feels right, or smaller/bigger?
-6. **Ring 2 plots** (from `CITY_VIEW.md` v2): should the 11x11 grid eventually hold the 12 ring-2 plots, or keep the extra space for decorations only?
+1. **Starter set:** add/cut once the decorations are on screen (step 3).
+2. **Beauty numbers:** confirm or retune after your playtest.
 
 ## v2 (not now)
 
+- Ring-2 plots on the bigger grid (from `CITY_VIEW.md` v2).
+- Bigger 2x2 buildings.
 - Decoration themes per terrain (snowy, desert).
 - Seasonal/animated decorations (smoking chimneys, swaying trees).
 - Read-only peek at other kingdoms' cities with their decorations.
