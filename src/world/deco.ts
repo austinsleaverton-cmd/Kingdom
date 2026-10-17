@@ -4,9 +4,10 @@
 // standing on it, so a bench can sit on a path and the path stays under it. Removing the decoration leaves the
 // ground as it was. Grass turns a tile back to plain grass, so the wild trees and flowers that grow there by
 // default go away (clear it and they come back).
+// Coastal towns: nothing can be placed, moved or painted onto the water (world/grid.ts waterTiles).
 // Scenes only read this and call the actions below, which check the rules (your city, your turn, open tile, gold).
 import type { Check, GameState } from './game';
-import { PLOT_TILES, gridRadius, reservedTile } from './grid';
+import { PLOT_TILES, gridRadius, reservedTile, tileKey, waterTiles } from './grid';
 import { LEVEL_NAMES, cityLevel } from './tile';
 import type { PlayerId, Tile } from './tile';
 
@@ -146,15 +147,23 @@ export function keepOrPlot(dx: number, dy: number): boolean {
   return reservedTile(dx, dy) || KEEP_TILES.some(([x, y]) => x === dx && y === dy);
 }
 
+// The sea in a coastal town (the Harbor's side)
+export function waterTile(city: Tile, dx: number, dy: number): boolean {
+  return waterTiles(city).has(tileKey(dx, dy));
+}
+
 // Next to a building, where its props (or the Harbor's pond) spill over: paths only
 export function yardTile(city: Tile, dx: number, dy: number): boolean {
   return PLOT_TILES.some(([x, y], i) => (dx === x + 1 && dy === y) || (city.plots[i] === 'water' && dx === x && dy === y + 1));
 }
 
-// Why kind can't go on tile (dx, dy), ignoring whatever stands there now (empty = it can)
-export function tileReason(city: Tile, dx: number, dy: number, kind: number): string {
+// Why kind can't go on tile (dx, dy), ignoring whatever stands there now (empty = it can).
+// wet = false skips the water rule: loading keeps anything placed before towns had a coast (you can still
+// erase it or drag it onto land).
+export function tileReason(city: Tile, dx: number, dy: number, kind: number, wet = true): string {
   if (!inGrid(city, dx, dy)) return 'Outside the town';
   if (keepOrPlot(dx, dy)) return 'The Keep and the plots stay clear';
+  if (wet && waterTile(city, dx, dy)) return "That's water: decorations and paths go on land";
   if (!isPathKind(kind) && yardTile(city, dx, dy)) return 'Keep this spot by the building clear (paths are fine)';
   return '';
 }
@@ -325,7 +334,8 @@ export function fenceLinks(city: Tile, dx: number, dy: number): { n: boolean; e:
 // ---------- saving ----------
 
 // Drop anything that can't be there (unknown kind, off the grid, on the Keep or a plot, a second ground or a
-// second decoration on a tile). Safety net for loading; shouldn't happen in normal play.
+// second decoration on a tile). Safety net for loading; shouldn't happen in normal play. Things already on the
+// water stay (they were placed before towns had a coast), so an old save never loses anything.
 export function cleanDeco(city: Tile): void {
   if (!city.city) {
     city.deco = [];
@@ -335,7 +345,7 @@ export function cleanDeco(city: Tile): void {
   city.deco = decoList(city).filter(([x, y, k]) => {
     if (!decoInfo(k)) return false;
     const key = `${x},${y},${layerOf(k)}`;
-    if (seen.has(key) || tileReason(city, x, y, k)) return false;
+    if (seen.has(key) || tileReason(city, x, y, k, false)) return false;
     seen.add(key);
     return true;
   });
