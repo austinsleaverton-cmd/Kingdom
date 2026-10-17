@@ -1,9 +1,9 @@
 // City Builder decorations and painted paths (docs/CITY_BUILDER.md, task 5). Pure logic, no Phaser imports.
-// Each city keeps a flat list of [dx, dy, kind] relative to the Keep, one thing per tile. kind is an index into
-// DECO_ORDER, and paths are just decorations of the 'path' group (free, no beauty, joined up when drawn).
-// Grass is painted like a path too: it turns a tile back to plain grass, so the wild trees and flowers that
-// grow there by default go away (clear it and they come back). Placing or moving a decoration onto grass
-// just replaces the grass.
+// Each city keeps a flat list of [dx, dy, kind] relative to the Keep. kind is an index into DECO_ORDER.
+// Two layers per tile: the ground (a dirt path, stone path or grass, painted by dragging) and one decoration
+// standing on it, so a bench can sit on a path and the path stays under it. Removing the decoration leaves the
+// ground as it was. Grass turns a tile back to plain grass, so the wild trees and flowers that grow there by
+// default go away (clear it and they come back).
 // Scenes only read this and call the actions below, which check the rules (your city, your turn, open tile, gold).
 import type { Check, GameState } from './game';
 import { PLOT_TILES, gridRadius, reservedTile } from './grid';
@@ -90,7 +90,7 @@ export function decoInfo(kind: number): DecoInfo | null {
   return id ? DECOS[id] : null;
 }
 
-// Painted by dragging (paths and grass)
+// Painted by dragging (paths and grass): the ground layer
 export function isPathKind(kind: number): boolean {
   return decoInfo(kind)?.group === 'path';
 }
@@ -109,26 +109,31 @@ export function decoList(city: Tile): DecoEntry[] {
   return city.deco;
 }
 
-function indexAt(city: Tile, dx: number, dy: number): number {
-  return decoList(city).findIndex(([x, y]) => x === dx && y === dy);
+type Layer = 'ground' | 'obj';
+
+function layerOf(kind: number): Layer {
+  return isPathKind(kind) ? 'ground' : 'obj';
 }
 
-// What stands on tile (dx, dy): its kind, or null
-export function decoAt(city: Tile, dx: number, dy: number): number | null {
-  const i = indexAt(city, dx, dy);
+function indexAt(city: Tile, dx: number, dy: number, layer: Layer): number {
+  return decoList(city).findIndex(([x, y, k]) => x === dx && y === dy && layerOf(k) === layer);
+}
+
+// The decoration standing on tile (dx, dy), or null
+export function objAt(city: Tile, dx: number, dy: number): number | null {
+  const i = indexAt(city, dx, dy, 'obj');
   return i < 0 ? null : decoList(city)[i][2];
 }
 
-// Nothing on the tile, or only painted grass (a decoration can go straight on top and replace it)
-function freeFor(city: Tile, dx: number, dy: number): boolean {
-  const k = decoAt(city, dx, dy);
-  return k === null || isGrassKind(k);
+// The painted ground of tile (dx, dy): dirt path, stone path or grass, or null
+export function groundAt(city: Tile, dx: number, dy: number): number | null {
+  const i = indexAt(city, dx, dy, 'ground');
+  return i < 0 ? null : decoList(city)[i][2];
 }
 
-// Take painted grass off a tile (a decoration is replacing it)
-function dropGrass(city: Tile, dx: number, dy: number): void {
-  const k = decoAt(city, dx, dy);
-  if (k !== null && isGrassKind(k)) decoList(city).splice(indexAt(city, dx, dy), 1);
+// What's on top of tile (dx, dy): its decoration, else its painted ground, else null
+export function decoAt(city: Tile, dx: number, dy: number): number | null {
+  return objAt(city, dx, dy) ?? groundAt(city, dx, dy);
 }
 
 export function inGrid(city: Tile, dx: number, dy: number): boolean {
@@ -189,72 +194,74 @@ export function trayCheck(state: GameState, city: Tile, kind: number, p: PlayerI
   return ok(cost);
 }
 
+// A decoration needs a tile with no other decoration on it (any ground under it is fine).
+// Paths and grass can be painted under anything.
 export function placeCheck(state: GameState, city: Tile, dx: number, dy: number, kind: number, p: PlayerId = state.current): Check {
   const t = trayCheck(state, city, kind, p);
   if (!t.ok) return t;
   const why = tileReason(city, dx, dy, kind);
   if (why) return fail(why);
-  if (!freeFor(city, dx, dy)) return fail('Something is already here');
+  if (!isPathKind(kind) && objAt(city, dx, dy) !== null) return fail('Something is already here');
   return t;
 }
 
-// Painted grass on the tile is replaced by the new decoration
+// The decoration stands on whatever ground is there (grass, a dirt or stone path), which stays under it
 export function placeDeco(state: GameState, city: Tile, dx: number, dy: number, kind: number, p: PlayerId = state.current): Check {
+  if (isPathKind(kind)) return paintPath(state, city, dx, dy, kind, true, p);
   const c = placeCheck(state, city, dx, dy, kind, p);
   if (!c.ok) return c;
   state.players[p].gold -= c.cost;
-  dropGrass(city, dx, dy);
   decoList(city).push([dx, dy, kind]);
   return c;
 }
 
 // Why the decoration on (fx, fy) can't move to (tx, ty), tile rules only (empty = it can)
 export function moveReason(city: Tile, fx: number, fy: number, tx: number, ty: number): string {
-  const kind = decoAt(city, fx, fy);
-  if (kind === null) return 'Nothing to move';
-  if (isPathKind(kind)) return 'Paths are painted, not moved';
+  const kind = objAt(city, fx, fy);
+  if (kind === null) return groundAt(city, fx, fy) !== null ? 'Paths are painted, not moved' : 'Nothing to move';
   if (fx === tx && fy === ty) return '';
   const where = tileReason(city, tx, ty, kind);
   if (where) return where;
-  if (!freeFor(city, tx, ty)) return 'Something is already here';
+  if (objAt(city, tx, ty) !== null) return 'Something is already here';
   return '';
 }
 
-// Moving is always free. Paths aren't moved (paint them again instead). Grass where it lands is replaced.
+// Moving is always free. Only the decoration moves: the ground under it, and where it lands, stays.
 export function moveDeco(state: GameState, city: Tile, fx: number, fy: number, tx: number, ty: number, p: PlayerId = state.current): Check {
   const why = decorateReason(state, city, p) || moveReason(city, fx, fy, tx, ty);
   if (why) return fail(why);
   if (fx === tx && fy === ty) return ok();
-  dropGrass(city, tx, ty);
-  const i = indexAt(city, fx, fy);
+  const i = indexAt(city, fx, fy, 'obj');
   decoList(city)[i] = [tx, ty, decoList(city)[i][2]];
   return ok();
 }
 
+// Removes the top thing: the decoration if there is one (its ground stays), else the painted ground.
 // Removing never refunds gold (so decorations can't be used as a gold bank)
 export function removeDeco(state: GameState, city: Tile, dx: number, dy: number, p: PlayerId = state.current): Check {
   const why = decorateReason(state, city, p);
   if (why) return fail(why);
-  const i = indexAt(city, dx, dy);
+  const o = indexAt(city, dx, dy, 'obj');
+  const i = o >= 0 ? o : indexAt(city, dx, dy, 'ground');
   if (i < 0) return fail('Nothing here');
   decoList(city).splice(i, 1);
   return ok();
 }
 
-// Paint (on) or clear (off) one tile of path or grass. Painting over another painted kind swaps it.
+// Paint (on) or clear (off) the ground of one tile: a path or grass. Painting over another painted kind swaps
+// it. A decoration standing there stays on top.
 export function paintPath(state: GameState, city: Tile, dx: number, dy: number, kind: number, on: boolean, p: PlayerId = state.current): Check {
   const why = decorateReason(state, city, p);
   if (why) return fail(why);
   if (!isPathKind(kind)) return fail('Not a path');
-  const i = indexAt(city, dx, dy);
+  const i = indexAt(city, dx, dy, 'ground');
   const here = i < 0 ? null : decoList(city)[i][2];
   if (!on) {
-    if (here === null || !isPathKind(here)) return fail('No path here');
+    if (here === null) return fail('No path here');
     decoList(city).splice(i, 1);
     return ok();
   }
   if (here === kind) return ok();
-  if (here !== null && !isPathKind(here)) return fail('Something is already here');
   const where = tileReason(city, dx, dy, kind);
   if (where) return fail(where);
   if (i >= 0) decoList(city)[i] = [dx, dy, kind];
@@ -288,7 +295,8 @@ export function restoreDeco(state: GameState, city: Tile, saved: DecoEntry[], re
 
 // ---------- drawing helpers (pure) ----------
 
-// Which neighbors a path tile joins: other paths (not grass), the castle and the plots. 8 directions.
+// Which neighbors a path tile joins: other paths (not grass, whatever stands on them), the castle and the
+// plots. 8 directions.
 export interface Links {
   n: boolean; e: boolean; s: boolean; w: boolean;
   ne: boolean; nw: boolean; se: boolean; sw: boolean;
@@ -298,8 +306,8 @@ export function pathLinks(city: Tile, dx: number, dy: number): Links {
   const j = (x: number, y: number) => {
     if (!inGrid(city, x, y)) return false;
     if (keepOrPlot(x, y)) return true;
-    const k = decoAt(city, x, y);
-    return k !== null && isPathKind(k) && !isGrassKind(k);
+    const k = groundAt(city, x, y);
+    return k !== null && !isGrassKind(k);
   };
   return {
     n: j(dx, dy - 1), e: j(dx + 1, dy), s: j(dx, dy + 1), w: j(dx - 1, dy),
@@ -310,14 +318,14 @@ export function pathLinks(city: Tile, dx: number, dy: number): Links {
 // Which neighbors a fence joins (other fences only), 4 directions
 export function fenceLinks(city: Tile, dx: number, dy: number): { n: boolean; e: boolean; s: boolean; w: boolean } {
   const f = decoKind('fence');
-  const j = (x: number, y: number) => decoAt(city, x, y) === f;
+  const j = (x: number, y: number) => objAt(city, x, y) === f;
   return { n: j(dx, dy - 1), e: j(dx + 1, dy), s: j(dx, dy + 1), w: j(dx - 1, dy) };
 }
 
 // ---------- saving ----------
 
-// Drop anything that can't be there (unknown kind, off the grid, on the Keep or a plot, a second thing on a
-// tile). Safety net for loading; shouldn't happen in normal play.
+// Drop anything that can't be there (unknown kind, off the grid, on the Keep or a plot, a second ground or a
+// second decoration on a tile). Safety net for loading; shouldn't happen in normal play.
 export function cleanDeco(city: Tile): void {
   if (!city.city) {
     city.deco = [];
@@ -325,8 +333,9 @@ export function cleanDeco(city: Tile): void {
   }
   const seen = new Set<string>();
   city.deco = decoList(city).filter(([x, y, k]) => {
-    const key = `${x},${y}`;
-    if (seen.has(key) || !decoInfo(k) || tileReason(city, x, y, k)) return false;
+    if (!decoInfo(k)) return false;
+    const key = `${x},${y},${layerOf(k)}`;
+    if (seen.has(key) || tileReason(city, x, y, k)) return false;
     seen.add(key);
     return true;
   });
