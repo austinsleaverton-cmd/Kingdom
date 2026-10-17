@@ -1,5 +1,6 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
 import { linkPlots, placeExisting, setupPlots } from './city';
+import { cleanDeco, decodeDeco, encodeDeco } from './deco';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
 import { gridLevel, syncGrid } from './grid';
@@ -46,6 +47,9 @@ interface SaveData {
   plots?: Record<number, [string, number[], number]>;
   // City Builder, city tile index -> highest level ever reached (grid size). Older saves: the city's level now
   grid?: Record<number, number>;
+  // City Builder decorations and paths, city tile index -> flat [dx, dy, kind, dx, dy, kind, ...] (kind = DECO_ORDER
+  // index). Older saves: none
+  deco?: Record<number, number[]>;
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -90,6 +94,7 @@ export function saveGame(state: GameState): void {
       ),
     ),
     grid: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.city ? [[i, gridLevel(t)]] : []))),
+    deco: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.city && t.deco?.length ? [[i, encodeDeco(t)]] : []))),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -175,6 +180,7 @@ export function loadGame(): GameState | null {
       t.plots = [];
       t.placed = [];
       t.projectPlot = null;
+      t.deco = [];
     });
     // City View plots (second pass: the land around each city has to be loaded first)
     state.map.tiles.forEach((t, i) => {
@@ -190,6 +196,9 @@ export function loadGame(): GameState | null {
       }
       linkPlots(state.map, t); // which map hex each plot faces (for facing bonuses)
       placeExisting(t); // anything built but not on a plot yet gets one
+      // Decorations and paths (older saves: none). Anything on a blocked or out-of-grid tile is dropped.
+      t.deco = decodeDeco(data.deco?.[i]);
+      cleanDeco(t);
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];

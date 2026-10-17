@@ -5,6 +5,7 @@
 // missing): callers check with canDraw() and fall back to the old drawn art when it does.
 // The look follows Kenney's Tiny Town sample: full houses on the grass, a towered castle, tree clumps.
 import Phaser from 'phaser';
+import type { DecoId } from '../world/deco';
 import type { Building, PlotTerrain } from '../world/tile';
 
 export const ART = 16; // art tile size in px (and world px)
@@ -17,6 +18,12 @@ export const SHEET_KEY: Record<Sheet, string> = { t: TINY, r: RPG };
 // The RPG sheet is 57 tiles wide (frame = row * 57 + col) with 1px between tiles.
 const TINY_URL = 'assets/kenney_tiny-town/Tilemap/tilemap_packed.png';
 const RPG_URL = 'assets/kenney_roguelike-rpg-pack/Spritesheet/roguelikeSheet_transparent.png';
+
+// Sheet layout, for the DOM tray thumbnails (CSS background crops of the same PNGs)
+export const SHEET_INFO: Record<Sheet, { url: string; w: number; h: number; cols: number; step: number }> = {
+  t: { url: TINY_URL, w: 192, h: 176, cols: 12, step: 16 },
+  r: { url: RPG_URL, w: 968, h: 526, cols: 57, step: 17 },
+};
 
 // One art tile in a picture: sheet, frame, and its spot in art tiles from the picture's top-left
 export interface Cell {
@@ -135,7 +142,7 @@ export const BUILDING_ART: Record<Building, BuildingPic> = {
   arena: { cells: [...rows('t', [[96, 97, 98], [108, 109, 110], [120, 121, 122]]), c('t', 95, 1, 1)], props: [] }, // walled yard
 };
 
-// ---------- scenery (just for looks until decorate mode, task 5) ----------
+// ---------- scenery (the wild trees and flowers every town starts with) ----------
 
 export const SCENERY = {
   tallTop: 4, // green tree: top over bottom
@@ -152,20 +159,68 @@ export const SCENERY = {
   flowers: [541, 542, 543, 544].map((f) => c('r', f)), // blue, red, purple, white
 };
 
-// ---------- decoration palette for decorate mode (task 5) ----------
-// Not used yet. Fence pieces (connect to neighbors): 44-47, 56-59, 68-71, 80-82 in Tiny Town.
-// Stone path: 43. No fountain in either pack: the fountain keeps a drawn fallback unless you pick a tile.
-export const DECOR_ART: Record<string, Cell[]> = {
-  tree: [c('t', 4, 0, -1), c('t', 16)],
-  bush: [c('t', 5)],
-  flowers: [c('r', 542)],
-  rock: [c('r', 614)],
-  path: [c('t', 43)],
-  well: [c('t', 104)],
-  sign: [c('t', 83)],
-  beehive: [c('t', 94)],
-  lamp: [c('r', 415)],
-  bench: [c('r', 303)],
-  statue: [c('r', 620, 0, -1), c('r', 677)],
-  banner: [c('r', 49, 0, -1), c('r', 106)],
+// ---------- decorate mode (task 5) ----------
+// Each decoration in art tiles from its city tile's top-left (a city tile is 3x3 art tiles; (1, 1) is the middle).
+// Paths and fences are worked out from their neighbors (PATH_DIRT, FENCE below); the banner is drawn in the
+// owner's color. The fountain is the RPG pack's stone pool with the glass orb in the middle.
+export const DECOR_ART: Record<DecoId, Cell[]> = {
+  tree: [c('t', 4, 1, 0.1), c('t', 16, 1, 1.1)],
+  autumn: [c('t', 3, 1, 0.1), c('t', 15, 1, 1.1)],
+  round: [c('t', 28, 1, 1)],
+  fruit: [c('r', 650, 1, 1)],
+  bush: [c('t', 5, 1, 1)],
+  flowers: [c('r', 542, 0.4, 0.6), c('r', 543, 1.5, 0.8), c('r', 544, 0.8, 1.5), c('r', 541, 1.7, 1.7)],
+  rock: [c('r', 1251, 1, 1)],
+  mossy: [c('r', 1308, 1, 1)],
+  mushrooms: [c('t', 29, 1, 1)],
+  path: [c('t', 25, 1, 1)],
+  stones: [c('t', 43, 1, 1)],
+  fence: [c('t', 45, 1, 1)],
+  well: [c('t', 92, 1, 0.2), c('t', 104, 1, 1.2)],
+  torch: [c('r', 416, 1, 1)],
+  bench: [c('r', 303, 1, 1.2)],
+  statue: [c('r', 620, 1, 0.2), c('r', 677, 1, 1.2)],
+  fountain: [...rows('r', [[409, 410, 411], [466, 467, 468], [523, 524, 525]]), c('r', 563, 1, 0.9)],
+  banner: [c('r', 49, 1, 0.2), c('r', 106, 1, 1.2)],
+  cottage: rows('t', [[48, 50], [60, 62], [84, 87]], 0.5, 0),
+  cottageStone: rows('t', [[52, 54], [64, 66], [88, 91]], 0.5, 0),
+  sign: [c('t', 83, 1, 1)],
+  beehive: [c('t', 94, 1, 1)],
+  hay: [c('t', 93, 1, 1)],
+  barrel: [c('t', 130, 1, 1)],
+  cart: [c('t', 57, 1, 1)],
+  campfire: [c('r', 470, 1, 1)],
+};
+
+// The fountain's pool lies flat on the ground; only the orb stands up
+export const FOUNTAIN_POOL = 9; // first 9 cells of DECOR_ART.fountain
+
+// Tray thumbnails where the in-game picture doesn't read well small
+export const DECOR_THUMB: Partial<Record<DecoId, Cell[]>> = {
+  path: rows('t', [[12, 14], [36, 38]]),
+  stones: [c('t', 43)],
+  fence: [c('t', 80), c('t', 82, 1)],
+  fountain: rows('r', [[409, 411], [523, 525]]),
+};
+
+// Dirt path, Tiny Town's dirt patch: outer corners, edges, middle, and the four inside corners
+// (dirt with a speck of grass in one corner) for where two joined sides meet
+export const PATH_DIRT = {
+  tl: 12, t: 13, tr: 14,
+  l: 24, mid: 25, r: 26,
+  bl: 36, b: 37, br: 38,
+  inTL: 39, inTR: 40, inBR: 41, inBL: 42,
+};
+export const PATH_STONES = 43; // stepping stones, tile across the whole city tile
+
+// Fence pieces: posts with rails out to each side. Corners are layered to make T's and crossings.
+export const FENCE = {
+  post: 47, // on its own
+  ew: 45, // rails both ways
+  e: 80, // rail to the right only
+  w: 82, // rail to the left only
+  ns: 56, // up and down
+  n: 71, // the bottom end of a line going up
+  se: 44, sw: 46, ne: 68, nw: 70, // corners
+  rail: 81, // rail with no post (between two fence tiles)
 };

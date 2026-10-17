@@ -38,6 +38,9 @@ export interface Tile {
   projectPlot: number | null; // plot reserved for the amenity under construction
   // City Builder (city only): highest level ever reached, drives the ground grid size (see world/grid.ts)
   gridLevel?: number;
+  // City Builder decorations and painted paths: [dx, dy, kind] relative to the Keep, kind = index into
+  // DECO_ORDER (see world/deco.ts). They stay with the city, even when it's captured.
+  deco?: [number, number, number][];
 }
 
 export const MAX_HEIGHT = 5;
@@ -181,6 +184,7 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.placed = [];
     tile.projectPlot = null;
     tile.gridLevel = 0;
+    tile.deco = [];
   }
 }
 
@@ -230,5 +234,6 @@ export function makeTile(col: number, row: number, height: number): Tile {
     placed: [],
     projectPlot: null,
     gridLevel: 0,
+    deco: [],
   };
 }
