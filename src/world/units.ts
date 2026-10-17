@@ -109,7 +109,7 @@ export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm (food)', key: 'F' },
   { id: 'fishery', label: 'Fishery (food, on water)', key: 'G' },
   { id: 'pasture', label: 'Pasture (horses)', key: 'P' },
-  { id: 'forest', label: 'Plant forest (bows)', key: 'T' },
+  { id: 'forest', label: 'Plant forest (lumber)', key: 'T' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
   { id: 'palisade', label: `Palisade (${PALISADE_STONE} stone)`, key: 'E' },
