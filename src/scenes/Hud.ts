@@ -72,7 +72,7 @@ export interface DialogModel {
   buttons: DialogButton[];
 }
 
-// Dropdowns under the top bar: gold breakdown (taxes and army upkeep), kingdoms table, recent news
+// Dropdowns under the top bar: gold breakdown (income and army upkeep), kingdoms table, recent news
 type Drop = 'gold' | 'kingdoms' | 'log';
 
 // Claiming land is a city action now (city panel), so the bar only needs Select.
@@ -105,7 +105,6 @@ const CSS = `
 .k-chip .k-lab { color: #9ca3af; }
 .k-chip b { color: #fff; font-size: 14px; }
 .k-chip small { color: #8b8b99; font-size: 12px; }
-.k-chip.k-cost b { color: #fca5a5; }
 .k-chip.k-warn b, .k-chip.k-warn small { color: #f87171; }
 .k-chip .k-mini { position: absolute; left: 8px; right: 8px; bottom: 1px; height: 2px; background: #23232b; border-radius: 2px; overflow: hidden; }
 .k-chip .k-mini span { display: block; height: 100%; }
@@ -385,7 +384,6 @@ interface Chip {
   note?: string; // small text after the value (trusted HTML)
   tip: string; // hover text
   warn?: boolean; // red: losing gold, out of food
-  cost?: boolean; // a payment (army upkeep)
   bar?: { pct: number; color: string }; // thin meter under the chip (food)
 }
 
@@ -514,10 +512,8 @@ export class Hud {
       ? ` <span class="k-who"><span class="k-dot" style="background:#${me.color.toString(16).padStart(6, '0')}"></span>${escape(me.name)}</span>`
       : '';
 
-    // Gold in: taxes from cities and worked land. Gold out: army upkeep. Net = what lands next turn.
-    const taxes = state.grossIncome(cur);
-    const pay = state.upkeep(cur);
-    const net = taxes - pay;
+    // Taxes = gold you actually get each turn: city and land income minus army upkeep. Tap for the breakdown.
+    const taxes = state.grossIncome(cur) - state.upkeep(cur);
     const foodPct = made > 0 ? Math.min(100, (used / made) * 100) : 100;
     const foodColor = left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e';
     const stoneIn = state.stoneIncome(cur);
@@ -529,12 +525,14 @@ export class Hud {
       `<span class="k-turn">Turn ${state.turn}${who}<span class="k-mode">${modeLabel}</span></span>` +
       chip(this.drop, {
         drop: 'gold', icon: '\u{1FA99}', label: 'Gold', value: free ? '\u221e' : String(me.gold),
-        note: free ? '' : `${signed(net)}/turn`, warn: !free && net < 0, tip: 'Gold: tap for taxes and army upkeep',
+        tip: free ? 'Free building is on' : 'Gold: tap for the breakdown',
       }) +
       (free
         ? ''
-        : chip(this.drop, { drop: 'gold', icon: '\u{1F4B0}', label: 'Taxes', value: signed(taxes), tip: 'Taxes: gold your cities and worked land bring in each turn' }) +
-          (pay ? chip(this.drop, { drop: 'gold', icon: '\u2694\uFE0F', label: 'Army', value: signed(-pay), cost: true, tip: 'Army upkeep: gold your troops cost each turn' }) : '')) +
+        : chip(this.drop, {
+          drop: 'gold', icon: '\u{1F4B0}', label: 'Taxes', value: signed(taxes), warn: taxes < 0,
+          tip: 'Taxes: gold you get each turn after paying your army (tap for the breakdown)',
+        })) +
       '<span class="k-sep"></span>' +
       chip(this.drop, {
         icon: '\u{1F33E}', label: 'Food', value: `${used}/${made}`, warn: left <= 0, bar: { pct: foodPct, color: foodColor },
@@ -576,7 +574,7 @@ export class Hud {
       `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect.</li>` +
       `<li><b>Routes:</b> with a unit selected, tap a far hex to see the path and turns, tap it again to go. It walks there by itself each turn (X cancels).</li>` +
       `<li><b>End turn</b> (Space) when you're done.</li>` +
-      `<li>Tap <b>Gold</b> or <b>Taxes</b> in the top bar to see where your gold comes from and what your army costs.</li></ul>` +
+      `<li><b>Taxes</b> in the top bar is the gold you get each turn after paying your army. Tap it to see where it comes from.</li></ul>` +
       `<h4>Units</h4><ul>` +
       `<li><b>Builder</b> (hammer): farms (food), pastures (horses), forests (lumber), mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
       `<li>Each pasture lets you keep 2 Knights, each forest gives lumber for 2 Archers. Forests are slow to cross but good cover.</li>` +
@@ -605,7 +603,7 @@ export class Hud {
 
   // ---------- top bar dropdowns ----------
 
-  // Taxes per city (biggest first) plus worked land, then army upkeep per troop type, then the net
+  // Income per city (biggest first) plus worked land, then army upkeep per troop type, then taxes per turn
   private goldHtml(state: GameState): string {
     const p = state.current;
     if (state.isFree(p)) return '<h4>Gold</h4><div class="k-log">Free building is on: nothing costs gold.</div>';
@@ -613,13 +611,13 @@ export class Hud {
     const cities = state
       .cities()
       .filter((c) => c.owner === p)
-      .map((c) => ({ name: state.cityName(c), gold: cityTaxes(state, c) }))
+      .map((c) => ({ name: state.cityName(c), gold: cityIncome(state, c) }))
       .sort((a, b) => b.gold - a.gold);
-    const taxes = state.grossIncome(p);
-    const land = taxes - cities.reduce((s, c) => s + c.gold, 0);
-    let html = '<h4>Taxes</h4>' + cities.map((c) => line(escape(c.name), c.gold)).join('');
+    const income = state.grossIncome(p);
+    const land = income - cities.reduce((s, c) => s + c.gold, 0);
+    let html = '<h4>Income</h4>' + cities.map((c) => line(escape(c.name), c.gold)).join('');
     if (land) html += line('Worked land', land);
-    html += line('Total taxes', taxes, ' k-total');
+    html += line('Total income', income, ' k-total');
 
     const counts = new Map<UnitType, number>();
     for (const u of state.armyOf(p)) if (troopUpkeep(u.type) > 0) counts.set(u.type, (counts.get(u.type) ?? 0) + 1);
@@ -631,7 +629,7 @@ export class Hud {
       for (const [t, n] of counts) html += line(`${n} ${unitPlural(UNIT_STATS[t].name, n)}`, -n * troopUpkeep(t));
       html += line('Total upkeep', -pay, ' k-total');
     }
-    html += line('Next turn', taxes - pay, ' k-total k-net');
+    html += line('Taxes per turn', income - pay, ' k-total k-net');
     return html;
   }
 
@@ -848,8 +846,8 @@ export class Hud {
   }
 }
 
-// What one city pays in taxes each turn. Mirrors GameState.grossIncome (worked land is counted separately).
-function cityTaxes(state: GameState, c: Tile): number {
+// What one city brings in each turn. Mirrors GameState.grossIncome (worked land is counted separately).
+function cityIncome(state: GameState, c: Tile): number {
   let gold = c.capital ? CAPITAL_INCOME : CITY_INCOME;
   gold += cityLevel(c) - 1;
   for (const b of c.buildings) gold += BUILDINGS[b].gold;
@@ -859,7 +857,7 @@ function cityTaxes(state: GameState, c: Tile): number {
 }
 
 function chip(open: Drop | null, c: Chip): string {
-  const cls = `k-chip${c.warn ? ' k-warn' : ''}${c.cost ? ' k-cost' : ''}${c.drop && open === c.drop ? ' k-on' : ''}`;
+  const cls = `k-chip${c.warn ? ' k-warn' : ''}${c.drop && open === c.drop ? ' k-on' : ''}`;
   const inner =
     `<span class="k-ic">${c.icon}</span><span class="k-lab">${c.label}</span>` +
     (c.value ? `<b>${c.value}</b>` : '') +
