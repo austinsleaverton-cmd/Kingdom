@@ -2,7 +2,8 @@
 // Each city keeps a flat list of [dx, dy, kind] relative to the Keep, one thing per tile. kind is an index into
 // DECO_ORDER, and paths are just decorations of the 'path' group (free, no beauty, joined up when drawn).
 // Grass is painted like a path too: it turns a tile back to plain grass, so the wild trees and flowers that
-// grow there by default go away (clear it and they come back).
+// grow there by default go away (clear it and they come back). Placing or moving a decoration onto grass
+// just replaces the grass.
 // Scenes only read this and call the actions below, which check the rules (your city, your turn, open tile, gold).
 import type { Check, GameState } from './game';
 import { PLOT_TILES, gridRadius, reservedTile } from './grid';
@@ -118,6 +119,18 @@ export function decoAt(city: Tile, dx: number, dy: number): number | null {
   return i < 0 ? null : decoList(city)[i][2];
 }
 
+// Nothing on the tile, or only painted grass (a decoration can go straight on top and replace it)
+function freeFor(city: Tile, dx: number, dy: number): boolean {
+  const k = decoAt(city, dx, dy);
+  return k === null || isGrassKind(k);
+}
+
+// Take painted grass off a tile (a decoration is replacing it)
+function dropGrass(city: Tile, dx: number, dy: number): void {
+  const k = decoAt(city, dx, dy);
+  if (k !== null && isGrassKind(k)) decoList(city).splice(indexAt(city, dx, dy), 1);
+}
+
 export function inGrid(city: Tile, dx: number, dy: number): boolean {
   const r = gridRadius(city);
   return Number.isInteger(dx) && Number.isInteger(dy) && Math.abs(dx) <= r && Math.abs(dy) <= r;
@@ -181,14 +194,16 @@ export function placeCheck(state: GameState, city: Tile, dx: number, dy: number,
   if (!t.ok) return t;
   const why = tileReason(city, dx, dy, kind);
   if (why) return fail(why);
-  if (decoAt(city, dx, dy) !== null) return fail('Something is already here');
+  if (!freeFor(city, dx, dy)) return fail('Something is already here');
   return t;
 }
 
+// Painted grass on the tile is replaced by the new decoration
 export function placeDeco(state: GameState, city: Tile, dx: number, dy: number, kind: number, p: PlayerId = state.current): Check {
   const c = placeCheck(state, city, dx, dy, kind, p);
   if (!c.ok) return c;
   state.players[p].gold -= c.cost;
+  dropGrass(city, dx, dy);
   decoList(city).push([dx, dy, kind]);
   return c;
 }
@@ -201,14 +216,16 @@ export function moveReason(city: Tile, fx: number, fy: number, tx: number, ty: n
   if (fx === tx && fy === ty) return '';
   const where = tileReason(city, tx, ty, kind);
   if (where) return where;
-  if (decoAt(city, tx, ty) !== null) return 'Something is already here';
+  if (!freeFor(city, tx, ty)) return 'Something is already here';
   return '';
 }
 
-// Moving is always free. Paths aren't moved (paint them again instead).
+// Moving is always free. Paths aren't moved (paint them again instead). Grass where it lands is replaced.
 export function moveDeco(state: GameState, city: Tile, fx: number, fy: number, tx: number, ty: number, p: PlayerId = state.current): Check {
   const why = decorateReason(state, city, p) || moveReason(city, fx, fy, tx, ty);
   if (why) return fail(why);
+  if (fx === tx && fy === ty) return ok();
+  dropGrass(city, tx, ty);
   const i = indexAt(city, fx, fy);
   decoList(city)[i] = [tx, ty, decoList(city)[i][2]];
   return ok();
