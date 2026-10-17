@@ -1,11 +1,14 @@
 // City View: the inside of one of your cities. The ground grid, plots and people are drawn by the Phaser
 // city screen (CityScene.ts, see docs/CITY_BUILDER.md). This file is the DOM around it: the header and the side
-// panel with plot info, bonuses and the build list, and the decorate tray (task 5). It reads the world and only
-// changes it through GameState methods and the decoration actions in world/deco.ts.
+// panel with plot info, bonuses and the build list, and the decorate tray (task 5) with the beauty meter (task 7).
+// It reads the world and only changes it through GameState methods and the decoration actions in world/deco.ts.
 // Plot i sits in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
 import type Phaser from 'phaser';
 import type { Check, GameState } from '../world/game';
-import { ADJACENCY, FACING_BONUS, TERRAIN_BONUS, bestPlot, bonusAmount, cityBonus, facingTile, facingWork, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain } from '../world/city';
+import {
+  ADJACENCY, BEAUTY_MAX, BEAUTY_STEP, FACING_BONUS, TERRAIN_BONUS, beautyBonus, beautyOn, bestPlot, bonusAmount, cityBeauty, cityBonus,
+  facingTile, facingWork, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain,
+} from '../world/city';
 import type { Outside } from '../world/city';
 import {
   DECOS, DECO_ORDER, clearDeco, decoAt, decoCount, decoCost, decoKind, decoList, decorateReason, isPathKind, moveDeco, paintPath,
@@ -61,6 +64,7 @@ const CSS = `
 .k-city-side h3 { margin: 0 0 4px; font-size: 15px; }
 .k-city-side p { margin: 2px 0 8px; font-size: 12px; color: #9ca3af; }
 .k-city-side .k-good { color: #4ade80; }
+.k-city-side p.k-beauty { color: #e5e7eb; font-size: 13px; background: #1b2030; border: 1px solid #2c3346; border-radius: 6px; padding: 6px 8px; }
 .k-city-list { display: flex; flex-direction: column; gap: 6px; }
 .k-city-list button { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 2px; width: 100%; }
 .k-city-list button b { font-weight: 600; }
@@ -536,12 +540,27 @@ export class CityView {
     else this.close(true);
   }
 
+  // Beauty meter (Normal and Hard only): "Beauty 11/16 · +1 happy · 5 more for +2"
+  private beautyMeter(s: GameState, c: Tile): string {
+    if (!beautyOn(s.options.difficulty, s.isFree(this.me))) return '';
+    const beauty = cityBeauty(c);
+    const bonus = beautyBonus(c, s.options.difficulty, s.isFree(this.me));
+    const cap = BEAUTY_STEP * BEAUTY_MAX;
+    const now = bonus ? `<span class="k-good">+${bonus} happy</span>` : 'no bonus yet';
+    const next = bonus < BEAUTY_MAX ? ` \u00b7 ${(bonus + 1) * BEAUTY_STEP - beauty} more for +${bonus + 1}` : ' (max)';
+    return (
+      `<p class="k-beauty" title="Every ${BEAUTY_STEP} beauty is +1 happy, up to +${BEAUTY_MAX}. Statues count 2, Fountains 3, paths 0.">` +
+      `\u2728 <b>Beauty ${beauty}/${cap}</b> \u00b7 ${now}${next}</p>`
+    );
+  }
+
   private decoPanel(s: GameState, c: Tile): string {
     const me = this.me;
     const small = decoCost(s, me, decoKind('tree'));
     const price = small === 0
       ? 'Decorations are free in this game.'
       : `${small}g each (Statue ${decoCost(s, me, decoKind('statue'))}g, Fountain ${decoCost(s, me, decoKind('fountain'))}g). Paths are free. Removing doesn't give gold back.`;
+    const beautyCounts = beautyOn(s.options.difficulty, s.isFree(me));
     const t = this.tool;
     const hint = t === null
       ? 'Pick something below, then tap open ground to place it. Tap a decoration to select it, drag it to move it.'
@@ -570,9 +589,11 @@ export class CityView {
         .map(({ id, k }) => {
           const check = trayCheck(s, c, k, me);
           const cost = decoCost(s, me, k);
-          const note = check.ok ? (cost ? `${cost}g` : 'free') : check.reason;
+          const beauty = beautyCounts ? DECOS[id].beauty : 0;
+          const note = check.ok ? `${cost ? `${cost}g` : 'free'}${beauty ? ` \u00b7 \u2728${beauty}` : ''}` : check.reason;
+          const tip = check.ok ? `${cost ? `${cost}g` : 'free'}${beauty ? `, ${beauty} beauty` : ''}` : check.reason;
           return (
-            `<button type="button" class="k-deco-item${t === k ? ' k-sel' : ''}" data-tool="${k}"${check.ok ? '' : ' disabled'} title="${esc(DECOS[id].name)}: ${esc(note)}">` +
+            `<button type="button" class="k-deco-item${t === k ? ' k-sel' : ''}" data-tool="${k}"${check.ok ? '' : ' disabled'} title="${esc(DECOS[id].name)}: ${esc(tip)}">` +
             `<span class="k-thumb">${thumbHtml(id)}</span><span>${esc(DECOS[id].name)}</span><small>${esc(note)}</small></button>`
           );
         })
@@ -581,6 +602,7 @@ export class CityView {
     }).join('');
     return (
       `<h3>\u{1F333} Decorate</h3>` +
+      this.beautyMeter(s, c) +
       `<p>${price} ${decoCount(c)} decoration${decoCount(c) === 1 ? '' : 's'} here.</p>` +
       `<p>${hint}</p>` +
       picked +
