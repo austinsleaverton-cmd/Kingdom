@@ -4,7 +4,8 @@ import type { WorldMap } from './map';
 import { BARRACKS_SPEED, BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, MILL_FARMS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
-import { bestPlot, cityBonus, describePlacement, noPlotReason, plotFits, plotReason, setupPlots } from './city';
+import { beautyBonus, bestPlot, cityBonus, describePlacement, noPlotReason, plotFits, plotReason, setupPlots } from './city';
+import { gridSize } from './grid';
 import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
@@ -478,6 +479,8 @@ export class GameState {
     if (!this.players[p].isAI && this.options.difficulty === 'easy') parts.push(['Easy mode', EASY_HAPPY]);
     for (const b of city.buildings) if (BUILDINGS[b].happy) parts.push([BUILDINGS[b].name, BUILDINGS[b].happy]);
     parts.push(...cityBonus(city).happyParts); // City View placement bonuses (Park next to the Temple)
+    const beauty = beautyBonus(city, this.options.difficulty, this.isFree(p)); // decorations, Normal and Hard only
+    if (beauty) parts.push(['Beautiful streets', beauty]);
     const crowd = Math.floor(city.pop / 2);
     if (crowd) parts.push(['Crowding', -crowd]);
     const war = Math.min(3, Math.floor(this.troopsAway(p) / 2));
@@ -980,10 +983,13 @@ export class GameState {
       c.growth = Math.round((c.growth - need) * 10) / 10;
       c.pop += 1;
       const before = cityLevel(c);
+      const roomBefore = gridSize(c); // City Builder ground grid (grows with the highest level ever reached)
       this.setPopLevel(c);
       if (cityLevel(c) > before) {
         c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
-        this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}`);
+        const room = gridSize(c);
+        const more = room > roomBefore ? `: more room to build (${room}x${room})` : '';
+        this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}${more}`);
       }
     }
   }
@@ -1297,7 +1303,7 @@ export class GameState {
     }
     if (!simple && this.foodUsed(p) + stats.food > this.foodMade(p)) return fail('Not enough food: build farms or fisheries');
     if (!simple && type === 'knight' && this.horsesUsed(p) >= this.horsesMade(p)) return fail('Need horses: a worked pasture');
-    if (!simple && type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need bows: a worked forest');
+    if (!simple && type === 'archer' && this.bowsUsed(p) >= this.bowsMade(p)) return fail('Need lumber: a worked forest');
     if (stats.stone && !this.isFree(p) && this.players[p].stone < stats.stone) return fail(`Need ${stats.stone} stone (build mines)`);
     if (stats.train === 0 && !this.spawnTile(city, type)) return fail('No room around the city');
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
