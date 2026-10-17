@@ -1,29 +1,38 @@
 // City screen: the inside of one of your cities as its own Phaser scene (docs/CITY_BUILDER.md).
 // A grassy town with the castle (the Keep) in the middle and the 6 plots as one tile each (no built-in roads:
-// you paint your own paths in decorate mode, task 5), and the map hex each plot faces as a small marker just
+// you paint your own paths in decorate mode), and the map hex each plot faces as a small marker just
 // past the edge. Drag to pan, pinch or wheel to zoom.
+// Decorate mode (task 5): tap an open tile to place the picked decoration, drag a decoration to move it, and with
+// a path (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on desktop).
 // Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles, styled after Kenney's Tiny Town sample:
 // full houses on the grass, a towered castle, tree clumps along the edge. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
-// Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building,
-// so a drag or a pinch can never build anything by accident.
+// Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
+// decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
 import type { GameState } from '../world/game';
 import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
+import { DECOS, DECO_ORDER, decoAt, decoList, fenceLinks, isPathKind, moveReason, pathLinks, placeCheck } from '../world/deco';
 import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
 import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
 import type { PxActor } from './citySprites';
 import {
-  ART, BUILDING_ART, BUILT_GROUND, CASTLE_ART, GRASS, PLOT_GROUND, RPG, SCENERY, TINY, WATER_LIFT,
-  canDraw, crispCityArt, hasFrame, loadCityArt,
+  ART, BUILDING_ART, BUILT_GROUND, CASTLE_ART, DECOR_ART, FENCE, FOUNTAIN_POOL, GRASS, PATH_DIRT, PATH_STONES, PLOT_GROUND, RPG,
+  SCENERY, TINY, WATER_LIFT, canDraw, crispCityArt, hasFrame, loadCityArt,
 } from './cityArt';
 import type { Cell, Sheet } from './cityArt';
 
 export const CITY_SCENE = 'city';
 export type CityPick = number | 'keep';
+
+// Decorate mode as the panel sees it (null = not decorating)
+export interface DecoUI {
+  tool: number | 'erase' | null; // DECO_ORDER index, the eraser, or nothing (tap to pick, drag to move)
+  picked: [number, number] | null; // the placed decoration that's selected
+}
 
 // What the scene needs from the side panel
 export interface CityLink {
@@ -33,7 +42,14 @@ export interface CityLink {
   sel(): CityPick; // what's selected (plot index or the Keep)
   view(): { x: number; y: number; w: number; h: number }; // screen area not covered by the DOM header/panel
   pick(p: CityPick): void; // tapped a plot, a facing marker or the Keep
-  close(): void; // Esc / O
+  close(): void; // O
+  escape(): void; // Esc: drop the tool, leave decorate mode, then back to the map
+  deco(): DecoUI | null;
+  decoTap(dx: number, dy: number): void; // tapped a tile in decorate mode
+  decoPaint(dx: number, dy: number, first: boolean): void; // a paint/erase stroke went over a tile
+  decoPaintEnd(): void;
+  decoMove(fx: number, fy: number, tx: number, ty: number): void; // dropped a dragged decoration
+  undo(): void;
 }
 
 const T = ART * 3; // tile size in world px: 3x3 Kenney tiles
@@ -57,6 +73,7 @@ const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, gr
 const OUT_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
 
 type Layer = 'ground' | 'obj';
+type XY = [number, number];
 
 // Facing marker i in tile units: past the edge in plot i's world direction (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE)
 function markerAt(i: number, r: number): [number, number] {
@@ -82,6 +99,21 @@ function hash01(dx: number, dy: number, seed: number, salt: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+// The tiles on a straight line from a to b (so a fast drag doesn't skip any)
+function lineTiles(a: XY, b: XY): XY[] {
+  const out: XY[] = [];
+  const steps = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+  for (let i = 1; i <= steps; i++) {
+    out.push([Math.round(a[0] + ((b[0] - a[0]) * i) / steps), Math.round(a[1] + ((b[1] - a[1]) * i) / steps)]);
+  }
+  return out;
+}
+
+// A tool that paints by dragging: a path or the eraser
+function paints(ui: DecoUI | null): boolean {
+  return !!ui && (ui.tool === 'erase' || (typeof ui.tool === 'number' && isPathKind(ui.tool)));
+}
+
 export class CityScene extends Phaser.Scene {
   static link: CityLink | null = null;
   private static instance: CityScene | null = null;
@@ -89,6 +121,8 @@ export class CityScene extends Phaser.Scene {
   private ground!: Phaser.GameObjects.Graphics;
   private scenery!: Phaser.GameObjects.Graphics;
   private marks!: Phaser.GameObjects.Graphics;
+  private gridG!: Phaser.GameObjects.Graphics;
+  private hoverG!: Phaser.GameObjects.Graphics;
   private selG!: Phaser.GameObjects.Graphics;
   // Kenney tiles, one blitter per sheet and layer (missing sheet = null, the drawn fallback is used)
   private blit: Record<Layer, Record<Sheet, Phaser.GameObjects.Blitter | null>> = {
@@ -111,7 +145,13 @@ export class CityScene extends Phaser.Scene {
   private downX = 0;
   private downY = 0;
   private pinchDist = 0;
+  private pinchMid: { x: number; y: number } | null = null;
   private pinching = false;
+  private panOnly = false; // right or middle mouse button: always pans
+  private downTile: XY | null = null;
+  private stroke = false; // painting or erasing paths
+  private lastPaint: XY | null = null;
+  private moving: { from: XY; to: XY } | null = null; // dragging a decoration
 
   constructor() {
     super(CITY_SCENE);
@@ -140,9 +180,11 @@ export class CityScene extends Phaser.Scene {
     crispCityArt(this);
     this.cameras.main.setBackgroundColor('#141a26');
     this.ground = this.add.graphics().setDepth(0);
+    this.gridG = this.add.graphics().setDepth(0.5);
     this.scenery = this.add.graphics().setDepth(1.5);
     this.marks = this.add.graphics().setDepth(1);
     this.selG = this.add.graphics().setDepth(4);
+    this.hoverG = this.add.graphics().setDepth(4.1);
     const sheets: [Sheet, string][] = [['t', TINY], ['r', RPG]];
     for (const [s, key] of sheets) {
       if (!this.textures.exists(key)) continue;
@@ -246,25 +288,87 @@ export class CityScene extends Phaser.Scene {
   // ---------- input ----------
 
   private resetPointer(): void {
+    this.endStroke();
     this.pressed = false;
     this.dragging = false;
     this.pinching = false;
     this.pinchDist = 0;
+    this.pinchMid = null;
+    this.panOnly = false;
+    this.downTile = null;
+    if (this.moving) {
+      this.moving = null;
+      if (this.ready) this.redraw();
+    }
+    this.hoverG?.clear();
   }
 
+  // Two fingers: zoom by how far apart they are, pan by how the middle between them moves
   private handlePinch(): boolean {
     const a = this.input.pointer1;
     const b = this.input.pointer2;
     if (!a?.isDown || !b?.isDown) {
       this.pinchDist = 0;
+      this.pinchMid = null;
       return false;
     }
     this.pinching = true;
     this.dragging = true;
     const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
-    if (this.pinchDist > 0 && dist > 0) this.zoomAt(dist / this.pinchDist, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    if (this.pinchMid) {
+      const cam = this.cameras.main;
+      cam.scrollX -= (mid.x - this.pinchMid.x) / cam.zoom;
+      cam.scrollY -= (mid.y - this.pinchMid.y) / cam.zoom;
+    }
+    if (this.pinchDist > 0 && dist > 0) this.zoomAt(dist / this.pinchDist, mid.x, mid.y);
+    else this.clampCam();
     this.pinchDist = dist;
+    this.pinchMid = mid;
     return true;
+  }
+
+  private decoUI(): DecoUI | null {
+    return CityScene.link?.deco() ?? null;
+  }
+
+  // The town tile under a screen point, or null off the grid
+  private tileAt(sx: number, sy: number): XY | null {
+    const link = CityScene.link;
+    if (!link) return null;
+    const w = this.cameras.main.getWorldPoint(sx, sy);
+    const dx = Math.round(w.x / T);
+    const dy = Math.round(w.y / T);
+    const r = gridRadius(link.city);
+    return Math.abs(dx) > r || Math.abs(dy) > r ? null : [dx, dy];
+  }
+
+  // A placed decoration (not a path) that can be dragged around
+  private movable(t: XY | null): boolean {
+    const link = CityScene.link;
+    if (!link || !t) return false;
+    const k = decoAt(link.city, t[0], t[1]);
+    return k !== null && !isPathKind(k);
+  }
+
+  private paintTo(t: XY, first: boolean): void {
+    const link = CityScene.link;
+    if (!link) return;
+    if (first || !this.lastPaint) {
+      link.decoPaint(t[0], t[1], true);
+      this.lastPaint = t;
+      return;
+    }
+    if (t[0] === this.lastPaint[0] && t[1] === this.lastPaint[1]) return;
+    for (const s of lineTiles(this.lastPaint, t)) link.decoPaint(s[0], s[1], false);
+    this.lastPaint = t;
+  }
+
+  private endStroke(): void {
+    if (!this.stroke) return;
+    this.stroke = false;
+    this.lastPaint = null;
+    CityScene.link?.decoPaintEnd();
   }
 
   private setupInput(): void {
@@ -272,25 +376,66 @@ export class CityScene extends Phaser.Scene {
     if (this.input.manager.pointersTotal < 2) this.input.addPointer(1); // second finger for pinch zoom
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      if (this.input.pointer1?.isDown && this.input.pointer2?.isDown) this.pinching = true;
+      if (this.input.pointer1?.isDown && this.input.pointer2?.isDown) {
+        // A second finger: this is a pinch, so stop painting or dragging (what's painted stays)
+        this.pinching = true;
+        this.endStroke();
+        if (this.moving) {
+          this.moving = null;
+          this.redraw();
+        }
+      }
       this.pressed = true;
       this.dragging = false;
       this.downX = p.x;
       this.downY = p.y;
+      this.panOnly = p.rightButtonDown() || p.middleButtonDown();
+      this.downTile = this.tileAt(p.x, p.y);
+      this.lastPaint = null;
     });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       if (this.handlePinch()) return;
       if (this.pinching) return; // one finger lifted mid-pinch: wait until both are up
+      const ui = this.decoUI();
       if (this.pressed && p.isDown) {
-        if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_PX) this.dragging = true;
+        if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_PX) {
+          this.dragging = true;
+          if (ui && !this.panOnly && this.downTile) {
+            if (paints(ui)) {
+              this.stroke = true;
+              this.hoverG.clear();
+              this.paintTo(this.downTile, true);
+            } else if (this.movable(this.downTile)) {
+              this.moving = { from: this.downTile, to: this.downTile };
+              this.hoverG.clear();
+            }
+          }
+        }
         if (this.dragging) {
+          if (this.stroke) {
+            const t = this.tileAt(p.x, p.y);
+            if (t) this.paintTo(t, false);
+            return;
+          }
+          if (this.moving) {
+            const t = this.tileAt(p.x, p.y) ?? this.moving.from;
+            if (t[0] !== this.moving.to[0] || t[1] !== this.moving.to[1]) {
+              this.moving.to = t;
+              this.redraw();
+            }
+            return;
+          }
           const cam = this.cameras.main;
           cam.scrollX -= (p.x - p.prevPosition.x) / cam.zoom;
           cam.scrollY -= (p.y - p.prevPosition.y) / cam.zoom;
           this.clampCam();
           return;
         }
+      }
+      if (ui) {
+        this.hover(ui, p.wasTouch ? null : this.tileAt(p.x, p.y));
+        return;
       }
       // Desktop: pointer cursor over anything you can tap
       this.input.setDefaultCursor(this.pickAt(p.x, p.y) !== null ? 'pointer' : 'default');
@@ -305,7 +450,23 @@ export class CityScene extends Phaser.Scene {
       const tap = this.pressed && !this.dragging;
       this.pressed = false;
       this.dragging = false;
+      if (this.stroke) {
+        this.endStroke();
+        return;
+      }
+      if (this.moving) {
+        const m = this.moving;
+        this.moving = null;
+        if (m.to[0] !== m.from[0] || m.to[1] !== m.from[1]) CityScene.link?.decoMove(m.from[0], m.from[1], m.to[0], m.to[1]);
+        else this.redraw();
+        return;
+      }
       if (!tap || p.rightButtonReleased()) return;
+      if (this.decoUI()) {
+        const t = this.tileAt(p.x, p.y);
+        if (t) CityScene.link?.decoTap(t[0], t[1]);
+        return;
+      }
       const hit = this.pickAt(p.x, p.y);
       if (hit !== null) CityScene.link?.pick(hit);
     });
@@ -317,10 +478,42 @@ export class CityScene extends Phaser.Scene {
       this.zoomAt(Math.exp(-delta * (ev.ctrlKey ? 0.01 : 0.0015)), p.x, p.y);
     });
 
-    // Esc or O again: back to the map
+    // Esc: drop the tool / leave decorate mode / back to the map. O: back to the map. Ctrl/Cmd+Z: undo.
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || e.key.toUpperCase() === 'O') CityScene.link?.close();
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        CityScene.link?.undo();
+        return;
+      }
+      if (e.key === 'Escape') CityScene.link?.escape();
+      else if (e.key.toUpperCase() === 'O') CityScene.link?.close();
     });
+  }
+
+  // Desktop, decorate mode: outline the tile under the mouse, green where the picked tool can go
+  private hover(ui: DecoUI, t: XY | null): void {
+    const g = this.hoverG;
+    g.clear();
+    const link = CityScene.link;
+    if (!link || !t) {
+      this.input.setDefaultCursor('default');
+      return;
+    }
+    const [dx, dy] = t;
+    const here = decoAt(link.city, dx, dy);
+    let color = 0xffffff;
+    if (typeof ui.tool === 'number') {
+      const pathOver = isPathKind(ui.tool) && here !== null && isPathKind(here);
+      color = pathOver || placeCheck(link.state, link.city, dx, dy, ui.tool, link.me).ok ? 0x4ade80 : 0xf87171;
+    } else if (ui.tool === 'erase') {
+      color = here !== null ? 0xf87171 : 0xffffff;
+    } else if (here === null || isPathKind(here)) {
+      this.input.setDefaultCursor('default');
+      return;
+    }
+    this.input.setDefaultCursor(ui.tool === null ? 'grab' : 'pointer');
+    g.lineStyle(2, color, 0.9);
+    g.strokeRect(dx * T - T / 2 + 2, dy * T - T / 2 + 2, T - 4, T - 4);
   }
 
   // What's under a screen point: a facing marker (counts as its plot), the castle, or a plot tile
@@ -378,6 +571,7 @@ export class CityScene extends Phaser.Scene {
     if (!link || !this.ready) return;
     const { state: s, city: c } = link;
     const sel = link.sel();
+    const ui = link.deco();
     const r = gridRadius(c);
     const open = openPlots(c, s.isSimple(link.me));
     const seed = c.col * 92821 + c.row * 68917;
@@ -386,7 +580,7 @@ export class CityScene extends Phaser.Scene {
     this.labels = [];
     for (const layer of Object.values(this.blit)) for (const b of Object.values(layer)) b?.clear();
 
-    // Ground: one field of grass (no tile lines; the grid only shows when placing things, task 5)
+    // Ground: one field of grass (the tile grid only shows in decorate mode)
     const g = this.ground;
     g.clear();
     const half = (r + 0.5) * T;
@@ -410,14 +604,19 @@ export class CityScene extends Phaser.Scene {
       this.drawnGrass(g, r, seed);
     }
 
-    // Scenery first, so the castle and buildings stand in front of any tree that leans over them
-    this.drawScenery(r, seed);
+    // Painted paths lie on the ground, under everything else
+    for (const [dx, dy, k] of decoList(c)) if (isPathKind(k)) this.path(g, c, dx, dy, k);
+
+    // Decorations and the wild scenery, row by row so lower things overlap the ones behind them.
+    // Scenery first, so the castle and buildings stand in front of any tree that leans over them.
+    this.scenery.clear();
+    this.drawTown(c, r, seed);
 
     // The Keep: the towered castle, or a stone yard with an emoji if the art is missing
     const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
     if (canDraw(this, CASTLE_ART.cells)) {
       this.cells('obj', CASTLE_ART.cells, CASTLE_LEFT, CASTLE_TOP);
-      if (sel === 'keep') this.txt(0, CASTLE_BOTTOM + 7, keepName, 9, { label: true });
+      if (sel === 'keep' && !ui) this.txt(0, CASTLE_BOTTOM + 7, keepName, 9, { label: true });
     } else {
       g.fillStyle(0x6b7280, 1);
       g.fillCircle(0, 0, T * 0.62);
@@ -439,7 +638,7 @@ export class CityScene extends Phaser.Scene {
       const locked = i >= open;
       const b = c.placed[i];
       const proj = c.projectPlot === i ? c.project : null;
-      const picked = sel === i;
+      const picked = sel === i && !ui;
       if (locked && !b) {
         // Locked: a faint outline of the plot to come, small lock and level name
         this.plotGround(g, x, y, t, 0.25);
@@ -468,7 +667,7 @@ export class CityScene extends Phaser.Scene {
       } else {
         // Open plot: its ground (dirt lot, pond, sand or hills) with a + to build
         this.plotGround(g, x, y, t, 1);
-        this.txt(x, y - 5, '+', 26, { alpha: 0.85 });
+        this.txt(x, y - 5, '+', 26, { alpha: ui ? 0.4 : 0.85 });
         this.txt(x, y + 14, PLOT_NAME[t], 9, { label: true });
       }
     }
@@ -485,7 +684,7 @@ export class CityScene extends Phaser.Scene {
       const y = my * T;
       const b = c.placed[i];
       const paying = !!b && plotBonus(c, i, b).notes.some((n) => n.includes('facing'));
-      const picked = sel === i;
+      const picked = sel === i && !ui;
       if (paying) {
         const [px, py] = PLOT_TILES[i];
         this.dots(m, px * T, py * T, x, y, 0x4ade80, 0.6);
@@ -501,21 +700,188 @@ export class CityScene extends Phaser.Scene {
       if (work) this.txt(x, y, OUT_ICON[work], 10, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
-    // Selection: around the castle for the Keep, around the plot otherwise
+    // Decorate mode: a faint tile grid (stronger while a path or the eraser is picked)
+    const gg = this.gridG;
+    gg.clear();
+    if (ui) {
+      gg.lineStyle(1, 0xffffff, paints(ui) ? 0.22 : 0.1);
+      for (let k = -r; k <= r + 1; k++) {
+        gg.lineBetween((k - 0.5) * T, -half, (k - 0.5) * T, half);
+        gg.lineBetween(-half, (k - 0.5) * T, half, (k - 0.5) * T);
+      }
+    }
+
+    // Selection: the picked decoration in decorate mode, otherwise the castle for the Keep or the plot
     this.selG.clear();
-    const box = sel === 'keep' && canDraw(this, CASTLE_ART.cells)
-      ? { x: CASTLE_LEFT - 2, y: CASTLE_TOP - 2, w: -2 * CASTLE_LEFT + 4, h: CASTLE_BOTTOM - CASTLE_TOP + 4 }
-      : (() => {
-          const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
-          return { x: sx * T - T / 2 + 1, y: sy * T - T / 2 + 1, w: T - 2, h: T - 2 };
-        })();
-    this.selG.lineStyle(6, 0x000000, 0.4);
-    this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
-    this.selG.lineStyle(3, 0xfacc15, 1);
-    this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
+    let box: { x: number; y: number; w: number; h: number } | null = null;
+    if (ui) {
+      const at = this.moving ? this.moving.to : ui.picked;
+      if (at) box = { x: at[0] * T - T / 2 + 1, y: at[1] * T - T / 2 + 1, w: T - 2, h: T - 2 };
+    } else if (sel === 'keep' && canDraw(this, CASTLE_ART.cells)) {
+      box = { x: CASTLE_LEFT - 2, y: CASTLE_TOP - 2, w: -2 * CASTLE_LEFT + 4, h: CASTLE_BOTTOM - CASTLE_TOP + 4 };
+    } else {
+      const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
+      box = { x: sx * T - T / 2 + 1, y: sy * T - T / 2 + 1, w: T - 2, h: T - 2 };
+    }
+    if (box) {
+      const bad = !!this.moving && !this.dropOk(this.moving);
+      this.selG.lineStyle(6, 0x000000, 0.4);
+      this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
+      this.selG.lineStyle(3, bad ? 0xf87171 : 0xfacc15, 1);
+      this.selG.strokeRoundedRect(box.x, box.y, box.w, box.h, 6);
+    }
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
+  }
+
+  // Can the dragged decoration land where it is now? (red outline when not; it snaps back on drop)
+  private dropOk(m: { from: XY; to: XY }): boolean {
+    const link = CityScene.link;
+    return !!link && moveReason(link.city, m.from[0], m.from[1], m.to[0], m.to[1]) === '';
+  }
+
+  // Your decorations, then the wild trees and flowers on any tile you haven't used, top row first
+  private drawTown(c: Tile, r: number, seed: number): void {
+    const g = this.scenery;
+    const art = canDraw(this, [
+      { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
+      { s: 't', f: SCENERY.small, x: 0, y: 0 }, { s: 't', f: SCENERY.bush, x: 0, y: 0 },
+    ]);
+    const mv = this.moving;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const k = decoAt(c, dx, dy);
+        if (k !== null) {
+          const lifted = !!mv && mv.from[0] === dx && mv.from[1] === dy;
+          if (!isPathKind(k)) this.deco(c, k, dx, dy, lifted ? 0.3 : 1);
+          continue;
+        }
+        if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
+        if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
+        if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
+        const roll = hash01(dx, dy, seed, 10);
+        if (art) {
+          this.artScenery(dx, dy, seed, roll, Math.max(Math.abs(dx), Math.abs(dy)) === r);
+          continue;
+        }
+        if (roll > 0.42) continue;
+        const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
+        const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
+        if (roll < 0.2) this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
+        else if (roll < 0.33) this.bush(g, x, y);
+        else this.rock(g, x, y);
+        if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
+      }
+    }
+    // The decoration being dragged, on top of everything at the tile under your finger
+    if (mv && (mv.to[0] !== mv.from[0] || mv.to[1] !== mv.from[1])) {
+      const k = decoAt(c, mv.from[0], mv.from[1]);
+      if (k !== null) this.deco(c, k, mv.to[0], mv.to[1], 0.85);
+    }
+  }
+
+  // One decoration on tile (dx, dy)
+  private deco(c: Tile, k: number, dx: number, dy: number, alpha: number): void {
+    const id = DECO_ORDER[k];
+    const left = dx * T - T / 2;
+    const top = dy * T - T / 2;
+    if (id === 'fence') {
+      if (this.fence(c, dx, dy, left, top, alpha)) return;
+    } else if (id === 'banner') {
+      this.banner(dx * T, dy * T, c.owner !== null ? CityScene.link?.state.players[c.owner]?.color ?? 0x3b82f6 : 0x9ca3af, alpha);
+      return;
+    } else if (id === 'fountain') {
+      const cells = DECOR_ART.fountain;
+      if (canDraw(this, cells)) {
+        this.cells('ground', cells.slice(0, FOUNTAIN_POOL), left, top, alpha);
+        this.cells('obj', cells.slice(FOUNTAIN_POOL), left, top, alpha);
+        return;
+      }
+    } else if (canDraw(this, DECOR_ART[id])) {
+      this.cells('obj', DECOR_ART[id], left, top, alpha);
+      return;
+    }
+    this.txt(dx * T, dy * T, DECOS[id].icon, 22, { alpha });
+  }
+
+  // A fence line through the middle of the tile, joined to the fences next to it
+  private fence(c: Tile, dx: number, dy: number, left: number, top: number, alpha: number): boolean {
+    const l = fenceLinks(c, dx, dy);
+    const mid: number[] = [];
+    const hz = l.e || l.w;
+    const vt = l.n || l.s;
+    if (!hz && !vt) mid.push(FENCE.post);
+    else if (!vt) mid.push(l.e && l.w ? FENCE.ew : l.e ? FENCE.e : FENCE.w);
+    else if (!hz) mid.push(l.n && l.s ? FENCE.ns : l.n ? FENCE.n : FENCE.post);
+    else {
+      if (l.s && l.e) mid.push(FENCE.se);
+      if (l.s && l.w) mid.push(FENCE.sw);
+      if (l.n && l.e) mid.push(FENCE.ne);
+      if (l.n && l.w) mid.push(FENCE.nw);
+      if (l.n && l.s) mid.push(FENCE.ns);
+      if (l.e && l.w) mid.push(FENCE.ew);
+    }
+    const cells: Cell[] = mid.map((f) => ({ s: 't', f, x: 1, y: 1 }));
+    if (l.w) cells.push({ s: 't', f: FENCE.rail, x: 0, y: 1 });
+    if (l.e) cells.push({ s: 't', f: FENCE.rail, x: 2, y: 1 });
+    if (l.n) cells.push({ s: 't', f: FENCE.ns, x: 1, y: 0 });
+    if (l.s) cells.push({ s: 't', f: FENCE.ns, x: 1, y: 2 });
+    if (!canDraw(this, cells)) return false;
+    // Top row first so the posts overlap the rails above them
+    cells.sort((a, b) => a.y - b.y);
+    this.cells('obj', cells, left, top, alpha);
+    return true;
+  }
+
+  // A painted path tile. Dirt joins its neighbors (and the castle and plots) so corners draw themselves.
+  private path(g: Phaser.GameObjects.Graphics, c: Tile, dx: number, dy: number, k: number): void {
+    const left = dx * T - T / 2;
+    const top = dy * T - T / 2;
+    if (DECO_ORDER[k] === 'stones') {
+      if (hasFrame(this, 't', PATH_STONES)) {
+        for (let j = 0; j < 3; j++) for (let i = 0; i < 3; i++) this.bob('ground', 't', PATH_STONES, left + i * ART, top + j * ART);
+        return;
+      }
+    } else {
+      const P = PATH_DIRT;
+      const l = pathLinks(c, dx, dy);
+      const corner = (a: boolean, b: boolean, diag: boolean, out: number, edgeA: number, edgeB: number, inner: number) =>
+        !a && !b ? out : a && !b ? edgeA : !a && b ? edgeB : diag ? P.mid : inner;
+      // (a = the vertical neighbor, b = the horizontal one)
+      const grid = [
+        [corner(l.n, l.w, l.nw, P.tl, P.l, P.t, P.inTL), l.n ? P.mid : P.t, corner(l.n, l.e, l.ne, P.tr, P.r, P.t, P.inTR)],
+        [l.w ? P.mid : P.l, P.mid, l.e ? P.mid : P.r],
+        [corner(l.s, l.w, l.sw, P.bl, P.l, P.b, P.inBL), l.s ? P.mid : P.b, corner(l.s, l.e, l.se, P.br, P.r, P.b, P.inBR)],
+      ];
+      const cells: Cell[] = [];
+      grid.forEach((row, y) => row.forEach((f, x) => cells.push({ s: 't', f, x, y })));
+      if (canDraw(this, cells)) {
+        this.cells('ground', cells, left, top);
+        return;
+      }
+    }
+    // Drawn fallback: a sandy square
+    g.fillStyle(DECO_ORDER[k] === 'stones' ? 0xb8b8b0 : 0xc9a46a, 1);
+    g.fillRect(left + 2, top + 2, T - 4, T - 4);
+  }
+
+  // A banner on a pole in the owner's color
+  private banner(x: number, y: number, color: number, alpha: number): void {
+    const g = this.scenery;
+    g.fillStyle(0x000000, 0.18 * alpha);
+    g.fillEllipse(x + 1, y + 16, 14, 4);
+    g.fillStyle(0x5b3a1e, alpha);
+    g.fillRect(x - 6, y - 20, 3, 37);
+    g.fillStyle(0xfacc15, alpha);
+    g.fillCircle(x - 4.5, y - 21, 2.5);
+    g.fillStyle(color, alpha);
+    g.fillRect(x - 3, y - 17, 13, 16);
+    g.fillTriangle(x - 3, y - 1, x + 10, y - 1, x + 3.5, y + 5);
+    g.fillStyle(0xffffff, 0.35 * alpha);
+    g.fillRect(x - 3, y - 17, 13, 2);
+    g.fillStyle(0x000000, 0.25 * alpha);
+    g.fillRect(x + 8, y - 17, 2, 16);
   }
 
   // Fallback grass (no Kenney sheet): soft light and dark patches plus little tufts
@@ -538,35 +904,6 @@ export class CityScene extends Phaser.Scene {
         const y = dy * T + (hash01(dx, dy, seed, 6) - 0.5) * T * 0.7;
         g.fillTriangle(x - 3, y + 2, x - 1, y - 4, x + 1, y + 2);
         g.fillTriangle(x, y + 2, x + 2, y - 5, x + 4, y + 2);
-      }
-    }
-  }
-
-  // Seeded, so the same city always looks the same. Skips the castle, plots and the tiles hugging them.
-  // Rows go top to bottom so lower trees overlap the ones behind them.
-  private drawScenery(r: number, seed: number): void {
-    const g = this.scenery;
-    g.clear();
-    const art = canDraw(this, [
-      { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
-      { s: 't', f: SCENERY.small, x: 0, y: 0 }, { s: 't', f: SCENERY.bush, x: 0, y: 0 },
-    ]);
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
-        if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
-        const roll = hash01(dx, dy, seed, 10);
-        if (art) {
-          this.artScenery(dx, dy, seed, roll, Math.max(Math.abs(dx), Math.abs(dy)) === r);
-          continue;
-        }
-        if (roll > 0.42) continue;
-        const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
-        const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
-        if (roll < 0.2) this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
-        else if (roll < 0.33) this.bush(g, x, y);
-        else this.rock(g, x, y);
-        if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
       }
     }
   }
