@@ -1,6 +1,8 @@
 // City Builder decorations and painted paths (docs/CITY_BUILDER.md, task 5). Pure logic, no Phaser imports.
 // Each city keeps a flat list of [dx, dy, kind] relative to the Keep, one thing per tile. kind is an index into
 // DECO_ORDER, and paths are just decorations of the 'path' group (free, no beauty, joined up when drawn).
+// Grass is painted like a path too: it turns a tile back to plain grass, so the wild trees and flowers that
+// grow there by default go away (clear it and they come back).
 // Scenes only read this and call the actions below, which check the rules (your city, your turn, open tile, gold).
 import type { Check, GameState } from './game';
 import { PLOT_TILES, gridRadius, reservedTile } from './grid';
@@ -11,7 +13,8 @@ export type DecoId =
   | 'tree' | 'autumn' | 'round' | 'fruit' | 'bush' | 'flowers' | 'rock' | 'mossy' | 'mushrooms'
   | 'path' | 'stones' | 'fence'
   | 'well' | 'torch' | 'bench' | 'statue' | 'fountain' | 'banner' | 'cottage' | 'cottageStone'
-  | 'sign' | 'beehive' | 'hay' | 'barrel' | 'cart' | 'campfire';
+  | 'sign' | 'beehive' | 'hay' | 'barrel' | 'cart' | 'campfire'
+  | 'grass';
 
 export type DecoGroup = 'path' | 'nature' | 'build';
 export type DecoPrice = 'small' | 'statue' | 'fountain';
@@ -21,7 +24,7 @@ export interface DecoInfo {
   icon: string; // emoji, used when the art is missing
   group: DecoGroup;
   price: DecoPrice;
-  beauty: number; // for the beauty bonus in task 7 (paths count 0)
+  beauty: number; // for the beauty bonus in task 7 (paths and grass count 0)
   minLevel?: number; // city level needed (2 Town, 3 City)
 }
 
@@ -31,6 +34,7 @@ export const DECO_ORDER: DecoId[] = [
   'path', 'stones', 'fence',
   'well', 'torch', 'bench', 'statue', 'fountain', 'banner', 'cottage', 'cottageStone',
   'sign', 'beehive', 'hay', 'barrel', 'cart', 'campfire',
+  'grass',
 ];
 
 const n = (name: string, icon: string): DecoInfo => ({ name, icon, group: 'nature', price: 'small', beauty: 1 });
@@ -63,9 +67,10 @@ export const DECOS: Record<DecoId, DecoInfo> = {
   barrel: b('Barrel', '\u{1F6E2}\uFE0F'),
   cart: b('Cart', '\u{1F6D2}'),
   campfire: b('Campfire', '\u{1F525}'),
+  grass: { name: 'Grass', icon: '\u{1F331}', group: 'path', price: 'small', beauty: 0 },
 };
 
-// Gold per decoration on Normal and Hard (Easy and Free Play are free, paths are free everywhere)
+// Gold per decoration on Normal and Hard (Easy and Free Play are free, paths and grass are free everywhere)
 export const DECO_PRICE: Record<'normal' | 'hard', Record<DecoPrice, number>> = {
   normal: { small: 2, statue: 6, fountain: 10 },
   hard: { small: 3, statue: 8, fountain: 12 },
@@ -84,8 +89,14 @@ export function decoInfo(kind: number): DecoInfo | null {
   return id ? DECOS[id] : null;
 }
 
+// Painted by dragging (paths and grass)
 export function isPathKind(kind: number): boolean {
   return decoInfo(kind)?.group === 'path';
+}
+
+// Plain grass: painted like a path, but it draws nothing and paths don't join to it
+export function isGrassKind(kind: number): boolean {
+  return DECO_ORDER[kind] === 'grass';
 }
 
 export function decoKind(id: DecoId): number {
@@ -213,7 +224,7 @@ export function removeDeco(state: GameState, city: Tile, dx: number, dy: number,
   return ok();
 }
 
-// Paint (on) or clear (off) one tile of path. Painting over another kind of path swaps it.
+// Paint (on) or clear (off) one tile of path or grass. Painting over another painted kind swaps it.
 export function paintPath(state: GameState, city: Tile, dx: number, dy: number, kind: number, on: boolean, p: PlayerId = state.current): Check {
   const why = decorateReason(state, city, p);
   if (why) return fail(why);
@@ -260,7 +271,7 @@ export function restoreDeco(state: GameState, city: Tile, saved: DecoEntry[], re
 
 // ---------- drawing helpers (pure) ----------
 
-// Which neighbors a path tile joins: other paths, the castle and the plots. 8 directions.
+// Which neighbors a path tile joins: other paths (not grass), the castle and the plots. 8 directions.
 export interface Links {
   n: boolean; e: boolean; s: boolean; w: boolean;
   ne: boolean; nw: boolean; se: boolean; sw: boolean;
@@ -271,7 +282,7 @@ export function pathLinks(city: Tile, dx: number, dy: number): Links {
     if (!inGrid(city, x, y)) return false;
     if (keepOrPlot(x, y)) return true;
     const k = decoAt(city, x, y);
-    return k !== null && isPathKind(k);
+    return k !== null && isPathKind(k) && !isGrassKind(k);
   };
   return {
     n: j(dx, dy - 1), e: j(dx + 1, dy), s: j(dx, dy + 1), w: j(dx - 1, dy),
@@ -319,7 +330,7 @@ export function decodeDeco(flat: unknown): DecoEntry[] {
   return out;
 }
 
-// How many decorations (not paths) a city has, for the panel
+// How many decorations (not paths or grass) a city has, for the panel
 export function decoCount(city: Tile): number {
   return decoList(city).filter(([, , k]) => !isPathKind(k)).length;
 }

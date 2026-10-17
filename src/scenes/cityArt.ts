@@ -164,6 +164,7 @@ export const SCENERY = {
 // Paths and fences are worked out from their neighbors (PATH_DIRT, FENCE below); the banner is drawn in the
 // owner's color. The fountain is the RPG pack's stone pool with the glass orb in the middle.
 // Tall pictures (trees, well, statue, fruit tree) are a top tile over a bottom tile.
+// Grass draws nothing: the grass ground is already there, it just keeps the wild scenery off that tile.
 export const DECOR_ART: Record<DecoId, Cell[]> = {
   tree: [c('t', 4, 1, 0.1), c('t', 16, 1, 1.1)],
   autumn: [c('t', 3, 1, 0.1), c('t', 15, 1, 1.1)],
@@ -191,6 +192,7 @@ export const DECOR_ART: Record<DecoId, Cell[]> = {
   barrel: [c('t', 130, 1, 1)],
   cart: [c('t', 57, 1, 1)],
   campfire: [c('r', 470, 1, 1)],
+  grass: [],
 };
 
 // The fountain's pool lies flat on the ground; only the orb stands up
@@ -202,6 +204,7 @@ export const DECOR_THUMB: Partial<Record<DecoId, Cell[]>> = {
   stones: [c('t', 43)],
   fence: [c('t', 80), c('t', 82, 1)],
   fountain: rows('r', [[409, 411], [523, 525]]),
+  grass: rows('t', [[1, 0], [0, 1]]),
 };
 
 // Dirt path, Tiny Town's dirt patch: outer corners, edges, middle, and the four inside corners
