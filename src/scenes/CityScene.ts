@@ -2,6 +2,8 @@
 // A grassy town with the castle (the Keep) in the middle and the 6 plots as one tile each (no built-in roads:
 // you paint your own paths in decorate mode), and the map hex each plot faces as a small marker just
 // past the edge. Drag to pan, pinch or wheel to zoom.
+// Coastal towns: the sea comes in from the sides whose plots face water on the map (world/grid.ts waterTiles),
+// with a grass shore where it meets land. The Keep and the land plots always stay dry.
 // Decorate mode (task 5): tap an open tile to place the picked decoration, drag a decoration to move it, and with
 // a path, grass (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on
 // desktop). Grass tiles just show the plain ground: they keep the wild trees and flowers off that tile.
@@ -15,7 +17,7 @@ import type { GameState } from '../world/game';
 import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
 import { DECOS, DECO_ORDER, decoAt, decoList, fenceLinks, isGrassKind, isPathKind, moveReason, pathLinks, placeCheck } from '../world/deco';
-import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
+import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile, tileKey, waterTiles } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
 import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
@@ -64,6 +66,9 @@ const NAME_Y = T / 2 + 1; // names sit on the bottom edge of their plot
 const CASTLE_LEFT = -(CASTLE_ART.w * ART) / 2;
 const CASTLE_TOP = -40;
 const CASTLE_BOTTOM = CASTLE_TOP + CASTLE_ART.h * ART;
+
+// The sea: the RPG pack's pond tiles as a 9-slice (grass shore on the outer edges and corners, open water in the middle)
+const SEA = { tl: 2, t: 3, tr: 4, l: 59, mid: 60, r: 61, bl: 116, b: 117, br: 118 };
 
 const GRASS_COLOR = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
@@ -555,7 +560,8 @@ export class CityScene extends Phaser.Scene {
   // A building filling its plot (centered at x, y), with its props alongside. False = use the emoji instead.
   private building(b: Building, x: number, y: number, t: PlotTerrain, alpha: number): boolean {
     const pic = BUILDING_ART[b];
-    const under = BUILT_GROUND[t];
+    // Water plots are part of the sea now, so the Harbor stands in it (no little pond in front any more)
+    const under = t === 'water' ? [] : BUILT_GROUND[t];
     if (!canDraw(this, [...pic.cells, ...pic.props, ...under])) return false;
     const left = x - T / 2;
     const top = y - T / 2;
@@ -605,13 +611,17 @@ export class CityScene extends Phaser.Scene {
       this.drawnGrass(g, r, seed);
     }
 
+    // Coastal towns: the sea comes in from the sides that face water on the map
+    const water = waterTiles(c);
+    if (water.size) this.drawWater(g, water, r);
+
     // Painted paths lie on the ground, under everything else (grass tiles draw nothing: the ground is already grass)
     for (const [dx, dy, k] of decoList(c)) if (isPathKind(k)) this.path(g, c, dx, dy, k);
 
     // Decorations and the wild scenery, row by row so lower things overlap the ones behind them.
     // Scenery first, so the castle and buildings stand in front of any tree that leans over them.
     this.scenery.clear();
-    this.drawTown(c, r, seed);
+    this.drawTown(c, r, seed, water);
 
     // The Keep: the towered castle, or a stone yard with an emoji if the art is missing
     const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
@@ -666,7 +676,7 @@ export class CityScene extends Phaser.Scene {
         }
         this.crowd(BUILDER_PEOPLE, x, y, i);
       } else {
-        // Open plot: its ground (dirt lot, pond, sand or hills) with a + to build
+        // Open plot: its ground (dirt lot, sand or hills; water plots are open sea) with a + to build
         this.plotGround(g, x, y, t, 1);
         this.txt(x, y - 5, '+', 26, { alpha: ui ? 0.4 : 0.85 });
         this.txt(x, y + 14, PLOT_NAME[t], 9, { label: true });
@@ -736,14 +746,46 @@ export class CityScene extends Phaser.Scene {
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
   }
 
+  // The sea: open water in the middle of each water tile, a grass shore on any side that touches land.
+  // Past the edge of the town counts as the edge tile, so the water runs out of the picture instead of
+  // stopping at a bank.
+  private drawWater(g: Phaser.GameObjects.Graphics, water: Set<string>, r: number): void {
+    const edge = (v: number) => Math.max(-r, Math.min(r, v));
+    const wet = (dx: number, dy: number) => water.has(tileKey(edge(dx), edge(dy)));
+    const W = SEA;
+    const art = canDraw(this, Object.values(W).map((f): Cell => ({ s: 'r', f, x: 0, y: 0 })));
+    for (const key of water) {
+      const [dx, dy] = key.split(',').map(Number);
+      const left = dx * T - T / 2;
+      const top = dy * T - T / 2;
+      if (!art) {
+        g.fillStyle(PLOT_COLOR.water, 1);
+        g.fillRect(left, top, T, T);
+        continue;
+      }
+      // true = land on that side
+      const n = !wet(dx, dy - 1);
+      const s = !wet(dx, dy + 1);
+      const w = !wet(dx - 1, dy);
+      const e = !wet(dx + 1, dy);
+      const grid = [
+        [n && w ? W.tl : n ? W.t : w ? W.l : W.mid, n ? W.t : W.mid, n && e ? W.tr : n ? W.t : e ? W.r : W.mid],
+        [w ? W.l : W.mid, W.mid, e ? W.r : W.mid],
+        [s && w ? W.bl : s ? W.b : w ? W.l : W.mid, s ? W.b : W.mid, s && e ? W.br : s ? W.b : e ? W.r : W.mid],
+      ];
+      grid.forEach((row, j) => row.forEach((f, i) => this.bob('ground', 'r', f, left + i * ART, top + j * ART)));
+    }
+  }
+
   // Can the dragged decoration land where it is now? (red outline when not; it snaps back on drop)
   private dropOk(m: { from: XY; to: XY }): boolean {
     const link = CityScene.link;
     return !!link && moveReason(link.city, m.from[0], m.from[1], m.to[0], m.to[1]) === '';
   }
 
-  // Your decorations, then the wild trees and flowers on any tile you haven't used, top row first
-  private drawTown(c: Tile, r: number, seed: number): void {
+  // Your decorations, then the wild trees and flowers on any tile you haven't used, top row first.
+  // No wild scenery grows on the water.
+  private drawTown(c: Tile, r: number, seed: number, water: Set<string>): void {
     const g = this.scenery;
     const art = canDraw(this, [
       { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
@@ -759,6 +801,7 @@ export class CityScene extends Phaser.Scene {
           continue; // anything you put here (a path or grass too) replaces the wild scenery
         }
         if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
+        if (water.has(tileKey(dx, dy))) continue;
         if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
         if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
         const roll = hash01(dx, dy, seed, 10);
@@ -991,8 +1034,10 @@ export class CityScene extends Phaser.Scene {
     g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
-  // An open plot's ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim
+  // An open plot's ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim.
+  // Water plots draw nothing: they're part of the sea (drawWater) already.
   private plotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
+    if (t === 'water') return;
     const cells = PLOT_GROUND[t];
     if (canDraw(this, cells)) {
       this.cells('ground', cells, x - T / 2, y - T / 2, alpha);
@@ -1004,12 +1049,7 @@ export class CityScene extends Phaser.Scene {
     const s = T - 6;
     g.fillStyle(PLOT_COLOR[t], alpha);
     g.fillRoundedRect(l, top, s, s, 7);
-    if (t === 'water') {
-      g.lineStyle(1.5, 0x7dd3fc, 0.5 * alpha);
-      g.lineBetween(x - 14, y - 10, x - 5, y - 10);
-      g.lineBetween(x + 3, y - 3, x + 13, y - 3);
-      g.lineBetween(x - 10, y + 5, x - 2, y + 5);
-    } else if (t === 'hills') {
+    if (t === 'hills') {
       g.fillStyle(0x6f6038, alpha);
       g.fillEllipse(x - 10, y + 10, 14, 7);
       g.fillEllipse(x + 11, y + 12, 12, 6);
