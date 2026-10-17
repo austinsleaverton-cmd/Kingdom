@@ -21,7 +21,11 @@ import { DECOR_ART, DECOR_THUMB, SHEET_INFO } from './cityArt';
 
 export interface CityViewHandlers {
   onChange(): void; // something was built or decorated: redraw and save
-  onClose(): void;
+  onClose(user: boolean): void; // user = you left on purpose (button, Esc, O, zooming out), not forced by the game
+}
+
+export interface CityOpenOptions {
+  zoomIn?: boolean; // arriving from the map's zoom: the city screen starts close and eases out to fit
 }
 
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
@@ -32,7 +36,9 @@ const UNDO_MAX = 30;
 const GROUPS: [DecoGroup, string][] = [['path', 'Paths'], ['nature', 'Nature'], ['build', 'Buildings and props']];
 
 const CSS = `
-.k-city { position: fixed; inset: 0; z-index: ${Z}; display: none; pointer-events: none; color: #e5e7eb; font: 14px/1.4 system-ui, sans-serif; }
+.k-city { position: fixed; inset: 0; z-index: ${Z}; display: none; pointer-events: none; color: #e5e7eb; font: 14px/1.4 system-ui, sans-serif; transition: opacity .2s ease; }
+.k-city.k-dim { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .k-city { transition: none; } }
 .k-city-head { position: absolute; top: 0; left: 0; right: 0; pointer-events: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: max(10px, env(safe-area-inset-top)) calc(54px + env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); box-sizing: border-box;
   background: linear-gradient(rgba(11,14,20,0.95), rgba(11,14,20,0.8)); border-bottom: 1px solid #2a2f3a; }
@@ -209,6 +215,7 @@ export class CityView {
   private handlers: CityViewHandlers | null = null;
   private hidden: HTMLElement[] = []; // HUD pieces tucked away while the city is open
   private rulesOpen = false;
+  private closing = false; // zooming back out to the map (task 6)
   // Decorate mode (task 5)
   private decorating = false;
   private tool: Tool = null;
@@ -228,8 +235,8 @@ export class CityView {
     return this.root.style.display === 'block';
   }
 
-  open(state: GameState, city: Tile, me: number, handlers: CityViewHandlers): void {
-    if (!city.city || city.owner !== me) return;
+  open(state: GameState, city: Tile, me: number, handlers: CityViewHandlers, opts: CityOpenOptions = {}): void {
+    if (!city.city || city.owner !== me || this.closing) return;
     const again = this.visible;
     if (this.city !== city || this.me !== me) this.resetDeco();
     this.state = state;
@@ -241,7 +248,10 @@ export class CityView {
     const free = Array.from({ length: open }, (_, i) => i).find((i) => !city.placed[i] && city.projectPlot !== i);
     this.sel = free ?? 'keep';
     this.root.style.display = 'block';
-    if (!again) this.hideOthers();
+    if (!again) {
+      this.hideOthers();
+      if (opts.zoomIn) this.fadeIn();
+    }
     this.render(); // lay out the panel first: the city screen fits itself into the space left over
     CityScene.link = {
       state,
@@ -250,7 +260,7 @@ export class CityView {
       sel: () => this.sel,
       view: () => this.freeArea(),
       pick: (p) => this.pick(p),
-      close: () => this.close(),
+      close: () => this.close(true),
       escape: () => this.escape(),
       deco: () => (this.decorating ? { tool: this.tool, picked: this.picked } : null),
       decoTap: (dx, dy) => this.decoTap(dx, dy),
@@ -263,14 +273,28 @@ export class CityView {
     if (!sm) return;
     if (again) CityScene.refit();
     else {
+      CityScene.intro = !!opts.zoomIn;
       sm.sleep(MAP_SCENE); // the map stops drawing and listening underneath
       sm.run(CITY_SCENE); // starts it the first time, wakes it after that
     }
   }
 
-  close(): void {
-    if (!this.visible) return;
+  // user = you chose to leave (button, Esc, O, zooming out): the city screen zooms out and fades first.
+  // Forced closes (menu, next player's turn, city lost) switch right away.
+  close(user = false): void {
+    if (!this.visible || this.closing) return;
     this.decoPaintEnd();
+    if (user && CityScene.zoomOut(() => this.finishClose(true))) {
+      this.closing = true;
+      this.root.classList.add('k-dim');
+      return;
+    }
+    this.finishClose(user);
+  }
+
+  private finishClose(user: boolean): void {
+    this.closing = false;
+    this.root.classList.remove('k-dim');
     this.resetDeco();
     this.root.style.display = 'none';
     this.showOthers();
@@ -282,7 +306,14 @@ export class CityView {
     CityScene.link = null;
     const h = this.handlers;
     this.handlers = null;
-    h?.onClose();
+    h?.onClose(user);
+  }
+
+  // The panel fades in with the city screen (two frames later, so the browser sees the change)
+  private fadeIn(): void {
+    const el = this.root;
+    el.classList.add('k-dim');
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('k-dim')));
   }
 
   // The world changed under it: redraw, or close if the city is no longer yours
@@ -362,7 +393,7 @@ export class CityView {
     const rules =
       `<details class="k-city-rules"${this.rulesOpen ? ' open' : ''}><summary>Placement bonuses</summary>` +
       `\u2605 = best spot for it \u00b7 ${esc(bonusRules())}</details>` +
-      `<div class="k-city-hint">Tap a plot to pick it. Drag to look around, pinch or scroll to zoom.${canDeco ? ' Decorate to plant trees, paint paths and more.' : ''}</div>`;
+      `<div class="k-city-hint">Tap a plot to pick it. Drag to look around, pinch or scroll to zoom. Keep zooming out to go back to the map.${canDeco ? ' Decorate to plant trees, paint paths and more.' : ''}</div>`;
     const body = this.decorating ? this.decoPanel(s, c) : `${this.sidePanel(s, c, simple, open)}${rules}`;
     this.root.innerHTML = `${head}<div class="k-city-side">${body}</div>`;
 
@@ -373,7 +404,7 @@ export class CityView {
     if (sideEl) sideEl.scrollTop = sideTop;
     this.root.querySelectorAll<HTMLElement>('.k-deco-tray').forEach((t, i) => (t.scrollLeft = trays[i] ?? 0));
 
-    this.root.querySelector<HTMLButtonElement>('[data-close]')!.onclick = () => this.close();
+    this.root.querySelector<HTMLButtonElement>('[data-close]')!.onclick = () => this.close(true);
     const decoEl = this.root.querySelector<HTMLButtonElement>('[data-deco]');
     if (decoEl) decoEl.onclick = () => this.setDecorating(!this.decorating);
     const det = this.root.querySelector<HTMLDetailsElement>('.k-city-rules');
@@ -502,7 +533,7 @@ export class CityView {
       this.picked = null;
       this.render();
     } else if (this.decorating) this.setDecorating(false);
-    else this.close();
+    else this.close(true);
   }
 
   private decoPanel(s: GameState, c: Tile): string {
