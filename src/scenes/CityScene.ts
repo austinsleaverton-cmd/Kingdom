@@ -7,6 +7,8 @@
 // Decorate mode (task 5): tap an open tile to place the picked decoration, drag a decoration to move it, and with
 // a path, grass (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on
 // desktop). Grass tiles just show the plain ground: they keep the wild trees and flowers off that tile.
+// Zoom transition (task 6): arriving from the map the town starts close and eases out to fit. Keep zooming out
+// past the min zoom (wheel, or pinch and release) and it zooms out and fades back to the map (zoomPush.ts).
 // Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles, styled after Kenney's Tiny Town sample:
 // full houses on the grass, a towered castle, tree clumps along the edge. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
@@ -27,6 +29,7 @@ import {
   SCENERY, TINY, WATER_LIFT, canDraw, crispCityArt, hasFrame, loadCityArt,
 } from './cityArt';
 import type { Cell, Sheet } from './cityArt';
+import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
 
 export const CITY_SCENE = 'city';
 export type CityPick = number | 'keep';
@@ -45,7 +48,7 @@ export interface CityLink {
   sel(): CityPick; // what's selected (plot index or the Keep)
   view(): { x: number; y: number; w: number; h: number }; // screen area not covered by the DOM header/panel
   pick(p: CityPick): void; // tapped a plot, a facing marker or the Keep
-  close(): void; // O
+  close(): void; // O, or zoomed out past the limit
   escape(): void; // Esc: drop the tool, leave decorate mode, then back to the map
   deco(): DecoUI | null;
   decoTap(dx: number, dy: number): void; // tapped a tile in decorate mode
@@ -66,6 +69,11 @@ const NAME_Y = T / 2 + 1; // names sit on the bottom edge of their plot
 const CASTLE_LEFT = -(CASTLE_ART.w * ART) / 2;
 const CASTLE_TOP = -40;
 const CASTLE_BOTTOM = CASTLE_TOP + CASTLE_ART.h * ART;
+// Zoom transition: fade color (the screen's background), how close the town starts, and timings
+const FADE: [number, number, number] = [20, 26, 38];
+const INTRO_ZOOM = 2.2;
+const INTRO_MS = 340;
+const OUTRO_MS = 240;
 
 // The sea: the RPG pack's pond tiles as a 9-slice (grass shore on the outer edges and corners, open water in the middle)
 const SEA = { tl: 2, t: 3, tr: 4, l: 59, mid: 60, r: 61, bl: 116, b: 117, br: 118 };
@@ -122,6 +130,7 @@ function paints(ui: DecoUI | null): boolean {
 
 export class CityScene extends Phaser.Scene {
   static link: CityLink | null = null;
+  static intro = false; // set by CityView: play the zoom-in when the screen next shows
   private static instance: CityScene | null = null;
 
   private ground!: Phaser.GameObjects.Graphics;
@@ -159,6 +168,12 @@ export class CityScene extends Phaser.Scene {
   private lastPaint: XY | null = null;
   private moving: { from: XY; to: XY } | null = null; // dragging a decoration
 
+  // Zoom transition (task 6)
+  private push = new ZoomPush(); // wheel past the min zoom
+  private pinchPush = new PinchPush(); // pinch past the min zoom
+  private zoomTw: Phaser.Tweens.Tween | null = null;
+  private busy = false; // zooming out to the map: ignore input
+
   constructor() {
     super(CITY_SCENE);
     CityScene.instance = this;
@@ -174,6 +189,14 @@ export class CityScene extends Phaser.Scene {
   static refit(): void {
     const s = CityScene.instance;
     if (s?.ready && s.sys.isActive()) s.show();
+  }
+
+  // Leaving on purpose: zoom out and fade, then done() switches to the map. False = no animation (switch now).
+  static zoomOut(done: () => void): boolean {
+    const s = CityScene.instance;
+    if (!s?.ready || !s.sys.isActive() || s.reduced || s.busy) return false;
+    s.outro(done);
+    return true;
   }
 
   // The map loads the sheets first; this only matters if the city screen ever starts on its own
@@ -222,8 +245,56 @@ export class CityScene extends Phaser.Scene {
   private show(): void {
     if (!CityScene.link) return;
     this.resetPointer();
+    this.zoomTw?.stop();
+    this.zoomTw = null;
     this.fit();
     this.redraw();
+    this.push.cool(performance.now()); // leftover zoom from the map can't bounce you straight back out
+    if (!CityScene.intro) return;
+    CityScene.intro = false;
+    if (this.reduced) return;
+    // Arriving from the map: start close on the Keep and ease out to the fitted view
+    const z = this.cameras.main.zoom;
+    this.zoomTween(z * INTRO_ZOOM, z, INTRO_MS, 'Sine.easeOut', { x: 0, y: 0 });
+    this.cameras.main.fadeIn(INTRO_MS * 0.6, FADE[0], FADE[1], FADE[2]);
+  }
+
+  // Zoom from one level to another, keeping world point `at` in the middle of the free screen area
+  private zoomTween(from: number, to: number, ms: number, ease: string, at: { x: number; y: number }): void {
+    this.zoomTw?.stop();
+    const cam = this.cameras.main;
+    cam.setZoom(from);
+    this.lookAt(at.x, at.y);
+    this.zoomTw = this.tweens.addCounter({
+      from,
+      to,
+      duration: ms,
+      ease,
+      onUpdate: (_tw: Phaser.Tweens.Tween, _t: unknown, _k: string, v: number) => {
+        cam.setZoom(v);
+        this.lookAt(at.x, at.y);
+      },
+      onComplete: () => {
+        this.zoomTw = null;
+      },
+    });
+  }
+
+  // Leaving for the map: zoom out and fade, then switch
+  private outro(done: () => void): void {
+    this.resetPointer();
+    this.busy = true;
+    const cam = this.cameras.main;
+    const z = cam.zoom;
+    this.zoomTween(z, z * 0.55, OUTRO_MS, 'Sine.easeIn', this.lookingAt());
+    cam.fadeOut(OUTRO_MS, FADE[0], FADE[1], FADE[2]);
+    cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.zoomTw?.stop();
+      this.zoomTw = null;
+      this.busy = false;
+      done();
+      cam.resetFX();
+    });
   }
 
   private view(): { x: number; y: number; w: number; h: number } {
@@ -302,6 +373,8 @@ export class CityScene extends Phaser.Scene {
     this.pinchMid = null;
     this.panOnly = false;
     this.downTile = null;
+    this.pinchPush.reset();
+    pushHint(null);
     if (this.moving) {
       this.moving = null;
       if (this.ready) this.redraw();
@@ -309,7 +382,8 @@ export class CityScene extends Phaser.Scene {
     this.hoverG?.clear();
   }
 
-  // Two fingers: zoom by how far apart they are, pan by how the middle between them moves
+  // Two fingers: zoom by how far apart they are, pan by how the middle between them moves.
+  // Squeezing on past the min zoom stretches the view a little; let go once it says so and you're back on the map.
   private handlePinch(): boolean {
     const a = this.input.pointer1;
     const b = this.input.pointer2;
@@ -327,8 +401,18 @@ export class CityScene extends Phaser.Scene {
       cam.scrollX -= (mid.x - this.pinchMid.x) / cam.zoom;
       cam.scrollY -= (mid.y - this.pinchMid.y) / cam.zoom;
     }
-    if (this.pinchDist > 0 && dist > 0) this.zoomAt(dist / this.pinchDist, mid.x, mid.y);
-    else this.clampCam();
+    if (this.pinchDist > 0 && dist > 0) {
+      const ratio = dist / this.pinchDist;
+      const cam = this.cameras.main;
+      const pp = this.pinchPush;
+      const atMin = cam.zoom <= this.minZoom + 0.001;
+      if (pp.active || (ratio < 1 && atMin && !this.stroke && !this.moving && !this.push.cooling(performance.now()))) {
+        pp.stretch(1 / ratio);
+        cam.setZoom(this.minZoom / pp.give);
+        this.clampCam();
+        pushHint(pp.armed ? 'Release for the map' : null);
+      } else this.zoomAt(ratio, mid.x, mid.y);
+    } else this.clampCam();
     this.pinchDist = dist;
     this.pinchMid = mid;
     return true;
@@ -382,6 +466,7 @@ export class CityScene extends Phaser.Scene {
     if (this.input.manager.pointersTotal < 2) this.input.addPointer(1); // second finger for pinch zoom
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.busy) return;
       if (this.input.pointer1?.isDown && this.input.pointer2?.isDown) {
         // A second finger: this is a pinch, so stop painting or dragging (what's painted stays)
         this.pinching = true;
@@ -401,6 +486,7 @@ export class CityScene extends Phaser.Scene {
     });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (this.busy) return;
       if (this.handlePinch()) return;
       if (this.pinching) return; // one finger lifted mid-pinch: wait until both are up
       const ui = this.decoUI();
@@ -448,9 +534,17 @@ export class CityScene extends Phaser.Scene {
     });
 
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.busy) return;
       if (this.pinching) {
-        // Finish the pinch once every finger is up; never count it as a tap
-        if (!this.input.pointer1?.isDown && !this.input.pointer2?.isDown) this.resetPointer();
+        // Finish the pinch once every finger is up; never count it as a tap.
+        // Squeezed past the min zoom far enough: back to the map. Not far enough: spring back.
+        if (!this.input.pointer1?.isDown && !this.input.pointer2?.isDown) {
+          const armed = this.pinchPush.armed;
+          const stretched = this.pinchPush.active;
+          this.resetPointer();
+          if (armed) CityScene.link?.close();
+          else if (stretched) this.zoomTween(this.cameras.main.zoom, this.minZoom, 160, 'Sine.easeOut', this.lookingAt());
+        }
         return;
       }
       const tap = this.pressed && !this.dragging;
@@ -477,15 +571,25 @@ export class CityScene extends Phaser.Scene {
       if (hit !== null) CityScene.link?.pick(hit);
     });
 
-    // Same feel as the map: scale by how far the wheel/trackpad moved (ctrl+wheel = macOS trackpad pinch)
+    // Same feel as the map: scale by how far the wheel/trackpad moved (ctrl+wheel = macOS trackpad pinch).
+    // Keep zooming out once at the min zoom and it goes back to the map (not while painting or dragging).
     this.input.on('wheel', (p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+      if (this.busy) return;
       const ev = p.event as WheelEvent;
       const delta = Phaser.Math.Clamp(dy, -60, 60);
+      const now = performance.now();
+      const out = delta > 0 && !this.stroke && !this.moving && !this.pinching;
+      this.push.atLimit(out && this.cameras.main.zoom <= this.minZoom + 0.001, now);
+      if (out && this.push.feed(delta * (ev.ctrlKey ? TRACKPAD_PINCH : 1), now)) {
+        CityScene.link?.close();
+        return;
+      }
       this.zoomAt(Math.exp(-delta * (ev.ctrlKey ? 0.01 : 0.0015)), p.x, p.y);
     });
 
     // Esc: drop the tool / leave decorate mode / back to the map. O: back to the map. Ctrl/Cmd+Z: undo.
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
+      if (this.busy) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         CityScene.link?.undo();
