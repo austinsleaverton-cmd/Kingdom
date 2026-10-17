@@ -3,7 +3,8 @@
 // you paint your own paths in decorate mode), and the map hex each plot faces as a small marker just
 // past the edge. Drag to pan, pinch or wheel to zoom.
 // Decorate mode (task 5): tap an open tile to place the picked decoration, drag a decoration to move it, and with
-// a path (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on desktop).
+// a path, grass (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on
+// desktop). Grass tiles just show the plain ground: they keep the wild trees and flowers off that tile.
 // Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles, styled after Kenney's Tiny Town sample:
 // full houses on the grass, a towered castle, tree clumps along the edge. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
@@ -13,7 +14,7 @@ import Phaser from 'phaser';
 import type { GameState } from '../world/game';
 import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
 import type { Outside } from '../world/city';
-import { DECOS, DECO_ORDER, decoAt, decoList, fenceLinks, isPathKind, moveReason, pathLinks, placeCheck } from '../world/deco';
+import { DECOS, DECO_ORDER, decoAt, decoList, fenceLinks, isGrassKind, isPathKind, moveReason, pathLinks, placeCheck } from '../world/deco';
 import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile } from '../world/grid';
 import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
 import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
@@ -109,7 +110,7 @@ function lineTiles(a: XY, b: XY): XY[] {
   return out;
 }
 
-// A tool that paints by dragging: a path or the eraser
+// A tool that paints by dragging: a path, grass or the eraser
 function paints(ui: DecoUI | null): boolean {
   return !!ui && (ui.tool === 'erase' || (typeof ui.tool === 'number' && isPathKind(ui.tool)));
 }
@@ -604,7 +605,7 @@ export class CityScene extends Phaser.Scene {
       this.drawnGrass(g, r, seed);
     }
 
-    // Painted paths lie on the ground, under everything else
+    // Painted paths lie on the ground, under everything else (grass tiles draw nothing: the ground is already grass)
     for (const [dx, dy, k] of decoList(c)) if (isPathKind(k)) this.path(g, c, dx, dy, k);
 
     // Decorations and the wild scenery, row by row so lower things overlap the ones behind them.
@@ -700,7 +701,7 @@ export class CityScene extends Phaser.Scene {
       if (work) this.txt(x, y, OUT_ICON[work], 10, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
-    // Decorate mode: a faint tile grid (stronger while a path or the eraser is picked)
+    // Decorate mode: a faint tile grid (stronger while a path, grass or the eraser is picked)
     const gg = this.gridG;
     gg.clear();
     if (ui) {
@@ -755,7 +756,7 @@ export class CityScene extends Phaser.Scene {
         if (k !== null) {
           const lifted = !!mv && mv.from[0] === dx && mv.from[1] === dy;
           if (!isPathKind(k)) this.deco(c, k, dx, dy, lifted ? 0.3 : 1);
-          continue;
+          continue; // anything you put here (a path or grass too) replaces the wild scenery
         }
         if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
         if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
@@ -835,7 +836,9 @@ export class CityScene extends Phaser.Scene {
   }
 
   // A painted path tile. Dirt joins its neighbors (and the castle and plots) so corners draw themselves.
+  // Grass draws nothing: the grass ground is already under it.
   private path(g: Phaser.GameObjects.Graphics, c: Tile, dx: number, dy: number, k: number): void {
+    if (isGrassKind(k)) return;
     const left = dx * T - T / 2;
     const top = dy * T - T / 2;
     if (DECO_ORDER[k] === 'stones') {
