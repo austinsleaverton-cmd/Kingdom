@@ -45,12 +45,18 @@ The Keep is the center tile. Each building is **one tile** (one plot = one tile,
 | 5 | SE | (1, 2) |
 
 - **Reserved:** the Keep tile, the 6 plot tiles, and the 5 tiles the castle art covers ((-1..1, -1) and (±1, 0), `KEEP_TILES` in `src/world/deco.ts`). Nothing goes there; paths join up to them.
-- **Yards (paths only):** the tile right of each plot (where its props stand) and the tile below a water plot (the Harbor's pond).
+- **Yards (paths only):** the tile right of each plot (where its props stand) and the tile below a water plot.
 - **No built-in roads.** A new city is the Keep and its plots on grass. Streets are paths the player paints (see Decorations).
 - Plot neighbors stay index-based (`plotNeighbors(i)`: ring neighbors + Keep). The grid is visual; `src/world/city.ts` scoring does not change.
-- Plot terrain shows as the plot tile's ground (water plot = water tile, hills = dirt/rock, sand, grass).
+- Plot terrain shows as the plot tile's ground (water plot = part of the sea, hills = dirt/rock, sand, grass).
 - **Facing hexes:** the map hex each plot faces is drawn as a small marker on the grid edge in that direction. Faint by default, green with a dotted line when it's paying a bonus, outlined when its plot is selected.
 - Locked plots: faint outline, small lock icon and the level name.
+
+### Coast
+
+- Coastal towns: every plot that faces water on the map is open sea, and the water runs out from it to the edge of the town (`waterTiles` in `src/world/grid.ts`). Each ground tile belongs to the plot direction it's closest to (with a little wobble so the shore isn't a ruler line).
+- The Keep, the ring of tiles right around it and the land plots always stay dry. A grass shore is drawn wherever water meets land; the Harbor stands in the water.
+- No wild scenery grows on the water, and decorations and paths can't be placed, moved or painted onto it. Anything an old save already had on the water stays (erase it or drag it onto land).
 
 ## Decorations
 
@@ -68,7 +74,7 @@ The Keep is the center tile. Each building is **one tile** (one plot = one tile,
 ### Paths (painted roads)
 
 - Pick **Dirt path** or **Stone path** in the tray and **drag** across tiles to paint a line of path (a tap paints one tile). Start a drag (or tap) on the same kind of path to clear instead; the Eraser clears too.
-- Paths only go on open ground (yards included), never on the Keep, a plot or another decoration. Painting one kind over the other swaps it.
+- Paths only go on open ground (yards included), never on the Keep, a plot, the water or another decoration. Painting one kind over the other swaps it.
 - **Auto-join:** each dirt path tile connects to the path tiles next to it, and to the castle and any plot it touches, so straights, corners, T's and crossroads draw themselves. Fences join the same way (to other fences).
 - **Free on every difficulty** and **no beauty**: paths are for looks only, so a big road network never costs or earns anything.
 - In decorate mode a faint tile grid shows (stronger while a path or the Eraser is picked).
@@ -97,11 +103,12 @@ Paths are free in every mode. Tray shows the price on each item. Not enough gold
 ### Beauty (happiness)
 
 - **Normal and up only.** On Easy and Free Play decorations are just for looks: no bonus, and the beauty line is hidden.
-- `beauty = number of decorations in the city` (Statue counts 2, Fountain 3). **Paths count 0.** (Per-decoration values are `beauty` in `DECOS`.)
+- `beauty = number of decorations in the city` (Statue counts 2, Fountain 3). **Paths and grass count 0.** (Per-decoration values are `beauty` in `DECOS`.)
 - Bonus: **+1 happy per 8 beauty, max +2.** Shows in `happinessParts` as `Beautiful streets`.
+- Decorate mode shows a beauty meter (e.g. `Beauty 11/16 · +1 happy, 5 more for +2`) and each item's beauty next to its price in the tray. Hidden on Easy and Free Play.
 - Why 8, not 6 (paper check): a Temple gives +2 happy but costs 30-40g, takes turns and uses the project slot. At 1 per 6, +2 happy cost 24g on Normal, instant, no slot: too cheap next to a Temple. At 1 per 8 it's 32g on Normal / 48g on Hard (small decos), about Temple price with no slot, which feels like a fair trade for the clicking.
 - Small on purpose: nice to have, never the reason you win.
-- One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Retune after real playtests and the AI test games.
+- One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Retune after real playtests.
 
 ### Scope
 
@@ -110,14 +117,8 @@ Paths are free in every mode. Tray shows the price on each item. Not enough gold
 
 ### AI
 
-- **Easy / Normal AI:** no decorations.
-- **Hard AI decorates**, so it has a real gold sink:
-  - Only with spare gold after its normal build/train decision for the turn (never instead of troops, walls or buildings).
-  - Not while at war or with enemy troops within 2 hexes of the city.
-  - Keeps a reserve (doesn't drop below 40g) so it can still react.
-  - Stops at the cap (16 beauty, where the bonus maxes out).
-  - Places on random open tiles using `placeDeco` from `src/world/deco.ts` (same rules as people). It doesn't paint paths (they add no beauty).
-- Check in the AI test games that Hard doesn't get noticeably weaker from it.
+- **No AI decorates**, on any difficulty (cut 10/16). You never see inside AI cities, Hard AI already spends its spare gold on land (a win condition), and +2 happy max isn't worth the risk of slowing Hard down.
+- AI cities still get the beauty bonus from decorations they capture.
 
 ## Saved data
 
@@ -132,7 +133,7 @@ deco: [number, number, number][]; // [dx, dy, kind] relative to the Keep, kind =
 - Path and fence joins aren't saved: they're worked out from the neighbors when drawing.
 - Save: optional `deco` field next to `plots` in `save.ts` (city tile index -> flat `[dx, dy, kind, ...]`). Same key, `kingdom-save-v3`.
 - **Old saves:** `gridLevel = cityLevel(city)`, `deco = []`. Nothing else to migrate: plots and buildings are untouched.
-- On load, any decoration on a reserved, yard (non-path) or out-of-grid tile, with an unknown kind, or a second one on a tile, is dropped (`cleanDeco`, safety net, shouldn't happen).
+- On load, any decoration on a reserved, yard (non-path) or out-of-grid tile, with an unknown kind, or a second one on a tile, is dropped (`cleanDeco`, safety net, shouldn't happen). Decorations on the water are kept.
 
 ## Art (Kenney packs, already in `public/assets/`)
 
@@ -143,12 +144,12 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 | Open ground | Tiny Town | grass (+ 1-2 grass variants scattered by a seeded hash so it doesn't look tiled) |
 | Dirt path | Tiny Town | the dirt patch pieces (12-14, 24-26, 36-38) plus the inside corners (39-42), picked per neighbor |
 | Stone path | Tiny Town | stepping stones (43) |
-| Water plot | Tiny Town / RPG | water tile with edge pieces |
+| Water plot / sea | RPG | pond tiles as a 9-slice (2-4, 59-61, 116-118): open water with a grass shore |
 | Hills plot | RPG | dirt/rock ground |
 | Sand plot | RPG | sand ground |
 | Keep | Tiny Town | castle/stone wall pieces, wall level shown with extra wall segments |
 | Temple, Market, Granary, Mill, Barracks, Workshop | Tiny Town | house/roof pieces, each a different roof color + a sign icon |
-| Harbor | Tiny Town / RPG | dock planks on the water plot |
+| Harbor | Tiny Town / RPG | house standing in the water plot |
 | Park | Tiny Town | trees + flowers on grass |
 | Arena | RPG | fenced sand ring |
 | Trees, bushes, fences, well, cottages, props | Tiny Town | direct tiles (fence pieces 44-47, 56, 68, 70, 71, 80-82) |
@@ -156,7 +157,7 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 | Banner | drawn | pole and flag in the owner's color |
 | Construction | Tiny Town | scaffold/fence + existing pixel builders from `citySprites.ts` |
 
-- Exact tile indices live in `src/scenes/cityArt.ts` (`BUILDING_ART`, `DECOR_ART`, `PATH_DIRT`, `FENCE`). Swapping art = editing those tables.
+- Exact tile indices live in `src/scenes/cityArt.ts` (`BUILDING_ART`, `DECOR_ART`, `PATH_DIRT`, `FENCE`) and the sea 9-slice in `src/scenes/CityScene.ts` (`SEA`). Swapping art = editing those tables.
 - Pixel people from `citySprites.ts` stay (they already match the 8-bit look).
 - Licenses are CC0, nothing to credit, but keep the `License.txt` files.
 
@@ -192,7 +193,7 @@ Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from
 4. **Kenney art** (task 4): load the sheets, art tables for buildings, plot terrain and scenery, nearest-neighbor scaling, fallback if a sprite is missing, preview image.
 5. **Decorate mode** (task 5): `deco`, `DECO_ORDER`, `placeDeco` / `moveDeco` / `removeDeco` / `paintPath`, path painting by dragging with auto-join, costs by difficulty (paths free), save + old-save migration, tray UI (tap to place, drag to move, remove), undo, clear all. Cosmetic only at this point.
 6. **Zoom transition** (task 6): pinch/scroll in and out between map and city, animation, camera restore, reduced motion.
-7. **Beauty bonus + Hard AI** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths count 0), `Beautiful streets` line, Hard AI decorating, AI test games with Hard decorating on and off, help section in `Help.ts`, grid-growth toast, tune from your playtest.
+7. **Beauty bonus** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths count 0), `Beautiful streets` line, beauty meter and per-item beauty in the tray, help section in `Help.ts`, grid-growth toast, tune from your playtest. No AI decorating.
 
 Each step should pass `npx vite build` and the AI test games before moving on.
 
@@ -205,7 +206,8 @@ Each step should pass `npx vite build` and the AI test games before moving on.
 - Beauty: +1 happy per 8 beauty, max +2, on Normal+ only. Off on Easy / Free Play.
 - Cost: free on Easy / Free Play, a little gold on Normal+.
 - Decorations are per city.
-- Hard AI decorates with spare gold; Easy / Normal AI don't.
+- Coastal towns show the sea on their water side; nothing can be placed on it.
+- No AI decorates (cut 10/16).
 
 ## Still open (answer when you can see it)
 
@@ -222,3 +224,4 @@ Each step should pass `npx vite build` and the AI test games before moving on.
 - Read-only peek at other kingdoms' cities with their decorations.
 - Copy a layout from one city to another (doesn't break "per city": it's a template, not a move).
 - Paths that do something (like a road bonus), only if the game ever needs it.
+- Hard AI decorating, only if peeking at rival cities ever ships and they look bare.
