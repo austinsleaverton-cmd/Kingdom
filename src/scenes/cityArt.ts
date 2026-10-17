@@ -163,11 +163,12 @@ export const SCENERY = {
 // Each decoration in art tiles from its city tile's top-left (a city tile is 3x3 art tiles; (1, 1) is the middle).
 // Paths and fences are worked out from their neighbors (PATH_DIRT, FENCE below); the banner is drawn in the
 // owner's color. The fountain is the RPG pack's stone pool with the glass orb in the middle.
+// Tall pictures (trees, well, statue, fruit tree) are a top tile over a bottom tile.
 export const DECOR_ART: Record<DecoId, Cell[]> = {
   tree: [c('t', 4, 1, 0.1), c('t', 16, 1, 1.1)],
   autumn: [c('t', 3, 1, 0.1), c('t', 15, 1, 1.1)],
   round: [c('t', 28, 1, 1)],
-  fruit: [c('r', 650, 1, 1)],
+  fruit: [c('r', 593, 1, 0.1), c('r', 650, 1, 1.1)],
   bush: [c('t', 5, 1, 1)],
   flowers: [c('r', 542, 0.4, 0.6), c('r', 543, 1.5, 0.8), c('r', 544, 0.8, 1.5), c('r', 541, 1.7, 1.7)],
   rock: [c('r', 1251, 1, 1)],
