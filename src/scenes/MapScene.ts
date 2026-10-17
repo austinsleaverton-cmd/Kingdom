@@ -15,11 +15,19 @@ import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
 import { Menu } from './Menu';
 import { UNIT_SPRITE, WORKER_SPRITE, makeSprites } from './sprites';
+import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
 
 const SIZE = 28; // hex radius in px
 const SQRT3 = Math.sqrt(3);
 const DRAG_THRESHOLD = 6;
 const DOUBLE_TAP_MS = 320; // two taps on your own city this close together open the City View
+
+// Camera zoom range. At max zoom, keep zooming in on your own city to open it (task 6, zoomPush.ts).
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 3;
+const BACK_ZOOM = 2; // coming back out of a city eases out to your old zoom, at most this close
+const FADE: [number, number, number] = [20, 26, 38]; // same dark blue as the city screen's background
+const REDUCED = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 const HEIGHT_COLOR = [0x1f5f9e, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
 const TERRAIN_NAME: Record<Terrain, string> = {
@@ -88,6 +96,14 @@ export class MapScene extends Phaser.Scene {
   private downY = 0;
   private pinchDist = 0; // distance between two fingers last frame (0 = not pinching)
   private pinching = false; // a pinch happened during this touch: don't treat release as a click
+
+  // Zoom transition into cities (task 6)
+  private push = new ZoomPush(); // wheel past max zoom over your own city
+  private pushCity: Tile | null = null; // the city that wheel push is piling up on
+  private pinchPush = new PinchPush(); // pinch past max zoom over your own city
+  private pinchCity: Tile | null = null; // your city under the fingers while pinching past max
+  private transitioning = false; // easing onto a city: input waits
+  private zoomBack = 1.2; // zoom to ease back out to when you leave the city
 
   constructor() {
     super('map');
@@ -212,7 +228,7 @@ export class MapScene extends Phaser.Scene {
   }
 
   private get playing(): boolean {
-    return this.state !== null && !this.menu.visible && !this.hud.passVisible && !this.hud.dialogVisible && !this.cityView.visible;
+    return this.state !== null && !this.menu.visible && !this.hud.passVisible && !this.hud.dialogVisible && !this.cityView.visible && !this.transitioning;
   }
 
   // Whose turn it is: with hot-seat play this is whichever person is holding the device
@@ -665,16 +681,76 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  // The City View: the city's plots around the Keep, pick a spot and build
+  // The City View: the city's plots around the Keep, pick a spot and build.
+  // Every way in (double-tap, O, Open city, zooming in) eases the camera onto the city and fades into the city
+  // screen, so it feels like zooming from the kingdom down into the town. Reduced motion: straight in.
   private openCity(city: Tile): void {
     const state = this.state;
-    if (!state || !city.city || city.owner !== this.me || state.players[this.me].isAI) return;
+    if (!state || !city.city || city.owner !== this.me || state.players[this.me].isAI || this.transitioning) return;
     this.hud.hideTip();
     this.hud.hideIdle();
-    this.cityView.open(state, city, this.me, {
-      onChange: () => this.redraw(),
-      onClose: () => this.redraw(),
+    pushHint(null);
+    const cam = this.cameras.main;
+    this.zoomBack = Math.min(cam.zoom, BACK_ZOOM);
+    if (REDUCED || this.cityView.visible) {
+      this.showCity(state, city, false);
+      return;
+    }
+    this.transitioning = true;
+    const { x, y } = tileCenter(city);
+    cam.pan(x, y, 260, 'Sine.easeInOut', true);
+    cam.zoomTo(Math.min(Math.max(cam.zoom, MAX_ZOOM) * 1.3, 4.5), 300, 'Sine.easeIn', true);
+    this.time.delayedCall(180, () => cam.fadeOut(120, FADE[0], FADE[1], FADE[2]));
+    cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.transitioning = false;
+      if (this.state === state && city.city && city.owner === this.me) this.showCity(state, city, true);
+      cam.resetFX();
+      cam.setZoom(MAX_ZOOM);
     });
+  }
+
+  private showCity(state: GameState, city: Tile, zoomIn: boolean): void {
+    this.cityView.open(
+      state,
+      city,
+      this.me,
+      {
+        onChange: () => this.redraw(),
+        onClose: (user) => {
+          this.arrive(city, user);
+          this.redraw();
+        },
+      },
+      { zoomIn },
+    );
+  }
+
+  // Back from a city you chose to leave: fade in on that city and ease out to your old zoom.
+  // Forced closes (menu, next player's turn) leave the camera alone.
+  private arrive(city: Tile, user: boolean): void {
+    if (!user) return;
+    const cam = this.cameras.main;
+    const { x, y } = tileCenter(city);
+    this.push.cool(performance.now()); // leftover zoom from the city can't bounce you straight back in
+    this.pushCity = null;
+    if (REDUCED) {
+      cam.setZoom(this.zoomBack);
+      cam.centerOn(x, y);
+      return;
+    }
+    cam.resetFX();
+    cam.setZoom(MAX_ZOOM);
+    cam.centerOn(x, y);
+    cam.fadeIn(200, FADE[0], FADE[1], FADE[2]);
+    cam.zoomTo(this.zoomBack, 380, 'Sine.easeOut', true);
+  }
+
+  // Your own city under a screen point (only in select mode: claim, raise and lower never open a city)
+  private ownCityAt(sx: number, sy: number): Tile | null {
+    const state = this.state;
+    if (!state || this.mode !== 'select' || state.players[this.me].isAI) return null;
+    const t = this.tileAtScreen(sx, sy);
+    return t && t.city && t.owner === this.me ? t : null;
   }
 
   private pillage(): void {
@@ -699,6 +775,8 @@ export class MapScene extends Phaser.Scene {
   // ---------- input ----------
 
   // Two-finger pinch on phones/tablets: zoom around the point between the fingers.
+  // At max zoom over your own city, spreading further stretches the view a little; let go once it says
+  // "Release to enter" and the city opens. Not far enough (or fingers moved off the city): it springs back.
   private handlePinch(): boolean {
     const a = this.input.pointer1;
     const b = this.input.pointer2;
@@ -714,8 +792,18 @@ export class MapScene extends Phaser.Scene {
     const my = (a.y + b.y) / 2;
     const cam = this.cameras.main;
     if (this.pinchDist > 0 && dist > 0) {
+      const ratio = dist / this.pinchDist;
       const before = cam.getWorldPoint(mx, my);
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dist / this.pinchDist), 0.3, 3));
+      const city = this.ownCityAt(mx, my);
+      const pp = this.pinchPush;
+      if (pp.active || (city && ratio > 1 && cam.zoom >= MAX_ZOOM - 0.001 && !this.push.cooling(performance.now()))) {
+        pp.stretch(ratio);
+        this.pinchCity = city;
+        cam.setZoom(MAX_ZOOM * pp.give);
+        pushHint(pp.armed && city ? `Release to enter ${this.state?.cityName(city) ?? 'the city'}` : null);
+      } else {
+        cam.setZoom(Phaser.Math.Clamp(cam.zoom * ratio, MIN_ZOOM, MAX_ZOOM));
+      }
       cam.preRender(); // refresh the camera matrix so the next lookup uses the new zoom
       const after = cam.getWorldPoint(mx, my);
       cam.scrollX += before.x - after.x;
@@ -723,6 +811,21 @@ export class MapScene extends Phaser.Scene {
     }
     this.pinchDist = dist;
     return true;
+  }
+
+  // Both fingers are up after a pinch: open the city if the stretch was armed, otherwise spring back to max zoom
+  private endPinchPush(): void {
+    const pp = this.pinchPush;
+    if (!pp.active) return;
+    const city = pp.armed ? this.pinchCity : null;
+    pp.reset();
+    this.pinchCity = null;
+    pushHint(null);
+    if (city && this.playing) {
+      this.openCity(city);
+      return;
+    }
+    this.cameras.main.zoomTo(MAX_ZOOM, 160, 'Sine.easeOut', true);
   }
 
   private setupInput(): void {
@@ -764,6 +867,7 @@ export class MapScene extends Phaser.Scene {
           this.pinchDist = 0;
           this.pressed = false;
           this.dragging = false;
+          this.endPinchPush();
         }
         return;
       }
@@ -787,14 +891,27 @@ export class MapScene extends Phaser.Scene {
 
     // Smooth zoom: scale by how far the wheel/trackpad actually moved, so
     // trackpads (many tiny events) and mouse wheels (few big ones) feel the same.
+    // At max zoom with the pointer on your own city, zooming in keeps piling up until the city opens.
     this.input.on('wheel', (p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
       if (!this.playing) return;
       const ev = p.event as WheelEvent;
       const pinch = ev.ctrlKey; // macOS trackpad pinch arrives as ctrl+wheel
       const delta = Phaser.Math.Clamp(dy, -60, 60);
-      const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
       const cam = this.cameras.main;
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, 0.3, 3));
+      const now = performance.now();
+      const city = delta < 0 ? this.ownCityAt(p.x, p.y) : null;
+      if (city !== this.pushCity) {
+        this.push.atLimit(false, now);
+        this.pushCity = city;
+      }
+      this.push.atLimit(!!city && cam.zoom >= MAX_ZOOM - 0.001, now);
+      if (city && this.push.feed(-delta * (pinch ? TRACKPAD_PINCH : 1), now)) {
+        this.pushCity = null;
+        this.openCity(city);
+        return;
+      }
+      const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM));
     });
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
@@ -805,7 +922,7 @@ export class MapScene extends Phaser.Scene {
       }
       // Inside a city: Esc (or O again) goes back to the map, other keys wait
       if (this.cityView.visible) {
-        if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close();
+        if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close(true);
         return;
       }
       if (this.hud.passVisible && !this.menu.visible) {
@@ -1239,7 +1356,7 @@ export class MapScene extends Phaser.Scene {
       summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${plotsUsed}/${plotsOpen} plots`,
       lines: [
         built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
-        'Buttons pick the best plot for you. Open city (O or double-tap the city) to choose the spot yourself.',
+        'Buttons pick the best plot for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.',
       ],
       buttons: buildButtons,
       grid: true,
