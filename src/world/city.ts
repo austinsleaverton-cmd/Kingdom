@@ -1,6 +1,9 @@
 // City View rules: amenities stand on plots around the Keep. Plots have terrain, and neighbors give bonuses.
 // Pure functions on tiles: no Phaser, no GameState. See docs/CITY_VIEW.md.
+// Also the beauty bonus from decorations (docs/CITY_BUILDER.md, task 7).
+import type { Difficulty } from './game';
 import type { WorldMap } from './map';
+import { decoInfo, decoList } from './deco';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, MAX_LEVEL, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel } from './tile';
 import type { Building, Improvement, PlotTerrain, Tile } from './tile';
 
@@ -263,4 +266,27 @@ export function placeExisting(city: Tile): void {
     }
     if (at !== null) city.placed[at] = b;
   }
+}
+
+// ---------- beauty (City Builder task 7) ----------
+// Decorations make a city nicer to live in: every BEAUTY_STEP beauty is +1 happy, up to BEAUTY_MAX.
+// Normal and Hard only: on Easy and Free Play decorations are just for looks. Most decorations are 1 beauty,
+// a Statue 2, a Fountain 3; paths and grass count 0 (beauty in DECOS, world/deco.ts). No AI decorates, but a
+// captured city keeps its decorations and their beauty.
+export const BEAUTY_STEP = 8;
+export const BEAUTY_MAX = 2;
+
+export function cityBeauty(city: Tile): number {
+  if (!city.city) return 0;
+  return decoList(city).reduce((s, [, , k]) => s + (decoInfo(k)?.beauty ?? 0), 0);
+}
+
+// Does beauty count in this game for this player? (free = Free Play for that player)
+export function beautyOn(difficulty: Difficulty, free: boolean): boolean {
+  return difficulty !== 'easy' && !free;
+}
+
+export function beautyBonus(city: Tile, difficulty: Difficulty, free: boolean): number {
+  if (!beautyOn(difficulty, free)) return 0;
+  return Math.min(BEAUTY_MAX, Math.floor(cityBeauty(city) / BEAUTY_STEP));
 }
