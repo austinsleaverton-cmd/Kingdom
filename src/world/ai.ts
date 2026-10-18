@@ -1,12 +1,23 @@
 // Rival AI. Plays only through public GameState methods, same rules as the human.
 // No Phaser imports in src/world.
-import { CITY_SPACING, DIFFICULTY, MIN_WAR_TURNS } from './game';
-import type { GameState } from './game';
+import { CITY_SPACING, DIFFICULTY, MIN_WAR_TURNS, pairKey } from './game';
+import type { Difficulty, GameState } from './game';
 import { hexDistance } from './map';
 import { BUILDINGS, MAX_WALLS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand } from './tile';
 import type { Building, PlayerId, Tile } from './tile';
 import { PALISADE_STONE, TROOPS, UNIT_STATS } from './units';
 import type { Job, Unit, UnitType } from './units';
+
+// How eager each difficulty is to start a war, once attackTurn and attackArmy allow it.
+// chance: roll each turn (smart AIs skip the roll and always go). edge: its army must be this many times
+// stronger than the target's (0 = any). peace: turns it keeps the peace after a treaty with that kingdom
+// (the treaty itself is 10). rest: turns after ending any war before it starts another.
+// Plain numbers on purpose: game.ts and this file import each other, so nothing here can read game.ts at load.
+export const WAR_RULES: Record<Difficulty, { chance: number; edge: number; peace: number; rest: number }> = {
+  easy: { chance: 0.5, edge: 0, peace: 10, rest: 0 },
+  normal: { chance: 0.2, edge: 1.25, peace: 15, rest: 8 },
+  hard: { chance: 1, edge: 0, peace: 10, rest: 0 },
+};
 
 export function runAI(g: GameState, p: PlayerId): void {
   const cfg = DIFFICULTY[g.options.difficulty];
@@ -94,10 +105,21 @@ export function aiPeaceVerdict(g: GameState, ai: PlayerId, other: PlayerId): { a
   return { accept: false, reason };
 }
 
+// The last turn p made peace with anyone (-Infinity if never). Treaties stay on record after they run out.
+function lastPeace(g: GameState, p: PlayerId): number {
+  let last = -Infinity;
+  for (const [key, turn] of Object.entries(g.truces)) {
+    const [a, b] = key.split('-').map(Number);
+    if (a === p || b === p) last = Math.max(last, turn);
+  }
+  return last;
+}
+
 // Start wars when the army is ready, and make peace with other AI kingdoms when it suits both
 function aiDiplomacy(g: GameState, p: PlayerId): void {
   if (g.sandbox) return;
   const cfg = DIFFICULTY[g.options.difficulty];
+  const rules = WAR_RULES[g.options.difficulty];
   for (const q of g.players) {
     if (q.id === p || !q.alive || !q.isAI || !g.atWar(p, q.id)) continue;
     if (g.peaceCheck(p, q.id).ok && aiPeaceVerdict(g, p, q.id).accept) g.offerPeace(p, q.id);
@@ -105,17 +127,21 @@ function aiDiplomacy(g: GameState, p: PlayerId): void {
   // One war at a time, and not before the difficulty allows it
   if (g.turn < cfg.attackTurn || troops(g, p).length < cfg.attackArmy) return;
   if (g.players.some((q) => q.alive && g.atWar(p, q.id))) return;
-  if (!cfg.smart && Math.random() > cfg.aggression) return; // doesn't always pounce the moment it can
+  if (g.turn - lastPeace(g, p) < rules.rest) return; // just finished a war: rest up first
+  if (!cfg.smart && Math.random() > rules.chance) return; // doesn't always pounce the moment it can
   const target = pickWarTarget(g, p);
   if (target !== null) g.declareWar(p, target);
 }
 
-// Nearest kingdom we're allowed to declare war on (Hard only goes after people)
+// Nearest kingdom we're allowed to declare war on (Hard only goes after people). Normal also needs a
+// clearly bigger army than the target's and keeps the peace a while longer after a treaty.
 function pickWarTarget(g: GameState, p: PlayerId): PlayerId | null {
   const cfg = DIFFICULTY[g.options.difficulty];
+  const rules = WAR_RULES[g.options.difficulty];
   const cities = myCities(g, p);
   const home = cities.find((c) => c.capital) ?? cities[0];
   if (!home) return null;
+  const mine = power(g, p);
   let best: PlayerId | null = null;
   let bestD = Infinity;
   for (const c of g.cities()) {
@@ -123,6 +149,9 @@ function pickWarTarget(g: GameState, p: PlayerId): PlayerId | null {
     if (q === null || q === p || !g.players[q].alive) continue;
     if (cfg.focusHuman && g.players[q].isAI) continue;
     if (!g.warCheck(p, q).ok) continue;
+    const since = g.truces[pairKey(p, q)];
+    if (since !== undefined && g.turn - since < rules.peace) continue;
+    if (rules.edge > 0 && mine < rules.edge * power(g, q)) continue;
     const d = hexDistance(home, c);
     if (d < bestD) {
       bestD = d;
