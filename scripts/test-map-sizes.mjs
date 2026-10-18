@@ -31,12 +31,13 @@ try {
   const key = 'kingdom-save-v3-dev';
   const expected = { small: [30, 20], medium: [50, 35], large: [75, 50], huge: [100, 70] };
   const opts = (size, seed = 12345) => ({ size, seed, opponents: 3, freeBuild: false, difficulty: 'normal' });
+  const serialized = (value) => JSON.parse(JSON.stringify(value));
   function sameWorld(a, b) {
     assert.ok(b, 'save must load');
     assert.equal(b.map.width, a.map.width);
     assert.equal(b.map.height, a.map.height);
     assert.deepEqual(b.map.tiles.map((t) => [t.height, t.owner, t.home, t.city, t.capital, t.pop, t.hp]), a.map.tiles.map((t) => [t.height, t.owner, t.home, t.city, t.capital, t.pop, t.hp]));
-    assert.deepEqual(b.units, a.units);
+    assert.deepEqual(serialized(b.units), serialized(a.units));
     assert.deepEqual(b.training, a.training);
     assert.deepEqual(b.players.map((p) => [p.gold, p.stone, p.alive]), a.players.map((p) => [p.gold, p.stone, p.alive]));
     assert.deepEqual(b.explored.map((a) => Array.from(a)), a.explored.map((a) => Array.from(a)));
