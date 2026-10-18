@@ -8,8 +8,9 @@ export type { MapSize } from './mapSizes';
 import { BARRACKS_SPEED, BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, MILL_FARMS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
-import { beautyBonus, bestPlot, cityBonus, describePlacement, noPlotReason, plotFits, plotReason, setupPlots } from './city';
-import { gridSize } from './grid';
+import { amenityAt, amenitySlots, beautyBonus, bestSite, cityBonus, describePlacement, noSiteReason, settleSites, siteFits, siteReason, siteUsed } from './city';
+import { settleDeco } from './deco';
+import { cityLayout, clearLayouts } from './grid';
 import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS, canEnter, findPath, moveMode, reachable, routeTurns } from './units';
 import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
@@ -329,7 +330,7 @@ export class GameState {
       if (t.city) {
         gold += cityLevel(t) - 1; // bigger cities pay more
         for (const b of t.buildings) gold += BUILDINGS[b].gold;
-        gold += cityBonus(t).gold; // City View placement bonuses
+        gold += cityBonus(this, t).gold; // City View placement bonuses
         if (this.mood(t) === 'happy') gold += 1;
       }
     }
@@ -405,7 +406,7 @@ export class GameState {
       else if (t.city) food += CITY_FOOD;
       if (t.city) food += cityLevel(t) - 1;
       if (t.city) for (const b of t.buildings) food += BUILDINGS[b].food;
-      if (t.city) food += cityBonus(t).food + this.millFood(t, worked);
+      if (t.city) food += cityBonus(this, t).food + this.millFood(t, worked);
       if (t.improvement === 'farm' && worked.has(t)) food += FARM_FOOD;
       if (t.improvement === 'fishery' && worked.has(t)) food += this.fisheryFood(t);
     }
@@ -427,9 +428,10 @@ export class GameState {
     return FISHERY_FOOD + (home && home.buildings.includes('harbor') ? HARBOR_FISH : 0);
   }
 
-  // Next to water: can build a Harbor and boats
+  // Next to water, or owning some: can build a Harbor (on one of its water hexes) and boats
   isCoastal(city: Tile): boolean {
-    return this.map.neighbors(city).some((n) => n.terrain === 'water');
+    if (this.map.neighbors(city).some((n) => n.terrain === 'water')) return true;
+    return city.city && city.owner !== null && cityLayout(this, city).hexes.some((h) => h.terrain === 'water');
   }
 
   // Enemy warships right next to a city shut down its fisheries
@@ -476,7 +478,7 @@ export class GameState {
     if (city.capital) parts.push(['Capital', 1]);
     if (!this.players[p].isAI && this.options.difficulty === 'easy') parts.push(['Easy mode', EASY_HAPPY]);
     for (const b of city.buildings) if (BUILDINGS[b].happy) parts.push([BUILDINGS[b].name, BUILDINGS[b].happy]);
-    parts.push(...cityBonus(city).happyParts); // City View placement bonuses (Park next to the Temple)
+    parts.push(...cityBonus(this, city).happyParts); // City View placement bonuses
     const beauty = beautyBonus(city, this.options.difficulty, this.isFree(p)); // decorations, Normal and Hard only
     if (beauty) parts.push(['Beautiful streets', beauty]);
     const crowd = Math.floor(city.pop / 2);
@@ -528,8 +530,8 @@ export class GameState {
   }
 
   horsesMade(p: PlayerId): number {
-    let extra = 0; // Barracks facing a pasture
-    for (const c of this.cities()) if (c.owner === p) extra += cityBonus(c).horses;
+    let extra = 0; // Barracks next to a pasture
+    for (const c of this.cities()) if (c.owner === p) extra += cityBonus(this, c).horses;
     return this.countImp(p, 'pasture') * KNIGHTS_PER_PASTURE + extra;
   }
 
@@ -545,14 +547,14 @@ export class GameState {
     return this.countTroop(p, 'archer');
   }
 
-  // Worked mines, plus Workshops (and their facing bonus)
+  // Worked mines, plus Workshops (and their bonus for a mine next to them)
   stoneIncome(p: PlayerId): number {
     const worked = this.workedTiles(p);
     let stone = this.ownedTiles(p).filter((t) => t.improvement === 'mine' && worked.has(t)).length * MINE_STONE;
     for (const c of this.cities()) {
       if (c.owner !== p) continue;
       for (const b of c.buildings) stone += BUILDINGS[b].stone ?? 0;
-      stone += cityBonus(c).stone; // Workshop facing a mine
+      stone += cityBonus(this, c).stone; // Workshop next to a mine
     }
     return stone;
   }
@@ -930,6 +932,30 @@ export class GameState {
     return hexDistance(tile, city) <= this.claimRadius(city);
   }
 
+  // Keep a city's amenities and decorations on its own land. The land can change under them: a new city founded on
+  // one of its hexes, land flooded by a builder, an old save from before the territory layout. Nothing is thrown
+  // away: amenities move to the best free hex (or wait for one and keep working), decorations move to the nearest
+  // open ground (or are stored until there's room). quiet: no log lines (loading a save).
+  settleCity(city: Tile, quiet = false): void {
+    if (!city.city || city.owner === null) return;
+    const p = city.owner;
+    const moved = settleSites(this, city);
+    const d = settleDeco(this, city);
+    if (quiet) return;
+    const name = this.cityName(city);
+    for (const b of moved) {
+      const at = city.sites[b];
+      this.tell(p, at !== undefined && at >= 0
+        ? `${name}'s ${BUILDINGS[b].name} moved to ${describePlacement(this, city, at, b)}`
+        : `${name}'s ${BUILDINGS[b].name} is waiting for a free hex (it still works)`);
+    }
+    if (d.moved || d.stored) {
+      const parts = [d.moved ? `${d.moved} moved` : '', d.stored ? `${d.stored} stored until there's room` : ''].filter(Boolean).join(', ');
+      this.tell(p, `${name}'s decorations: ${parts}`);
+    }
+    if (d.restored) this.tell(p, `${name}: ${d.restored} stored decoration${d.restored === 1 ? '' : 's'} back in town`);
+  }
+
   // ---------- city growth ----------
 
   // Growth a city gains next turn: 1 plus its share of your spare food (capped).
@@ -981,12 +1007,11 @@ export class GameState {
       c.growth = Math.round((c.growth - need) * 10) / 10;
       c.pop += 1;
       const before = cityLevel(c);
-      const roomBefore = gridSize(c); // City Builder ground grid (grows with the highest level ever reached)
+      const slots = amenitySlots(c, this.isSimple(p));
       this.setPopLevel(c);
       if (cityLevel(c) > before) {
         c.hp = Math.min(cityMaxHp(c), c.hp + LEVEL_HP);
-        const room = gridSize(c);
-        const more = room > roomBefore ? `: more room to build (${room}x${room})` : '';
+        const more = amenitySlots(c, this.isSimple(p)) > slots ? ': room for another amenity' : '';
         this.tell(p, `${this.cityName(c)} grew into a ${LEVEL_NAMES[c.level - 1]}${more}`);
       }
     }
@@ -1002,7 +1027,7 @@ export class GameState {
   cultureRate(city: Tile): number {
     let n = 1 + Math.floor(city.pop / 3);
     for (const b of city.buildings) n += BUILDINGS[b].culture;
-    n += cityBonus(city).culture; // City View placement bonuses (Park next to the Temple)
+    n += cityBonus(this, city).culture; // City View placement bonuses (Park next to the Temple)
     return n;
   }
 
@@ -1040,15 +1065,16 @@ export class GameState {
       c.culture = 0;
       c.borders += 1;
       this.invalidate();
-      this.tell(p, `${this.cityName(c)} grew its borders`);
+      this.tell(p, `${this.cityName(c)} grew its borders: more room to build and decorate`);
     }
     this.checkWin();
   }
 
   // ---------- amenities ----------
 
-  // plot: a spot picked in the City View. Without one the amenity goes to the best open plot (auto-place).
-  buildCheck(city: Tile, b: Building, p: PlayerId = this.current, plot?: number | null): Check {
+  // site: a hex (map tile index) picked in the City View. Without one the amenity goes to the best open hex
+  // of the city's land (auto-place).
+  buildCheck(city: Tile, b: Building, p: PlayerId = this.current, site?: number | null): Check {
     if (this.winner !== null) return fail('Game over');
     if (p !== this.current) return fail('Not your turn');
     if (!city.city || city.owner !== p) return fail('Build in your own city');
@@ -1058,28 +1084,30 @@ export class GameState {
     if (busy) return fail(`Busy ${busy}`);
     const simple = this.isSimple(p);
     if (city.pop < info.minPop && !simple) return fail(`Needs ${info.minPop} people`);
-    if (info.coastal && !this.isCoastal(city)) return fail('Needs to be next to water');
-    if (plot !== undefined && plot !== null) {
-      if (!plotFits(city, plot, b, simple)) return fail(plotReason(city, plot, b, simple));
-    } else if (bestPlot(city, b, simple) === null) {
-      return fail(noPlotReason(city, b, simple));
+    if (info.coastal && !this.isCoastal(city)) return fail('Needs water next to the city or in its land');
+    if (site !== undefined && site !== null) {
+      if (!siteFits(this, city, site, b, simple)) return fail(siteReason(this, city, site, b, simple));
+    } else if (bestSite(this, city, b, simple) === null) {
+      return fail(noSiteReason(this, city, b, simple));
     }
     if (this.isFree(p)) return { ok: true, cost: 0, reason: '' };
     return this.players[p].gold >= info.cost ? { ok: true, cost: info.cost, reason: '' } : fail(`Need ${info.cost} gold`, info.cost);
   }
 
-  // Where an amenity would go if built now (auto-place), or null when there's no room
-  autoPlot(city: Tile, b: Building, p: PlayerId = this.current): number | null {
-    return bestPlot(city, b, this.isSimple(p));
+  // Where an amenity would go if built now (auto-place: a map tile index), or null when there's no room
+  autoSite(city: Tile, b: Building, p: PlayerId = this.current): number | null {
+    return bestSite(this, city, b, this.isSimple(p));
   }
 
-  startBuilding(city: Tile, b: Building, p: PlayerId = this.current, plot?: number | null): Check {
-    const c = this.buildCheck(city, b, p, plot);
+  startBuilding(city: Tile, b: Building, p: PlayerId = this.current, site?: number | null): Check {
+    const c = this.buildCheck(city, b, p, site);
     if (!c.ok) return c;
+    // Pick the hex before marking the project: once it's started it counts toward the city's amenity limit
+    const at = site ?? this.autoSite(city, b, p);
     this.players[p].gold -= c.cost;
     city.project = b;
     city.projectTurns = BUILDINGS[b].turns;
-    city.projectPlot = plot ?? this.autoPlot(city, b, p); // reserved, so nothing else can take it
+    city.projectSite = at; // reserved, so nothing else can take it
     return c;
   }
 
@@ -1089,19 +1117,17 @@ export class GameState {
       c.projectTurns -= 1;
       if (c.projectTurns > 0) continue;
       const b = c.project;
-      let at = c.projectPlot;
+      let at = c.projectSite;
       c.project = null;
       c.projectTurns = 0;
-      c.projectPlot = null;
-      // Reserved plot gone (old save, or something odd): take the best free one, ignoring size locks
-      if (at === null || c.placed[at]) at = bestPlot(c, b, true);
-      if (at === null) {
-        const free = c.placed.findIndex((x) => !x);
-        at = free >= 0 ? free : null;
-      }
-      if (at !== null) c.placed[at] = b;
+      c.projectSite = null;
       if (!c.buildings.includes(b)) c.buildings.push(b);
-      const where = at !== null ? ` on ${describePlacement(c, at, b)}` : '';
+      // Reserved hex gone (left the city, or taken): settleSites finds the best free one, ignoring the size limit
+      if (at !== null && (siteUsed(c, at) || !cityLayout(this, c).byIndex.has(at))) at = null;
+      c.sites[b] = at ?? -1;
+      settleSites(this, c);
+      const placed = c.sites[b];
+      const where = placed !== undefined && placed >= 0 ? ` on ${describePlacement(this, c, placed, b)}` : ' (waiting for a free hex)';
       this.tell(p, `${this.cityName(c)} finished its ${BUILDINGS[b].name}${where}`);
     }
   }
@@ -1135,6 +1161,7 @@ export class GameState {
       }
       t.home = best ? this.tileIndex(best) : null;
     }
+    this.invalidate();
   }
 
   // Unowned land a city could still buy (ignores gold).
@@ -1167,8 +1194,10 @@ export class GameState {
     return this.cityList;
   }
 
+  // Something about cities, land or terrain changed: drop the cached city list and City View layouts
   invalidate(): void {
     this.cityList = null;
+    clearLayouts(this);
   }
 
   cityCost(p: PlayerId): number {
@@ -1219,7 +1248,6 @@ export class GameState {
     if (!result.ok) return result;
     const player = this.players[p];
     player.gold -= result.cost;
-    this.invalidate();
 
     switch (action) {
       case 'claim':
@@ -1228,11 +1256,22 @@ export class GameState {
         player.claims += 1;
         break;
     }
+    this.invalidate();
     this.checkWin();
     return result;
   }
 
   // ---------- settlers ----------
+
+  // A finished or half-built amenity of any city on this hex (cities can't be founded on top of one)
+  private amenityOn(tile: Tile): { city: Tile; b: Building } | null {
+    const i = this.tileIndex(tile);
+    for (const c of this.cities()) {
+      const b = amenityAt(c, i) ?? (c.projectSite === i ? c.project : null);
+      if (b) return { city: c, b };
+    }
+    return null;
+  }
 
   foundCheck(unit: Unit): Check {
     if (this.winner !== null) return fail('Game over');
@@ -1245,6 +1284,8 @@ export class GameState {
     if (this.cities().some((c) => hexDistance(c, tile) < CITY_SPACING)) {
       return fail(`Too close to a city (need ${CITY_SPACING}+ hexes)`);
     }
+    const on = this.amenityOn(tile);
+    if (on) return fail(`${this.cityName(on.city)}'s ${BUILDINGS[on.b].name} stands here`);
     return { ok: true, cost: 0, reason: '' };
   }
 
@@ -1253,6 +1294,7 @@ export class GameState {
     if (!c.ok) return c;
     const tile = this.tileOf(unit);
     const p = unit.owner;
+    const oldHome = tile.owner === p ? this.homeCity(tile) : null; // founding on your own land takes the hex from that city
     this.units = this.units.filter((u) => u !== unit);
     tile.owner = p;
     tile.home = this.tileIndex(tile);
@@ -1269,7 +1311,11 @@ export class GameState {
     tile.hp = cityMaxHp(tile);
     tile.walls = 0;
     tile.shield = 0;
-    setupPlots(this.map, tile); // City View: plots take the terrain around the city
+    // City View: amenities and decorations go on the city's own land, which starts as the hexes around it
+    tile.sites = {};
+    tile.projectSite = null;
+    tile.deco = [];
+    tile.decoStash = [];
     for (const n of this.map.neighbors(tile)) {
       if (n.owner === null && isLand(n)) {
         n.owner = p;
@@ -1277,6 +1323,7 @@ export class GameState {
       }
     }
     this.invalidate();
+    if (oldHome && oldHome !== tile) this.settleCity(oldHome);
     this.nameNewCity(tile);
     this.addLog(`${this.players[p].name} founded ${this.cityName(tile)}`);
     this.checkWin();
@@ -1293,7 +1340,7 @@ export class GameState {
     const busy = stats.train > 0 ? this.busyWith(city) : '';
     if (busy) return fail(`Busy ${busy}`);
     if (stats.needs && !city.buildings.includes(stats.needs)) {
-      return fail(stats.needs === 'harbor' && !this.isCoastal(city) ? 'Only coastal cities build boats' : `Needs a ${BUILDINGS[stats.needs].name}`);
+      return fail(stats.needs === 'harbor' && !this.isCoastal(city) ? 'Only cities with water build boats' : `Needs a ${BUILDINGS[stats.needs].name}`);
     }
     const simple = this.isSimple(p);
     if (stats.minLevel && cityLevel(city) < stats.minLevel && !simple) {
@@ -1362,8 +1409,16 @@ export class GameState {
     this.training = keep;
   }
 
-  // Boats launch into the water next to the city, everyone else onto the city's land
+  // Boats launch into the water next to the city, everyone else onto the city's land.
+  // A city whose only water is out in its land launches boats at its Harbor instead.
   private spawnTile(city: Tile, type: UnitType): Tile | null {
+    if (UNIT_STATS[type].naval && !this.map.neighbors(city).some((n) => n.terrain === 'water')) {
+      const at = city.sites.harbor;
+      const harbor = at !== undefined && at >= 0 ? this.map.tiles[at] : null;
+      if (!harbor || harbor.terrain !== 'water') return null;
+      if (!this.unitAt(harbor)) return harbor;
+      return this.map.neighbors(harbor).find((n) => n.terrain === 'water' && !this.unitAt(n)) ?? null;
+    }
     if (!this.unitAt(city)) return city;
     if (UNIT_STATS[type].naval) return this.map.neighbors(city).find((n) => n.terrain === 'water' && !this.unitAt(n)) ?? null;
     return this.map.neighbors(city).find((n) => isLand(n) && n.owner === city.owner && !this.unitAt(n)) ?? null;
@@ -1718,7 +1773,7 @@ export class GameState {
     return pv;
   }
 
-  // The captor gets the city plus all the land that belongs to it.
+  // The captor gets the city plus all the land that belongs to it, with its amenities and decorations where they stand.
   // Taking a capital knocks the owner out entirely.
   private captureCity(city: Tile, captor: PlayerId): void {
     const prev = city.owner;
@@ -1731,15 +1786,16 @@ export class GameState {
     city.level = levelFromPop(city.pop);
     city.growth = 0;
     city.culture = 0;
-    city.project = null; // half-built amenities are lost (finished ones keep their plots)
+    city.project = null; // half-built amenities are lost (finished ones keep their hexes)
     city.projectTurns = 0;
-    city.projectPlot = null;
+    city.projectSite = null;
     city.hp = Math.round(cityMaxHp(city) * CAPTURE_HP);
     city.shield = 0;
     city.wallTurns = 0; // half-built walls are lost
     this.invalidate();
     if (wasCapital) this.eliminate(prev, captor);
     else this.addLog(`${this.players[captor].name} captured ${this.cityName(city)} from ${this.you(prev)}`);
+    this.settleCity(city, true);
     this.checkWin();
   }
 
@@ -1902,7 +1958,6 @@ export class GameState {
     const c = this.jobCheck(unit, job, target);
     if (!c.ok) return c;
     this.players[unit.owner].gold -= c.cost;
-    this.invalidate();
     unit.hold = false;
     this.clearRoute(unit);
     switch (job) {
@@ -1927,6 +1982,7 @@ export class GameState {
         this.map.lowerHeight(target);
         break;
     }
+    this.invalidate(); // terrain may have changed: City View layouts are rebuilt
     unit.acted = true;
     unit.moves = 0;
     if (unit.uses !== undefined) {
@@ -1971,6 +2027,8 @@ export class GameState {
     this.growBorders(p);
     this.advanceWalls(p);
     this.advanceProjects(p);
+    // City View: amenities waiting for a hex and stored decorations move in once there's room (new land)
+    for (const c of this.cities()) if (c.owner === p) this.settleCity(c);
     // Cities heal and walls rebuild a little every turn, unless enemy troops are close (siege).
     for (const t of this.cities()) {
       if (t.owner !== p || this.besieged(t)) continue;
@@ -2042,6 +2100,7 @@ export class GameState {
     for (const t of this.map.tiles) {
       if (t.owner === loser) t.owner = captor;
     }
+    this.invalidate();
     // Their wars and treaties end with them
     for (const pl of this.players) {
       const key = pairKey(loser, pl.id);
@@ -2116,7 +2175,8 @@ export class GameState {
       best.level = 1;
       best.pop = 1;
       best.hp = cityMaxHp(best);
-      setupPlots(this.map, best); // City View: plots take the terrain around the capital
+      best.sites = {}; // City View: amenities go on the capital's own land
+      best.projectSite = null;
       // Water next to the capital stays water, so a capital can be coastal (Harbor, boats, fisheries)
       for (const n of this.map.neighbors(best)) {
         if (n.owner === null) {
@@ -2127,6 +2187,7 @@ export class GameState {
       this.nameNewCity(best);
       capitals.push(best);
     }
+    this.invalidate();
   }
 
   private runAI(p: PlayerId): void {
