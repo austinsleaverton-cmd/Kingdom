@@ -84,6 +84,7 @@ export interface Unit {
   uses?: number; // builders on Normal/Hard: jobs left before they retire (undefined = unlimited)
   goal?: { col: number; row: number }; // multi-turn route target: moves itself at the start of each turn
   waited?: number; // turns in a row it was stuck behind one of your units
+  explore?: boolean; // scouts on auto-explore: walk toward the fog by themselves at the start of each turn
   cargo?: Unit[]; // transports: land units on board (they're off the map until unloaded)
 }
 
