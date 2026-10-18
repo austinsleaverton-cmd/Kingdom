@@ -1,6 +1,10 @@
 // Game rules and turn flow. No Phaser imports in src/world.
 import { generateMap, hexDistance } from './map';
 import type { WorldMap } from './map';
+import { MAP_SIZES, validMapDimensions } from './mapSizes';
+import type { MapDimensions, MapSize } from './mapSizes';
+export { MAP_SIZES } from './mapSizes';
+export type { MapSize } from './mapSizes';
 import { BARRACKS_SPEED, BUILDINGS, CITY_REGEN, CLAIM_COST, LEVEL_HP, LEVEL_NAMES, LEVEL_POP, MAX_HEIGHT, MAX_LEVEL, MAX_WALLS, MILL_FARMS, WALL_STONE, WALL_TURNS, YIELD, cityLevel, cityMaxHp, improvementFits, isLand, shieldMax } from './tile';
 import { IMPROVEMENT_NAME, levelFromPop, popNeed } from './tile';
 import type { Building, Improvement, PlayerId, Tile } from './tile';
@@ -11,15 +15,6 @@ import type { Job, Training, Unit, UnitType } from './units';
 import { aiPeaceVerdict, runAI } from './ai';
 
 export type Action = 'claim';
-
-export type MapSize = 'small' | 'medium' | 'large' | 'huge';
-
-export const MAP_SIZES: Record<MapSize, { label: string; width: number; height: number }> = {
-  small: { label: 'Small', width: 20, height: 14 },
-  medium: { label: 'Medium', width: 30, height: 20 },
-  large: { label: 'Large', width: 44, height: 30 },
-  huge: { label: 'Huge', width: 60, height: 40 },
-};
 
 export const MAX_OPPONENTS = 3;
 
@@ -235,7 +230,8 @@ export class GameState {
   explored: Uint8Array[] = []; // fog of war, per player: 1 = that tile has been seen
   alerts: { p: PlayerId; msg: string }[] = []; // big news for a person (war declared on them), shown as a popup
 
-  constructor(options: GameOptions) {
+  // Explicit dimensions are for restoring saves, never inherited by a new game's menu options.
+  constructor(options: GameOptions, dimensions?: MapDimensions) {
     const seats = seatsFor(options);
     this.options = {
       ...options,
@@ -243,7 +239,9 @@ export class GameState {
       opponents: seats.length - 1,
       difficulty: DIFFICULTY[options.difficulty] ? options.difficulty : 'normal',
     };
-    const { width, height } = MAP_SIZES[this.options.size];
+    const dims = dimensions ?? MAP_SIZES[this.options.size];
+    if (!validMapDimensions(dims)) throw new RangeError('Invalid map dimensions');
+    const { width, height } = dims;
     this.map = generateMap(this.options.seed, width, height);
     this.players = [];
     for (let i = 0; i < seats.length; i++) {
@@ -1413,8 +1411,11 @@ export class GameState {
   // (they usually move on) unless ownBlock is set, which is used after waiting too long.
   private routeBlocker(unit: Unit, ownBlock: boolean): (t: Tile) => boolean {
     const canCapture = UNIT_STATS[unit.type].canCapture === true;
+    // A planning pass is synchronous: snapshot occupancy once instead of scanning the army at every edge.
+    // Rebuilt for every plan, so moves, boarding and casualties cannot leave stale entries behind.
+    const occupied = new Map(this.units.map((u) => [u.row * this.map.width + u.col, u] as const));
     return (t) => {
-      const u = this.unitAt(t);
+      const u = occupied.get(this.tileIndex(t));
       if (u && u !== unit && (ownBlock || u.owner !== unit.owner)) return true;
       if (this.isClosed(t, unit.owner, unit.type)) return true;
       if (this.walledOff(t, unit.owner)) return true;
@@ -1573,10 +1574,11 @@ export class GameState {
     const mode = moveMode(unit.type);
     const from = this.tileOf(unit);
     const blocked = this.routeBlocker(unit, false);
+    const occupied = new Set(this.units.map((u) => u.row * this.map.width + u.col));
     const foes = this.units.filter((e) => UNIT_STATS[e.type].military && this.isEnemy(e.owner, p)).map((e) => this.tileOf(e));
     const goals = new Set<Tile>();
     for (const t of this.map.tiles) {
-      if (t === from || !this.isExplored(p, t) || this.unitAt(t) || !canEnter(t, p, mode) || blocked(t)) continue;
+      if (t === from || !this.isExplored(p, t) || occupied.has(this.tileIndex(t)) || !canEnter(t, p, mode) || blocked(t)) continue;
       if (!this.map.neighbors(t).some((n) => !this.isExplored(p, n))) continue;
       if (foes.some((f) => hexDistance(f, t) <= 2)) continue;
       goals.add(t);
@@ -1812,7 +1814,7 @@ export class GameState {
   wallCheck(city: Tile, p: PlayerId = this.current): Check {
     if (this.winner !== null) return fail('Game over');
     if (p !== this.current) return fail('Not your turn');
-    if (!city.city || city.owner !== p) return fail('Build walls in your own city');
+    if (!city.city || city.owner !== p) return fail('Build in your own city');
     if (city.walls >= MAX_WALLS) return fail('Walls are maxed');
     if (city.wallTurns > 0) return fail(`Walls going up: ${city.wallTurns} turn${city.wallTurns === 1 ? '' : 's'} left`);
     const busy = this.busyWith(city);

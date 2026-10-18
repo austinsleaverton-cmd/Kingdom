@@ -3,6 +3,8 @@ import { linkPlots, placeExisting, setupPlots } from './city';
 import { cleanDeco, decodeDeco, encodeDeco } from './deco';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
+import { savedMapDimensions } from './mapSizes';
+import type { MapDimensions } from './mapSizes';
 import { gridLevel, syncGrid } from './grid';
 import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityLevel, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
 import type { Building, PlayerId, PlotTerrain } from './tile';
@@ -27,6 +29,7 @@ const PLOT_FROM: Record<string, PlotTerrain> = { w: 'water', s: 'sand', g: 'gras
 interface SaveData {
   version: 3;
   options: GameOptions;
+  mapDimensions?: MapDimensions; // absent in legacy saves: restore their original preset, never today's size
   turn: number;
   current: PlayerId;
   winner: PlayerId | null;
@@ -70,6 +73,7 @@ export function saveGame(state: GameState): void {
   const data: SaveData = {
     version: 3,
     options: state.options,
+    mapDimensions: { width: state.map.width, height: state.map.height },
     turn: state.turn,
     current: state.current,
     winner: state.winner,
@@ -123,7 +127,8 @@ function readSave(): SaveData | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as SaveData;
-    if (data.version !== 3 || !MAP_SIZES[data.options.size]) return null;
+    if (data.version !== 3 || !Object.prototype.hasOwnProperty.call(MAP_SIZES, data.options.size)) return null;
+    if (!Array.isArray(data.tiles) || !savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions)) return null;
     return data;
   } catch {
     return null;
@@ -133,9 +138,10 @@ function readSave(): SaveData | null {
 export function saveSummary(): SaveSummary | null {
   const data = readSave();
   if (!data) return null;
+  const dims = savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions)!;
   return {
     turn: data.turn,
-    sizeLabel: MAP_SIZES[data.options.size].label,
+    sizeLabel: `${MAP_SIZES[data.options.size].label} (${dims.width}x${dims.height})`,
     opponents: data.options.opponents,
     difficulty: DIFFICULTY[data.options.difficulty] ? data.options.difficulty : 'normal',
     finished: data.winner !== null,
@@ -147,7 +153,9 @@ export function loadGame(): GameState | null {
   const data = readSave();
   if (!data) return null;
   try {
-    const state = new GameState(data.options);
+    const dims = savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions);
+    if (!dims) return null;
+    const state = new GameState(data.options, dims);
     if (data.tiles.length !== state.map.tiles.length) return null;
     state.map.tiles.forEach((t, i) => {
       const [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, bits, project, projectTurns] = data.tiles[i];
