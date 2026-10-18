@@ -1,5 +1,6 @@
 // The "?" button (top-right, always visible: start screen and in game) and the rules guide it opens.
 // Numbers come straight from src/world so the guide stays right when the rules change.
+import { WAR_RULES } from '../world/ai';
 import { ADJACENCY, BEAUTY_MAX, BEAUTY_STEP, FACING_BONUS, TERRAIN_BONUS, bonusAmount } from '../world/city';
 import { DECOS, DECO_PRICE } from '../world/deco';
 import {
@@ -39,6 +40,17 @@ const CSS = `
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const DIFFS = Object.keys(DIFFICULTY) as Difficulty[];
 
+// "20% chance a turn, only with an army 25% stronger than its target, keeps the peace 15 turns after a treaty"
+function warHabit(d: Difficulty): string {
+  if (DIFFICULTY[d].smart) return 'as soon as it can';
+  const w = WAR_RULES[d];
+  const parts = [`${pct(w.chance)} chance a turn`];
+  if (w.edge > 0) parts.push(`only with an army ${pct(w.edge - 1)} stronger than its target`);
+  if (w.peace > TRUCE_TURNS) parts.push(`keeps the peace ${w.peace} turns after a treaty`);
+  if (w.rest > 0) parts.push(`rests ${w.rest} turns after any war`);
+  return parts.join(', ');
+}
+
 function difficultyTable(): string {
   const row = (label: string, f: (d: Difficulty) => string) =>
     `<tr><td>${label}</td>${DIFFS.map((d) => `<td>${f(d)}</td>`).join('')}</tr>`;
@@ -48,6 +60,7 @@ function difficultyTable(): string {
     row('AI gold', (d) => pct(c(d).income)) +
     row('AI army size', (d) => `up to ${c(d).maxArmy}`) +
     row('AI may start wars from', (d) => `turn ${c(d).attackTurn}`) +
+    row('AI starts a war', warHabit) +
     row('AI walls', (d) => `up to ${c(d).maxWalls}`) +
     row('AI tactics', (d) => (c(d).smart ? 'counters your troops, picks off wounded units, retreats to heal' : 'simple')) +
     row('AI goes after', (d) => (c(d).focusHuman ? 'people first' : 'whoever is closest')) +
@@ -200,7 +213,7 @@ function guideHtml(): string {
         `<li>Computer kingdoms decide by how the war is going: who's stronger, whose cities are hurting, how long it has dragged on and unrest at home. If they say no, you can ask again in ${PEACE_RETRY} turns.</li>` +
         `<li><b>Closed borders</b>: at peace, nobody can enter another kingdom's land or water except <b>Scouts</b>. When peace is made, troops inside the other side's land step back to the closest free hex outside it.</li>` +
         `<li>Peace comes with a ${TRUCE_TURNS}-turn treaty: neither side can declare war again until it runs out.</li>` +
-        `<li>The computer won't start wars before a certain turn (see Difficulty) and only fights one war at a time.</li></ul>`,
+        `<li>The computer won't start wars before a certain turn and only fights one war at a time. On ${DIFFICULTY.normal.label} it also waits until its army is clearly stronger than yours and keeps the peace ${WAR_RULES.normal.peace} turns after a treaty, so a strong army keeps it away (see Difficulty).</li></ul>`,
     ),
     sec(
       'Fog of war',
