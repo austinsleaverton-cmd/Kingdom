@@ -689,11 +689,11 @@ export class GameState {
     return u;
   }
 
-  // Your units that haven't done anything yet this turn and weren't told to hold.
+  // Your units that haven't done anything yet this turn and weren't told to hold (or to explore).
   idleUnits(p: PlayerId): Unit[] {
     if (p !== this.current) return [];
     return this.unitsOf(p).filter(
-      (u) => !u.hold && !u.goal && !u.acted && u.moves === UNIT_STATS[u.type].moves && this.reachableFor(u).size > 0,
+      (u) => !u.hold && !u.goal && !u.explore && !u.acted && u.moves === UNIT_STATS[u.type].moves && this.reachableFor(u).size > 0,
     );
   }
 
@@ -1371,7 +1371,7 @@ export class GameState {
     return this.map.neighbors(city).find((n) => isLand(n) && n.owner === city.owner && !this.unitAt(n)) ?? null;
   }
 
-  // keepRoute: a step of a planned route (a manual move cancels the route)
+  // keepRoute: a step of a planned route or of exploring (a manual move cancels both)
   moveUnit(unit: Unit, dest: Tile, keepRoute = false): boolean {
     if (this.winner !== null) return false;
     const left = this.reachableFor(unit).get(dest);
@@ -1453,20 +1453,23 @@ export class GameState {
     return { ok: true, reason: '', path, turnAt, turns: new Set(turnAt).size, nextTo, arrived: false };
   }
 
-  // Give the unit a goal and walk the first part right away.
+  // Give the unit a goal and walk the first part right away. A route replaces exploring.
   setRoute(unit: Unit, dest: Tile): RoutePlan {
     const plan = this.planRoute(unit, dest);
     if (!plan.ok || unit.owner !== this.current || this.winner !== null) return plan;
     unit.goal = { col: dest.col, row: dest.row };
     unit.waited = 0;
     unit.hold = false;
+    unit.explore = undefined;
     this.followRoute(unit, true);
     return plan;
   }
 
+  // Stops a route and auto-explore (any other order does this too)
   clearRoute(unit: Unit): void {
     unit.goal = undefined;
     unit.waited = undefined;
+    unit.explore = undefined;
   }
 
   // The rest of the unit's current route (null = none or no way through right now)
@@ -1532,6 +1535,81 @@ export class GameState {
         this.tell(p, `${UNIT_STATS[u.type].name} stopped its route: stuck behind your units`);
       }
     }
+  }
+
+  // ---------- scouts: auto-explore ----------
+  // An exploring scout heads for the closest hex you've seen that touches unexplored land, one step at a
+  // time, and picks a new spot as fresh land comes into view. It goes again at the start of each of your
+  // turns until nothing it can reach is left, enemy troops show up, or you give it another order.
+
+  exploreCheck(unit: Unit): Check {
+    if (this.winner !== null) return fail('Game over');
+    if (unit.type !== 'scout') return fail('Only scouts explore by themselves');
+    if (unit.owner !== this.current) return fail('Not your turn');
+    if (!this.fog) return fail('No fog in a sandbox: the whole map is already in view');
+    if (!this.explorePath(unit)) return fail('Nothing left to explore that it can reach');
+    return { ok: true, cost: 0, reason: '' };
+  }
+
+  // Turn auto-explore on (it starts walking right away) or off
+  setExplore(unit: Unit, on: boolean): Check {
+    if (!on) {
+      unit.explore = undefined;
+      return { ok: true, cost: 0, reason: '' };
+    }
+    const c = this.exploreCheck(unit);
+    if (!c.ok) return c;
+    this.clearRoute(unit);
+    unit.hold = false;
+    unit.explore = true;
+    this.exploreStep(unit, true);
+    return c;
+  }
+
+  // Cheapest path to the nearest explored hex it can stand on that borders unexplored land, keeping
+  // 3+ hexes away from enemy troops. null = nothing left it can reach.
+  explorePath(unit: Unit): Tile[] | null {
+    const p = unit.owner;
+    const mode = moveMode(unit.type);
+    const from = this.tileOf(unit);
+    const blocked = this.routeBlocker(unit, false);
+    const foes = this.units.filter((e) => UNIT_STATS[e.type].military && this.isEnemy(e.owner, p)).map((e) => this.tileOf(e));
+    const goals = new Set<Tile>();
+    for (const t of this.map.tiles) {
+      if (t === from || !this.isExplored(p, t) || this.unitAt(t) || !canEnter(t, p, mode) || blocked(t)) continue;
+      if (!this.map.neighbors(t).some((n) => !this.isExplored(p, n))) continue;
+      if (foes.some((f) => hexDistance(f, t) <= 2)) continue;
+      goals.add(t);
+    }
+    if (!goals.size) return null;
+    const path = findPath(this.map, from, goals, blocked, p, mode);
+    return path && path.length ? path : null;
+  }
+
+  // Walk toward the fog until out of moves. manual: just turned on, so enemies already in sight don't stop it.
+  private exploreStep(unit: Unit, manual: boolean): void {
+    const name = UNIT_STATS[unit.type].name;
+    const stop = (msg: string): void => {
+      unit.explore = undefined;
+      this.tell(unit.owner, msg);
+    };
+    const seen = new Set(this.enemiesNear(unit));
+    if (!manual && seen.size) return stop(`${name} stopped exploring: enemy troops nearby`);
+    for (let guard = 0; guard < 12 && unit.moves > 0; guard++) {
+      const path = this.explorePath(unit);
+      if (!path) return stop(`${name} finished exploring: nothing left it can reach`);
+      const step = path[0];
+      // Out of moves for this turn, or one of your units is in the way: try again next turn
+      if (this.unitAt(step) || !this.reachableFor(unit).has(step)) return;
+      this.moveUnit(unit, step, true);
+      if (this.enemiesNear(unit).some((e) => !seen.has(e))) return stop(`${name} stopped exploring: enemy troops spotted`);
+    }
+  }
+
+  // Start of turn: every exploring scout takes its walk
+  private runExplore(p: PlayerId): void {
+    if (!this.fog) return;
+    for (const u of this.unitsOf(p)) if (u.explore) this.exploreStep(u, false);
   }
 
   // ---------- combat ----------
@@ -1912,6 +1990,7 @@ export class GameState {
     }
     this.expel(p);
     this.runRoutes(p);
+    this.runExplore(p);
     this.wakeHolders(p);
     this.advanceTraining(p);
   }
