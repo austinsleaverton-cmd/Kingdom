@@ -181,7 +181,7 @@ function guideHtml(): string {
       `<table><tr><th>Unit</th><th>Gold</th><th>Food</th><th>Moves</th><th>HP</th><th>Attack</th><th>Notes</th></tr>` +
         `<tr><td>Builder</td><td>${u.builder.cost}</td><td>${u.builder.food}</td><td>${u.builder.moves}</td><td>${u.builder.hp}</td><td>-</td><td>builds, ready at once</td></tr>` +
         `<tr><td>Settler</td><td>grows</td><td>${u.settler.food}</td><td>${u.settler.moves}</td><td>${u.settler.hp}</td><td>-</td><td>founds a city, ${u.settler.train} turns, needs a ${LEVEL_NAMES[(u.settler.minLevel ?? 1) - 1]}</td></tr>` +
-        `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders</td></tr>` +
+        `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders, can <b>Explore</b> by itself (<kbd>A</kbd>)</td></tr>` +
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
         `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs lumber</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
@@ -220,6 +220,7 @@ function guideHtml(): string {
       `<ul><li>With rivals in the game, you only see what your land, cities and units can see. Unexplored land is dark.</li>` +
         `<li>Land you've explored stays on the map, slightly dimmed; enemy units there are hidden until you look again.</li>` +
         `<li>Sight: builders and settlers ${UNIT_SIGHT.builder}, scouts ${UNIT_SIGHT.scout}, swordsmen and archers ${UNIT_SIGHT.swordsman}, knights ${UNIT_SIGHT.knight}, boats ${UNIT_SIGHT.trireme}, cities ${CITY_SIGHT} (+1 for a ${LEVEL_NAMES[2]}). You start knowing everything within ${START_SIGHT} hexes of your capital.</li>` +
+        `<li><b>Explore</b> (<kbd>A</kbd>, scouts only): the scout heads for the nearest edge of the dark by itself, right away and again at the start of every turn. It keeps clear of enemy troops, stops if they come within 2 hexes, and stops once there's nothing left it can reach (it can't cross water). A cyan eye on the scout means it's exploring; it's skipped by the end-of-turn check. Any order (a move, a route, Hold or <kbd>X</kbd>) stops it.</li>` +
         `<li>No fog in a sandbox game.</li></ul>`,
     ),
     sec(
@@ -227,7 +228,8 @@ function guideHtml(): string {
       `<ul><li>With a unit selected, tap a far hex: you see the path, a numbered dot where it stops each turn, and how many turns it takes.</li>` +
         `<li>Tap the same hex again to send it. It walks by itself at the start of each turn.</li>` +
         `<li>It waits if your own unit is in the way (then goes around), stops if enemy troops come within 2 hexes, and never attacks by itself.</li>` +
-        `<li><kbd>X</kbd> or any manual move cancels a route.</li></ul>`,
+        `<li><kbd>X</kbd> or any manual move cancels a route.</li>` +
+        `<li>Scouts can also <b>Explore</b> (<kbd>A</kbd>) instead: they pick their own route into the fog every turn (see Fog of war).</li></ul>`,
     ),
     sec(
       'Playing together (hot-seat)',
@@ -239,8 +241,8 @@ function guideHtml(): string {
     sec(
       'Controls',
       `<ul><li>Drag to move the map, pinch or scroll to zoom.</li>` +
-        `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route, <kbd>Esc</kbd> deselect / menu.</li>` +
-        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land, <kbd>O</kbd> open the City View (or double-tap the city). Troops: <kbd>L</kbd> pillage.</li>` +
+        `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route or exploring, <kbd>Esc</kbd> deselect / menu.</li>` +
+        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land, <kbd>O</kbd> open the City View (or double-tap the city). Troops: <kbd>L</kbd> pillage. Scout: <kbd>A</kbd> explore.</li>` +
         `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>E</kbd> palisade, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li>` +
         `<li>City View: <kbd>Esc</kbd> back to the map, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> undo while decorating.</li></ul>`,
     ),
