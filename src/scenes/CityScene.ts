@@ -1,26 +1,26 @@
 // City screen: the inside of one of your cities as its own Phaser scene (docs/CITY_BUILDER.md).
-// A grassy town with the castle (the Keep) in the middle and the 6 plots as one tile each (no built-in roads:
-// you paint your own paths in decorate mode), and the map hex each plot faces as a small marker just
-// past the edge. Drag to pan, pinch or wheel to zoom.
-// Coastal towns: the sea comes in from the sides whose plots face water on the map (world/grid.ts waterTiles),
-// with a grass shore where it meets land. The Keep and the land plots always stay dry.
-// Decorate mode (task 5): tap an open tile to place the picked decoration, drag a decoration to move it, and with
+// It shows the city's real territory: every map hex the city owns, laid out the way it sits on the map, as a patch
+// of detailed ground (world/grid.ts). The Keep stands on the city's own hex, amenities stand in the middle of the
+// other hexes, and everything else is ground to decorate. The ring of hexes just past the border is drawn dimmed
+// (open land, the sea, another of your cities, a rival kingdom), with the border in your color. Coastlines, sand
+// and hills come straight from the map. Drag to pan, pinch or wheel to zoom.
+// Decorate mode (task 5): tap an open cell to place the picked decoration, drag a decoration to move it, and with
 // a path, grass (or the eraser) picked a one-finger drag paints (two fingers still pan and zoom, right-drag pans on
-// desktop). Grass tiles just show the plain ground: they keep the wild trees and flowers off that tile.
+// desktop).
 // Zoom transition (task 6): arriving from the map the town starts close and eases out to fit. Keep zooming out
 // past the min zoom (wheel, or pinch and release) and it zooms out and fades back to the map (zoomPush.ts).
-// Art: Kenney tilesheets (cityArt.ts), one city tile = 3x3 art tiles, styled after Kenney's Tiny Town sample:
-// full houses on the grass, a towered castle, tree clumps along the edge. If a sheet or a tile is missing, that
+// Art: Kenney tilesheets (cityArt.ts), one ground cell = 3x3 art tiles. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
 import type { GameState } from '../world/game';
-import { facingTile, openPlots, plotBonus, plotTerrain } from '../world/city';
+import { bonusSources, freeSlots, hasSiteFor } from '../world/city';
 import type { Outside } from '../world/city';
-import { DECOS, DECO_ORDER, decoAt, decoList, fenceLinks, isGrassKind, isPathKind, moveReason, pathLinks, placeCheck } from '../world/deco';
-import { PLOT_TILES, gridRadius, plotAtTile, plotLevel, reservedTile, tileKey, waterTiles } from '../world/grid';
-import { BUILDINGS, LEVEL_NAMES, PLOT_COUNT } from '../world/tile';
+import { DECOS, DECO_ORDER, fenceLinks, isGrassKind, isPathKind, keepTile, lotAt, moveReason, pathLinks, placeCheck, yardOf } from '../world/deco';
+import { cellKey, cityLayout, hexAt, hexCells } from '../world/grid';
+import type { CityHex, Layout, XY } from '../world/grid';
+import { BUILDINGS, BUILDING_ORDER } from '../world/tile';
 import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
 import type { PxActor } from './citySprites';
@@ -32,7 +32,7 @@ import type { Cell, Sheet } from './cityArt';
 import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
 
 export const CITY_SCENE = 'city';
-export type CityPick = number | 'keep';
+export type CityPick = number | 'keep'; // a hex of the city (map tile index) or the Keep
 
 // Decorate mode as the panel sees it (null = not decorating)
 export interface DecoUI {
@@ -45,27 +45,25 @@ export interface CityLink {
   state: GameState;
   city: Tile;
   me: number;
-  sel(): CityPick; // what's selected (plot index or the Keep)
+  sel(): CityPick; // what's selected (a hex or the Keep)
   view(): { x: number; y: number; w: number; h: number }; // screen area not covered by the DOM header/panel
-  pick(p: CityPick): void; // tapped a plot, a facing marker or the Keep
+  pick(p: CityPick): void; // tapped a hex of the city or the Keep
   close(): void; // O, or zoomed out past the limit
   escape(): void; // Esc: drop the tool, leave decorate mode, then back to the map
   deco(): DecoUI | null;
-  decoTap(dx: number, dy: number): void; // tapped a tile in decorate mode
-  decoPaint(dx: number, dy: number, first: boolean): void; // a paint/erase stroke went over a tile
+  decoTap(dx: number, dy: number): void; // tapped a cell in decorate mode
+  decoPaint(dx: number, dy: number, first: boolean): void; // a paint/erase stroke went over a cell
   decoPaintEnd(): void;
   decoMove(fx: number, fy: number, tx: number, ty: number): void; // dropped a dragged decoration
   undo(): void;
 }
 
-const T = ART * 3; // tile size in world px: 3x3 Kenney tiles
-const MARKER_OUT = 0.85; // facing markers sit this many tiles past the edge
-const MARKER_R = T * 0.3; // facing marker size
+const T = ART * 3; // ground cell size in world px: 3x3 Kenney tiles
 const DRAG_PX = 8; // movement before a press counts as a pan, not a tap
-const LABEL_MIN = 30; // tile size on screen (px) below which names hide (icons stay)
+const LABEL_MIN = 30; // cell size on screen (px) below which names hide (icons stay)
 const PERSON_SCALE = 1.5;
-const NAME_Y = T / 2 + 1; // names sit on the bottom edge of their plot
-// The castle: its box in world px around the city center (tapping anywhere on it picks the Keep)
+const NAME_Y = T / 2 + 1; // names sit on the bottom edge of their building
+// The castle: its box in world px around the Keep (tapping anywhere on it picks the Keep)
 const CASTLE_LEFT = -(CASTLE_ART.w * ART) / 2;
 const CASTLE_TOP = -40;
 const CASTLE_BOTTOM = CASTLE_TOP + CASTLE_ART.h * ART;
@@ -84,36 +82,18 @@ const GRASS_DARK = 0x58993f;
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x8c7a4c };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x8c7a4c, mountain: 0x9a9a9a };
-const OUT_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
+const WORK_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
 
 type Layer = 'ground' | 'obj';
-type XY = [number, number];
 
-// Facing marker i in tile units: past the edge in plot i's world direction (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE)
-function markerAt(i: number, r: number): [number, number] {
-  const o = r + MARKER_OUT;
-  const h = r * 0.5;
-  const at: [number, number][] = [[o, 0], [h, -o], [-h, -o], [-o, 0], [-h, o], [h, o]];
-  return at[i];
-}
-
-function hexPts(cx: number, cy: number, rad: number): Phaser.Math.Vector2[] {
-  const pts: Phaser.Math.Vector2[] = [];
-  for (let i = 0; i < 6; i++) {
-    const a = Phaser.Math.DegToRad(60 * i - 30);
-    pts.push(new Phaser.Math.Vector2(cx + rad * Math.cos(a), cy + rad * Math.sin(a)));
-  }
-  return pts;
-}
-
-// Same pattern every time you open the same city: a 0..1 number per tile and salt
+// Same pattern every time you open the same city: a 0..1 number per cell and salt
 function hash01(dx: number, dy: number, seed: number, salt: number): number {
-  let h = Math.imul(dx + 101, 73856093) ^ Math.imul(dy + 211, 19349663) ^ Math.imul(salt + 7, 83492791) ^ seed;
+  let h = Math.imul(dx + 1001, 73856093) ^ Math.imul(dy + 2011, 19349663) ^ Math.imul(salt + 7, 83492791) ^ seed;
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-// The tiles on a straight line from a to b (so a fast drag doesn't skip any)
+// The cells on a straight line from a to b (so a fast drag doesn't skip any)
 function lineTiles(a: XY, b: XY): XY[] {
   const out: XY[] = [];
   const steps = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
@@ -126,6 +106,19 @@ function lineTiles(a: XY, b: XY): XY[] {
 // A tool that paints by dragging: a path, grass or the eraser
 function paints(ui: DecoUI | null): boolean {
   return !!ui && (ui.tool === 'erase' || (typeof ui.tool === 'number' && isPathKind(ui.tool)));
+}
+
+const parseKey = (k: string): XY => {
+  const [x, y] = k.split(',').map(Number);
+  return [x, y];
+};
+
+// Where everything stands this redraw, so drawing doesn't scan lists per cell
+interface Town {
+  lay: Layout;
+  objs: Map<string, number>; // cell -> decoration kind
+  ground: Map<string, number>; // cell -> painted path or grass
+  built: Map<number, Building>; // hex -> finished amenity
 }
 
 export class CityScene extends Phaser.Scene {
@@ -242,6 +235,11 @@ export class CityScene extends Phaser.Scene {
     for (const l of this.labels) l.setVisible(big);
   }
 
+  private layout(): Layout | null {
+    const link = CityScene.link;
+    return link ? cityLayout(link.state, link.city) : null;
+  }
+
   private show(): void {
     if (!CityScene.link) return;
     this.resetPointer();
@@ -255,7 +253,8 @@ export class CityScene extends Phaser.Scene {
     if (this.reduced) return;
     // Arriving from the map: start close on the Keep and ease out to the fitted view
     const z = this.cameras.main.zoom;
-    this.zoomTween(z * INTRO_ZOOM, z, INTRO_MS, 'Sine.easeOut', { x: 0, y: 0 });
+    const at = this.lookingAt();
+    this.zoomTween(z * INTRO_ZOOM, z, INTRO_MS, 'Sine.easeOut', at);
     this.cameras.main.fadeIn(INTRO_MS * 0.6, FADE[0], FADE[1], FADE[2]);
   }
 
@@ -304,18 +303,36 @@ export class CityScene extends Phaser.Scene {
     return v;
   }
 
-  // Whole town plus the facing markers fits the free part of the screen, Keep in the middle of it
+  // The city's land in world px (the cells it owns, not the dimmed ring around it)
+  private landBox(): { x: number; y: number; w: number; h: number } {
+    const lay = this.layout();
+    if (!lay) return { x: -T, y: -T, w: 2 * T, h: 2 * T };
+    let minX = 0;
+    let maxX = 0;
+    let minY = 0;
+    let maxY = 0;
+    for (const key of lay.cells.keys()) {
+      const [x, y] = parseKey(key);
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+    return { x: (minX - 0.5) * T, y: (minY - 0.5) * T, w: (maxX - minX + 1) * T, h: (maxY - minY + 1) * T };
+  }
+
+  // The whole city fits the free part of the screen. Small towns open centred on the Keep, big ones on their land.
   private fit(): void {
-    const link = CityScene.link;
-    if (!link) return;
+    if (!CityScene.link) return;
     const cam = this.cameras.main;
     const v = this.view();
-    const extent = (gridRadius(link.city) + MARKER_OUT + 0.6) * 2 * T;
-    const z = Phaser.Math.Clamp(Math.min(v.w / extent, v.h / extent), 0.25, 4);
+    const box = this.landBox();
+    const pad = T * 1.2;
+    const z = Phaser.Math.Clamp(Math.min(v.w / (box.w + pad * 2), v.h / (box.h + pad * 2)), 0.08, 4);
     this.minZoom = z * 0.75;
-    this.maxZoom = Math.max(z * 4, 3);
+    this.maxZoom = Math.max(z * 6, 3);
     cam.setZoom(z);
-    this.lookAt(0, 0);
+    this.lookAt(box.x + box.w / 2, box.y + box.h / 2);
     this.bigLabels = z * T >= LABEL_MIN;
   }
 
@@ -340,14 +357,13 @@ export class CityScene extends Phaser.Scene {
     };
   }
 
-  // Never lose the town: the middle of the view stays over it
+  // Never lose the town: the middle of the view stays over the city's land
   private clampCam(): void {
-    const link = CityScene.link;
-    if (!link) return;
-    const lim = (gridRadius(link.city) + 0.5) * T;
+    if (!CityScene.link) return;
+    const box = this.landBox();
     const c = this.lookingAt();
-    const x = Phaser.Math.Clamp(c.x, -lim, lim);
-    const y = Phaser.Math.Clamp(c.y, -lim, lim);
+    const x = Phaser.Math.Clamp(c.x, box.x, box.x + box.w);
+    const y = Phaser.Math.Clamp(c.y, box.y, box.y + box.h);
     if (x !== c.x || y !== c.y) this.lookAt(x, y);
   }
 
@@ -422,23 +438,33 @@ export class CityScene extends Phaser.Scene {
     return CityScene.link?.deco() ?? null;
   }
 
-  // The town tile under a screen point, or null off the grid
+  // The ground cell under a screen point (anywhere near the town: the panel explains cells outside its land)
   private tileAt(sx: number, sy: number): XY | null {
-    const link = CityScene.link;
-    if (!link) return null;
+    const lay = this.layout();
+    if (!lay) return null;
     const w = this.cameras.main.getWorldPoint(sx, sy);
     const dx = Math.round(w.x / T);
     const dy = Math.round(w.y / T);
-    const r = gridRadius(link.city);
-    return Math.abs(dx) > r || Math.abs(dy) > r ? null : [dx, dy];
+    const b = lay.bounds;
+    return dx < b.minX || dx > b.maxX || dy < b.minY || dy > b.maxY ? null : [dx, dy];
   }
 
   // A placed decoration (not a path) that can be dragged around
   private movable(t: XY | null): boolean {
     const link = CityScene.link;
     if (!link || !t) return false;
-    const k = decoAt(link.city, t[0], t[1]);
-    return k !== null && !isPathKind(k);
+    const k = this.objAt(link.city, t[0], t[1]);
+    return k !== null;
+  }
+
+  private objAt(city: Tile, x: number, y: number): number | null {
+    for (const [dx, dy, k] of city.deco ?? []) if (dx === x && dy === y && !isPathKind(k)) return k;
+    return null;
+  }
+
+  private groundAt(city: Tile, x: number, y: number): number | null {
+    for (const [dx, dy, k] of city.deco ?? []) if (dx === x && dy === y && isPathKind(k)) return k;
+    return null;
   }
 
   private paintTo(t: XY, first: boolean): void {
@@ -600,7 +626,7 @@ export class CityScene extends Phaser.Scene {
     });
   }
 
-  // Desktop, decorate mode: outline the tile under the mouse, green where the picked tool can go
+  // Desktop, decorate mode: outline the cell under the mouse, green where the picked tool can go
   private hover(ui: DecoUI, t: XY | null): void {
     const g = this.hoverG;
     g.clear();
@@ -610,7 +636,7 @@ export class CityScene extends Phaser.Scene {
       return;
     }
     const [dx, dy] = t;
-    const here = decoAt(link.city, dx, dy);
+    const here = this.objAt(link.city, dx, dy) ?? this.groundAt(link.city, dx, dy);
     let color = 0xffffff;
     if (typeof ui.tool === 'number') {
       const pathOver = isPathKind(ui.tool) && here !== null && isPathKind(here);
@@ -626,23 +652,15 @@ export class CityScene extends Phaser.Scene {
     g.strokeRect(dx * T - T / 2 + 2, dy * T - T / 2 + 2, T - 4, T - 4);
   }
 
-  // What's under a screen point: a facing marker (counts as its plot), the castle, or a plot tile
-  private pickAt(sx: number, sy: number): number | 'keep' | null {
-    const link = CityScene.link;
-    if (!link) return null;
+  // What's under a screen point: the castle (the Keep), or one of the city's hexes
+  private pickAt(sx: number, sy: number): CityPick | null {
+    const lay = this.layout();
+    if (!lay) return null;
     const w = this.cameras.main.getWorldPoint(sx, sy);
-    const r = gridRadius(link.city);
-    for (let i = 0; i < PLOT_COUNT; i++) {
-      if (!facingTile(link.city, i)) continue;
-      const [mx, my] = markerAt(i, r);
-      if (Math.hypot(w.x - mx * T, w.y - my * T) < T * 0.45) return i; // a bit bigger than the marker, easier to hit
-    }
     if (w.x >= CASTLE_LEFT && w.x <= -CASTLE_LEFT && w.y >= CASTLE_TOP && w.y <= CASTLE_BOTTOM) return 'keep';
-    const dx = Math.round(w.x / T);
-    const dy = Math.round(w.y / T);
-    if (Math.abs(dx) > r || Math.abs(dy) > r) return null;
-    if (dx === 0 && dy === 0) return 'keep';
-    return plotAtTile(dx, dy);
+    const h = hexAt(lay, Math.round(w.x / T), Math.round(w.y / T));
+    if (!h) return null;
+    return h.keep ? 'keep' : h.index;
   }
 
   // ---------- Kenney tiles ----------
@@ -661,10 +679,10 @@ export class CityScene extends Phaser.Scene {
     for (const k of cells) this.bob(layer, k.s, k.f, left + k.x * ART, top + k.y * ART, alpha);
   }
 
-  // A building filling its plot (centered at x, y), with its props alongside. False = use the emoji instead.
+  // A building filling its cell (centered at x, y), with its props alongside. False = use the emoji instead.
   private building(b: Building, x: number, y: number, t: PlotTerrain, alpha: number): boolean {
     const pic = BUILDING_ART[b];
-    // Water plots are part of the sea now, so the Harbor stands in it (no little pond in front any more)
+    // Water hexes are part of the sea, so the Harbor stands in it (no little pond in front)
     const under = t === 'water' ? [] : BUILT_GROUND[t];
     if (!canDraw(this, [...pic.cells, ...pic.props, ...under])) return false;
     const left = x - T / 2;
@@ -677,55 +695,60 @@ export class CityScene extends Phaser.Scene {
 
   // ---------- drawing ----------
 
+  private town(c: Tile, lay: Layout): Town {
+    const objs = new Map<string, number>();
+    const ground = new Map<string, number>();
+    for (const [x, y, k] of c.deco ?? []) (isPathKind(k) ? ground : objs).set(cellKey(x, y), k);
+    const built = new Map<number, Building>();
+    for (const b of BUILDING_ORDER) {
+      const at = c.sites[b];
+      if (at !== undefined && at >= 0 && c.buildings.includes(b)) built.set(at, b);
+    }
+    return { lay, objs, ground, built };
+  }
+
   private redraw(): void {
     const link = CityScene.link;
     if (!link || !this.ready) return;
     const { state: s, city: c } = link;
     const sel = link.sel();
     const ui = link.deco();
-    const r = gridRadius(c);
-    const open = openPlots(c, s.isSimple(link.me));
+    const lay = cityLayout(s, c);
+    const town = this.town(c, lay);
     const seed = c.col * 92821 + c.row * 68917;
     this.nText = 0;
     this.nPeople = 0;
     this.labels = [];
     for (const layer of Object.values(this.blit)) for (const b of Object.values(layer)) b?.clear();
 
-    // Ground: one field of grass (the tile grid only shows in decorate mode)
+    // The ring past the border first: dimmed land and sea, tinted for whoever owns it
     const g = this.ground;
     g.clear();
-    const half = (r + 0.5) * T;
+    this.drawOutside(g, s, c, lay, link.me);
+
+    // The city's own land, hex by hex: grass, sand and hills straight from the map. Water is the sea, below.
     const artGrass = hasFrame(this, 't', GRASS.plain) && hasFrame(this, 't', GRASS.tufts) && hasFrame(this, 't', GRASS.flowers);
-    g.fillStyle(0x000000, 0.35);
-    g.fillRoundedRect(-half + 6, -half + 10, 2 * half, 2 * half, artGrass ? 6 : 22);
-    g.fillStyle(0x3d6e2c, 1);
-    g.fillRoundedRect(-half - 4, -half - 4, 2 * half + 8, 2 * half + 8, artGrass ? 6 : 24);
-    g.fillStyle(GRASS_COLOR, 1);
-    g.fillRoundedRect(-half, -half, 2 * half, 2 * half, artGrass ? 2 : 20);
-    if (artGrass) {
-      const n = (2 * r + 1) * 3;
-      for (let j = 0; j < n; j++) {
-        for (let i = 0; i < n; i++) {
-          const v = hash01(i, j, seed, 20);
-          const f = v < 0.02 ? GRASS.flowers : v < 0.3 ? GRASS.tufts : GRASS.plain;
-          this.bob('ground', 't', f, -half + i * ART, -half + j * ART);
-        }
+    const water = new Set<string>();
+    for (const [key, h] of lay.cells) {
+      if (h.terrain === 'water') {
+        water.add(key);
+        continue;
       }
-    } else {
-      this.drawnGrass(g, r, seed);
+      const [x, y] = parseKey(key);
+      this.landCell(g, x, y, h.terrain, seed, artGrass);
+    }
+    if (water.size) this.drawWater(g, lay, water);
+
+    // Painted paths lie on the ground, under everything else (grass draws nothing: the ground is already grass)
+    for (const [key, k] of town.ground) {
+      if (!lay.cells.has(key)) continue;
+      const [x, y] = parseKey(key);
+      this.path(g, s, c, x, y, k);
     }
 
-    // Coastal towns: the sea comes in from the sides that face water on the map
-    const water = waterTiles(c);
-    if (water.size) this.drawWater(g, water, r);
-
-    // Painted paths lie on the ground, under everything else (grass tiles draw nothing: the ground is already grass)
-    for (const [dx, dy, k] of decoList(c)) if (isPathKind(k)) this.path(g, c, dx, dy, k);
-
-    // Decorations and the wild scenery, row by row so lower things overlap the ones behind them.
-    // Scenery first, so the castle and buildings stand in front of any tree that leans over them.
+    // Decorations and the wild scenery, row by row so lower things overlap the ones behind them
     this.scenery.clear();
-    this.drawTown(c, r, seed, water);
+    this.drawTown(c, town, seed);
 
     // The Keep: the towered castle, or a stone yard with an emoji if the art is missing
     const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
@@ -744,99 +767,92 @@ export class CityScene extends Phaser.Scene {
     }
     this.crowd(keepPeople(c.walls), 0, 0, 3);
 
-    // The 6 plots. Building names only show on the selected plot (the panel has the rest), like Kenney's sample.
-    for (let i = 0; i < PLOT_COUNT; i++) {
-      const [tx, ty] = PLOT_TILES[i];
-      const x = tx * T;
-      const y = ty * T;
-      const t = plotTerrain(c, i);
-      const locked = i >= open;
-      const b = c.placed[i];
-      const proj = c.projectPlot === i ? c.project : null;
-      const picked = sel === i && !ui;
-      if (locked && !b) {
-        // Locked: a faint outline of the plot to come, small lock and level name
-        this.plotGround(g, x, y, t, 0.25);
-        this.txt(x, y - 4, '\u{1F512}', 12, { alpha: 0.6 });
-        this.txt(x, y + 12, LEVEL_NAMES[plotLevel(i)], 8, { alpha: 0.7, small: true });
-        continue;
-      }
+    // Every other hex: its amenity in the middle, the one going up, or an open spot with a + to build.
+    // Names only show on the selected hex (the panel has the rest). A badge in the corner shows what's worked there.
+    const room = freeSlots(c, s.isSimple(link.me)) > 0;
+    const harbor = !c.buildings.includes('harbor') && c.project !== 'harbor' && s.isCoastal(c) && hasSiteFor(s, c, 'harbor');
+    for (const h of lay.hexes) {
+      if (h.keep) continue;
+      const [cx, cy] = h.center;
+      const x = cx * T;
+      const y = cy * T;
+      const b = town.built.get(h.index);
+      const proj = c.projectSite === h.index ? c.project : null;
+      const picked = sel === h.index && !ui;
       if (b) {
-        if (this.building(b, x, y, t, 1)) {
+        if (this.building(b, x, y, h.terrain, 1)) {
           if (picked) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
         } else {
-          this.plotGround(g, x, y, t, 1);
+          this.lotGround(g, x, y, h.terrain, 1);
           this.txt(x, y - 6, BUILDINGS[b].icon, 22);
           this.txt(x, y + 13, BUILDINGS[b].name, 10, { label: true });
         }
-        this.crowd(PLOT_PEOPLE[b], x, y, i);
+        this.crowd(PLOT_PEOPLE[b], x, y, h.index);
       } else if (proj) {
         // Under construction: a see-through version of what's going up, with the turns left
-        if (this.building(proj, x, y, t, 0.45)) this.txt(x, y + NAME_Y, `${c.projectTurns}t left`, 10, { label: true });
+        if (this.building(proj, x, y, h.terrain, 0.45)) this.txt(x, y + NAME_Y, `${c.projectTurns}t left`, 10, { label: true });
         else {
-          this.plotGround(g, x, y, t, 1);
+          this.lotGround(g, x, y, h.terrain, 1);
           this.txt(x, y - 6, BUILDINGS[proj].icon, 22, { alpha: 0.45 });
           this.txt(x, y + 13, `${c.projectTurns}t left`, 10, { label: true });
         }
-        this.crowd(BUILDER_PEOPLE, x, y, i);
+        this.crowd(BUILDER_PEOPLE, x, y, h.index);
       } else {
-        // Open plot: its ground (dirt lot, sand or hills; water plots are open sea) with a + to build
-        this.plotGround(g, x, y, t, 1);
-        this.txt(x, y - 5, '+', 26, { alpha: ui ? 0.4 : 0.85 });
-        this.txt(x, y + 14, PLOT_NAME[t], 9, { label: true });
+        if (!town.ground.has(cellKey(cx, cy))) this.lotGround(g, x, y, h.terrain, 1);
+        const usable = h.terrain !== 'water' || harbor;
+        if (usable && (room || picked)) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : picked ? 0.95 : 0.6 });
+        if (picked) this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });
       }
+      const works: Outside[] = [];
+      if (h.tile.improvement) works.push(h.tile.improvement);
+      if (h.tile.road) works.push('road');
+      if (works.length) this.txt((cx - 2) * T, (cy - 2) * T, works.map((w) => WORK_ICON[w]).join(''), 13, { alpha: ui ? 0.45 : 0.9 });
     }
 
-    // What each plot faces on the map: a small hex past the edge. Faint unless it's paying a bonus (green)
-    // or its plot is selected (white outline).
+    // The border in your color, and faint lines between the hexes (not while decorating)
     const m = this.marks;
     m.clear();
-    for (let i = 0; i < PLOT_COUNT; i++) {
-      const t = facingTile(c, i);
-      if (!t) continue;
-      const [mx, my] = markerAt(i, r);
-      const x = mx * T;
-      const y = my * T;
-      const b = c.placed[i];
-      const paying = !!b && plotBonus(c, i, b).notes.some((n) => n.includes('facing'));
-      const picked = sel === i && !ui;
-      if (paying) {
-        const [px, py] = PLOT_TILES[i];
-        this.dots(m, px * T, py * T, x, y, 0x4ade80, 0.6);
+    this.drawBorders(m, lay, c.owner !== null ? s.players[c.owner].color : 0xffffff, !ui);
+
+    // The selected amenity: dotted lines to the hexes paying its bonuses
+    if (!ui && typeof sel === 'number') {
+      const b = town.built.get(sel) ?? (c.projectSite === sel ? c.project : null);
+      const from = lay.byIndex.get(sel);
+      if (b && from) {
+        for (const at of bonusSources(s, c, sel, b)) {
+          const to = lay.byIndex.get(at)?.center ?? lay.outside.find((o) => o.tile && s.tileIndex(o.tile) === at)?.center;
+          if (to) this.dots(m, from.center[0] * T, from.center[1] * T, to[0] * T, to[1] * T, 0x4ade80, 0.85);
+        }
       }
-      const pts = hexPts(x, y, MARKER_R);
-      m.fillStyle(OUT_COLOR[t.terrain], paying ? 0.9 : picked ? 0.6 : 0.25);
-      m.fillPoints(pts, true);
-      if (paying || picked) {
-        m.lineStyle(paying ? 2.5 : 1.5, paying ? 0x4ade80 : 0xffffff, paying ? 1 : 0.7);
-        m.strokePoints(pts, true);
-      }
-      const work = t.improvement ?? (t.road ? 'road' : null);
-      if (work) this.txt(x, y, OUT_ICON[work], 10, { alpha: paying ? 1 : picked ? 0.8 : 0.35 });
     }
 
-    // Decorate mode: a faint tile grid (stronger while a path, grass or the eraser is picked)
+    // Decorate mode: a faint cell grid on the city's land (stronger while a path, grass or the eraser is picked)
     const gg = this.gridG;
     gg.clear();
     if (ui) {
       gg.lineStyle(1, 0xffffff, paints(ui) ? 0.22 : 0.1);
-      for (let k = -r; k <= r + 1; k++) {
-        gg.lineBetween((k - 0.5) * T, -half, (k - 0.5) * T, half);
-        gg.lineBetween(-half, (k - 0.5) * T, half, (k - 0.5) * T);
+      for (const [key, h] of lay.cells) {
+        if (h.terrain === 'water') continue;
+        const [x, y] = parseKey(key);
+        gg.strokeRect(x * T - T / 2, y * T - T / 2, T, T);
       }
     }
 
-    // Selection: the picked decoration in decorate mode, otherwise the castle for the Keep or the plot
+    // Selection: the picked decoration in decorate mode, otherwise the castle for the Keep or the whole hex
     this.selG.clear();
     let box: { x: number; y: number; w: number; h: number } | null = null;
     if (ui) {
       const at = this.moving ? this.moving.to : ui.picked;
       if (at) box = { x: at[0] * T - T / 2 + 1, y: at[1] * T - T / 2 + 1, w: T - 2, h: T - 2 };
-    } else if (sel === 'keep' && canDraw(this, CASTLE_ART.cells)) {
-      box = { x: CASTLE_LEFT - 2, y: CASTLE_TOP - 2, w: -2 * CASTLE_LEFT + 4, h: CASTLE_BOTTOM - CASTLE_TOP + 4 };
+    } else if (sel === 'keep') {
+      if (canDraw(this, CASTLE_ART.cells)) box = { x: CASTLE_LEFT - 2, y: CASTLE_TOP - 2, w: -2 * CASTLE_LEFT + 4, h: CASTLE_BOTTOM - CASTLE_TOP + 4 };
+      else box = { x: -T / 2 + 1, y: -T / 2 + 1, w: T - 2, h: T - 2 };
     } else {
-      const [sx, sy] = sel === 'keep' ? [0, 0] : PLOT_TILES[sel];
-      box = { x: sx * T - T / 2 + 1, y: sy * T - T / 2 + 1, w: T - 2, h: T - 2 };
+      const h = lay.byIndex.get(sel);
+      if (h) {
+        this.hexOutline(this.selG, lay, h, 6, 0x000000, 0.4);
+        this.hexOutline(this.selG, lay, h, 3, 0xfacc15, 1);
+      }
     }
     if (box) {
       const bad = !!this.moving && !this.dropOk(this.moving);
@@ -850,16 +866,124 @@ export class CityScene extends Phaser.Scene {
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
   }
 
-  // The sea: open water in the middle of each water tile, a grass shore on any side that touches land.
-  // Past the edge of the town counts as the edge tile, so the water runs out of the picture instead of
-  // stopping at a bank.
-  private drawWater(g: Phaser.GameObjects.Graphics, water: Set<string>, r: number): void {
-    const edge = (v: number) => Math.max(-r, Math.min(r, v));
-    const wet = (dx: number, dy: number) => water.has(tileKey(edge(dx), edge(dy)));
+  // The hexes just past the border: dimmed, tinted in their owner's color, unexplored ones dark.
+  // One small label per neighbour ("Land of Riverton", "Red", "Open land: claim it to grow").
+  private drawOutside(g: Phaser.GameObjects.Graphics, s: GameState, c: Tile, lay: Layout, me: number): void {
+    const named = new Set<string>();
+    for (const o of lay.outside) {
+      const t = o.tile;
+      if (!t) continue; // off the map: just the background
+      const hidden = s.fog && !s.isExplored(me, t);
+      const cells = hexCells(o.q, o.r);
+      for (const [x, y] of cells) {
+        g.fillStyle(hidden ? 0x0d1320 : OUT_COLOR[t.terrain], 1);
+        g.fillRect(x * T - T / 2, y * T - T / 2, T, T);
+      }
+      if (hidden) continue;
+      g.fillStyle(0x0b0e14, 0.5);
+      for (const [x, y] of cells) g.fillRect(x * T - T / 2, y * T - T / 2, T, T);
+      if (t.owner !== null) {
+        g.fillStyle(s.players[t.owner].color, t.owner === c.owner ? 0.12 : 0.22);
+        for (const [x, y] of cells) g.fillRect(x * T - T / 2, y * T - T / 2, T, T);
+      }
+      const home = s.homeCity(t);
+      const label = t.owner === null
+        ? t.terrain === 'water' ? '' : 'Open land: claim it to grow'
+        : t.owner === c.owner ? (home ? `Land of ${s.cityName(home)}` : '') : s.players[t.owner].name;
+      if (label && !named.has(label)) {
+        named.add(label);
+        this.txt(o.center[0] * T, o.center[1] * T, label, 9, { small: true, alpha: 0.75 });
+      }
+    }
+  }
+
+  // One ground cell of land: Kenney grass (a few variants scattered by a seeded hash), sand or rocky hills
+  private landCell(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, seed: number, artGrass: boolean): void {
+    const left = x * T - T / 2;
+    const top = y * T - T / 2;
+    if (t === 'grass' && artGrass) {
+      for (let j = 0; j < 3; j++) {
+        for (let i = 0; i < 3; i++) {
+          const v = hash01(x * 3 + i, y * 3 + j, seed, 20);
+          const f = v < 0.02 ? GRASS.flowers : v < 0.3 ? GRASS.tufts : GRASS.plain;
+          this.bob('ground', 't', f, left + i * ART, top + j * ART);
+        }
+      }
+      return;
+    }
+    if (t !== 'grass' && canDraw(this, PLOT_GROUND[t])) {
+      this.cells('ground', PLOT_GROUND[t], left, top);
+      if (t === 'hills' && hash01(x, y, seed, 21) < 0.18) this.bob('ground', 'r', 614, left + 16, top + 18);
+      return;
+    }
+    g.fillStyle(t === 'grass' ? GRASS_COLOR : PLOT_COLOR[t], 1);
+    g.fillRect(left, top, T, T);
+    if (t !== 'grass') return;
+    const a = hash01(x, y, seed, 1);
+    if (a < 0.55) {
+      g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
+      g.fillEllipse(x * T + (hash01(x, y, seed, 2) - 0.5) * T * 0.6, y * T + (hash01(x, y, seed, 3) - 0.5) * T * 0.6, T * (0.7 + a), T * (0.45 + a * 0.6));
+    }
+  }
+
+  // The border: a line in the owner's color around the city's land. lines: faint dividers between its hexes too.
+  private drawBorders(g: Phaser.GameObjects.Graphics, lay: Layout, color: number, lines: boolean): void {
+    const half = T / 2;
+    for (const [key, h] of lay.cells) {
+      const [x, y] = parseKey(key);
+      const px = x * T;
+      const py = y * T;
+      const sides: [number, number, number, number, number, number][] = [
+        [1, 0, px + half, py - half, px + half, py + half],
+        [-1, 0, px - half, py - half, px - half, py + half],
+        [0, 1, px - half, py + half, px + half, py + half],
+        [0, -1, px - half, py - half, px + half, py - half],
+      ];
+      for (const [dx, dy, x1, y1, x2, y2] of sides) {
+        const n = lay.cells.get(cellKey(x + dx, y + dy));
+        if (!n) {
+          g.lineStyle(4, 0x000000, 0.35);
+          g.lineBetween(x1, y1, x2, y2);
+          g.lineStyle(2.5, color, 1);
+          g.lineBetween(x1, y1, x2, y2);
+        } else if (lines && n !== h && (dx > 0 || dy > 0)) {
+          g.lineStyle(1, 0xffffff, 0.16);
+          g.lineBetween(x1, y1, x2, y2);
+        }
+      }
+    }
+  }
+
+  // The outline of one hex of the city (its cells' outer edges)
+  private hexOutline(g: Phaser.GameObjects.Graphics, lay: Layout, h: CityHex, width: number, color: number, alpha: number): void {
+    const half = T / 2;
+    g.lineStyle(width, color, alpha);
+    for (const [key, v] of lay.cells) {
+      if (v !== h) continue;
+      const [x, y] = parseKey(key);
+      const px = x * T;
+      const py = y * T;
+      if (lay.cells.get(cellKey(x + 1, y)) !== h) g.lineBetween(px + half, py - half, px + half, py + half);
+      if (lay.cells.get(cellKey(x - 1, y)) !== h) g.lineBetween(px - half, py - half, px - half, py + half);
+      if (lay.cells.get(cellKey(x, y + 1)) !== h) g.lineBetween(px - half, py + half, px + half, py + half);
+      if (lay.cells.get(cellKey(x, y - 1)) !== h) g.lineBetween(px - half, py - half, px + half, py - half);
+    }
+  }
+
+  // The sea: open water in the middle of each water cell, a grass shore on any side that touches land.
+  // Water past the border (and the map's edge) counts as water, so the sea runs out of the picture.
+  private drawWater(g: Phaser.GameObjects.Graphics, lay: Layout, water: Set<string>): void {
+    const wet = (x: number, y: number) => {
+      const key = cellKey(x, y);
+      if (water.has(key)) return true;
+      if (lay.cells.has(key)) return false;
+      const o = lay.outsideCells.get(key);
+      return !o || !o.tile || o.tile.terrain === 'water';
+    };
     const W = SEA;
     const art = canDraw(this, Object.values(W).map((f): Cell => ({ s: 'r', f, x: 0, y: 0 })));
     for (const key of water) {
-      const [dx, dy] = key.split(',').map(Number);
+      const [dx, dy] = parseKey(key);
       const left = dx * T - T / 2;
       const top = dy * T - T / 2;
       if (!art) {
@@ -884,54 +1008,64 @@ export class CityScene extends Phaser.Scene {
   // Can the dragged decoration land where it is now? (red outline when not; it snaps back on drop)
   private dropOk(m: { from: XY; to: XY }): boolean {
     const link = CityScene.link;
-    return !!link && moveReason(link.city, m.from[0], m.from[1], m.to[0], m.to[1]) === '';
+    return !!link && moveReason(link.state, link.city, m.from[0], m.from[1], m.to[0], m.to[1]) === '';
   }
 
-  // Your decorations, then the wild trees and flowers on any tile you haven't used, top row first.
-  // No wild scenery grows on the water.
-  private drawTown(c: Tile, r: number, seed: number, water: Set<string>): void {
+  // Your decorations, then the wild trees and flowers on any cell you haven't used, top row first.
+  // No wild scenery on the water, the Keep, amenity spots or right around them. Forest hexes grow thick woods,
+  // farm hexes stay mostly open, sand is sparse.
+  private drawTown(c: Tile, town: Town, seed: number): void {
     const g = this.scenery;
+    const lay = town.lay;
     const art = canDraw(this, [
       { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
       { s: 't', f: SCENERY.small, x: 0, y: 0 }, { s: 't', f: SCENERY.bush, x: 0, y: 0 },
     ]);
     const mv = this.moving;
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const k = decoAt(c, dx, dy);
-        if (k !== null) {
-          const lifted = !!mv && mv.from[0] === dx && mv.from[1] === dy;
-          if (!isPathKind(k)) this.deco(c, k, dx, dy, lifted ? 0.3 : 1);
-          continue; // anything you put here (a path or grass too) replaces the wild scenery
-        }
-        if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
-        if (water.has(tileKey(dx, dy))) continue;
-        if (reservedTile(dx, dy) || (Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) continue;
-        if (PLOT_TILES.some(([px, py]) => Math.abs(px - dx) + Math.abs(py - dy) === 1)) continue; // leave room around plots
-        const roll = hash01(dx, dy, seed, 10);
-        if (art) {
-          this.artScenery(dx, dy, seed, roll, Math.max(Math.abs(dx), Math.abs(dy)) === r);
-          continue;
-        }
-        if (roll > 0.42) continue;
-        const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
-        const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
-        if (roll < 0.2) this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
-        else if (roll < 0.33) this.bush(g, x, y);
-        else this.rock(g, x, y);
-        if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
+    const order = [...lay.cells.keys()].map(parseKey).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+    const nearLot = (x: number, y: number) =>
+      !!lotAt(lay, x, y) || !!lotAt(lay, x + 1, y) || !!lotAt(lay, x - 1, y) || !!lotAt(lay, x, y + 1) || !!lotAt(lay, x, y - 1);
+    for (const [dx, dy] of order) {
+      const key = cellKey(dx, dy);
+      const k = town.objs.get(key);
+      if (k !== undefined) {
+        const lifted = !!mv && mv.from[0] === dx && mv.from[1] === dy;
+        this.deco(c, k, dx, dy, lifted ? 0.3 : 1);
+        continue;
       }
+      if (town.ground.has(key)) continue; // anything you painted here (a path or grass) replaces the wild scenery
+      if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
+      const h = lay.cells.get(key)!;
+      if (h.terrain === 'water') continue;
+      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
+      const imp = h.tile.improvement;
+      const roll = hash01(dx, dy, seed, 10);
+      if (imp === 'farm' && roll > 0.06) continue; // fields stay open
+      if (h.terrain === 'sand' && roll > 0.18) continue;
+      const edge = !lay.cells.has(cellKey(dx + 1, dy)) || !lay.cells.has(cellKey(dx - 1, dy)) || !lay.cells.has(cellKey(dx, dy + 1)) || !lay.cells.has(cellKey(dx, dy - 1));
+      if (art) {
+        this.artScenery(dx, dy, seed, roll, edge, imp === 'forest', h.terrain);
+        continue;
+      }
+      if (roll > (imp === 'forest' ? 0.7 : 0.42)) continue;
+      const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
+      const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
+      if (roll < 0.2 || imp === 'forest') this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
+      else if (roll < 0.33) this.bush(g, x, y);
+      else this.rock(g, x, y);
+      if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
     }
-    // The decoration being dragged, on top of everything at the tile under your finger
+    // The decoration being dragged, on top of everything at the cell under your finger
     if (mv && (mv.to[0] !== mv.from[0] || mv.to[1] !== mv.from[1])) {
-      const k = decoAt(c, mv.from[0], mv.from[1]);
-      if (k !== null) this.deco(c, k, mv.to[0], mv.to[1], 0.85);
+      const k = town.objs.get(cellKey(mv.from[0], mv.from[1]));
+      if (k !== undefined) this.deco(c, k, mv.to[0], mv.to[1], 0.85);
     }
   }
 
-  // One decoration on tile (dx, dy)
+  // One decoration on cell (dx, dy)
   private deco(c: Tile, k: number, dx: number, dy: number, alpha: number): void {
     const id = DECO_ORDER[k];
+    if (!id) return;
     const left = dx * T - T / 2;
     const top = dy * T - T / 2;
     if (id === 'fence') {
@@ -953,7 +1087,7 @@ export class CityScene extends Phaser.Scene {
     this.txt(dx * T, dy * T, DECOS[id].icon, 22, { alpha });
   }
 
-  // A fence line through the middle of the tile, joined to the fences next to it
+  // A fence line through the middle of the cell, joined to the fences next to it
   private fence(c: Tile, dx: number, dy: number, left: number, top: number, alpha: number): boolean {
     const l = fenceLinks(c, dx, dy);
     const mid: number[] = [];
@@ -982,9 +1116,9 @@ export class CityScene extends Phaser.Scene {
     return true;
   }
 
-  // A painted path tile. Dirt joins its neighbors (and the castle and plots) so corners draw themselves.
+  // A painted path cell. Dirt joins its neighbors (and the castle and amenities) so corners draw themselves.
   // Grass draws nothing: the grass ground is already under it.
-  private path(g: Phaser.GameObjects.Graphics, c: Tile, dx: number, dy: number, k: number): void {
+  private path(g: Phaser.GameObjects.Graphics, s: GameState, c: Tile, dx: number, dy: number, k: number): void {
     if (isGrassKind(k)) return;
     const left = dx * T - T / 2;
     const top = dy * T - T / 2;
@@ -995,7 +1129,7 @@ export class CityScene extends Phaser.Scene {
       }
     } else {
       const P = PATH_DIRT;
-      const l = pathLinks(c, dx, dy);
+      const l = pathLinks(s, c, dx, dy);
       const corner = (a: boolean, b: boolean, diag: boolean, out: number, edgeA: number, edgeB: number, inner: number) =>
         !a && !b ? out : a && !b ? edgeA : !a && b ? edgeB : diag ? P.mid : inner;
       // (a = the vertical neighbor, b = the horizontal one)
@@ -1034,36 +1168,13 @@ export class CityScene extends Phaser.Scene {
     g.fillRect(x + 8, y - 17, 2, 16);
   }
 
-  // Fallback grass (no Kenney sheet): soft light and dark patches plus little tufts
-  private drawnGrass(g: Phaser.GameObjects.Graphics, r: number, seed: number): void {
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const a = hash01(dx, dy, seed, 1);
-        if (a > 0.55) continue;
-        const ox = (hash01(dx, dy, seed, 2) - 0.5) * T * 0.6;
-        const oy = (hash01(dx, dy, seed, 3) - 0.5) * T * 0.6;
-        g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
-        g.fillEllipse(dx * T + ox, dy * T + oy, T * (0.7 + a), T * (0.45 + a * 0.6));
-      }
-    }
-    g.fillStyle(0x4f8a39, 0.7);
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (reservedTile(dx, dy) || hash01(dx, dy, seed, 4) > 0.5) continue;
-        const x = dx * T + (hash01(dx, dy, seed, 5) - 0.5) * T * 0.7;
-        const y = dy * T + (hash01(dx, dy, seed, 6) - 0.5) * T * 0.7;
-        g.fillTriangle(x - 3, y + 2, x - 1, y - 4, x + 1, y + 2);
-        g.fillTriangle(x, y + 2, x + 2, y - 5, x + 4, y + 2);
-      }
-    }
-  }
-
-  // One tile of Kenney scenery. Along the edge: thick clumps of round trees, like the woods in Kenney's sample.
+  // One cell of Kenney scenery. Along the border: thick clumps of round trees, like the woods in Kenney's sample.
   // Inside: tall trees (a few in autumn colors), bushes, sprouts, mushrooms, bare patches and flowers.
-  private artScenery(dx: number, dy: number, seed: number, roll: number, edge: boolean): void {
+  // forest: a planted forest hex, mostly trees. Hills get rocks, sand only the odd bush.
+  private artScenery(dx: number, dy: number, seed: number, roll: number, edge: boolean, forest: boolean, t: PlotTerrain): void {
     const cx = dx * T;
     const cy = dy * T;
-    if (edge && roll < 0.45) {
+    if ((edge && roll < 0.3) || (forest && roll < 0.35)) {
       const autumn = hash01(dx, dy, seed, 17) < 0.15;
       for (let j = 0; j < 4; j++) {
         const across = j % 2 === 0 ? 3 : 2;
@@ -1075,7 +1186,7 @@ export class CityScene extends Phaser.Scene {
       }
       return;
     }
-    if (roll > 0.5) return;
+    if (roll > (forest ? 0.75 : 0.5)) return;
     const x = cx + (hash01(dx, dy, seed, 11) - 0.5) * ART;
     const y = cy + (hash01(dx, dy, seed, 12) - 0.5) * ART;
     const flower = (salt: number) => SCENERY.flowers[Math.floor(hash01(dx, dy, seed, salt) * SCENERY.flowers.length)];
@@ -1083,7 +1194,15 @@ export class CityScene extends Phaser.Scene {
       this.bob('obj', 't', autumn ? SCENERY.autumnTop : SCENERY.tallTop, px - 8, py - 24);
       this.bob('obj', 't', autumn ? SCENERY.autumnBottom : SCENERY.tallBottom, px - 8, py - 8);
     };
-    if (roll < 0.22) {
+    if (t === 'hills' && roll > 0.3) {
+      this.bob('obj', 'r', 614, x - 8, y - 8);
+      return;
+    }
+    if (t === 'sand') {
+      this.bob('obj', 't', SCENERY.bush, x - 8, y - 8);
+      return;
+    }
+    if (roll < 0.22 || forest) {
       tall(x, y, hash01(dx, dy, seed, 17) < 0.15);
       if (roll < 0.12) tall(x + 11, y + 8, false);
     } else if (roll < 0.3) {
@@ -1138,43 +1257,33 @@ export class CityScene extends Phaser.Scene {
     g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
-  // An open plot's ground (its map terrain): Kenney tiles if available, otherwise a colored square with a rim.
-  // Water plots draw nothing: they're part of the sea (drawWater) already.
-  private plotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
+  // An open amenity spot's ground: a dirt lot on grass, a rim on sand and hills. Water spots are part of the sea.
+  private lotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
     if (t === 'water') return;
-    const cells = PLOT_GROUND[t];
-    if (canDraw(this, cells)) {
-      this.cells('ground', cells, x - T / 2, y - T / 2, alpha);
-      if (t === 'hills') this.bob('ground', 'r', 614, x + 6, y + 6, alpha);
+    if (t === 'grass' && canDraw(this, PLOT_GROUND.grass)) {
+      this.cells('ground', PLOT_GROUND.grass, x - T / 2, y - T / 2, alpha);
       return;
     }
     const l = x - T / 2 + 3;
     const top = y - T / 2 + 3;
     const s = T - 6;
-    g.fillStyle(PLOT_COLOR[t], alpha);
-    g.fillRoundedRect(l, top, s, s, 7);
-    if (t === 'hills') {
-      g.fillStyle(0x6f6038, alpha);
-      g.fillEllipse(x - 10, y + 10, 14, 7);
-      g.fillEllipse(x + 11, y + 12, 12, 6);
-    } else if (t === 'sand') {
-      g.fillStyle(0xb9a46e, alpha);
-      g.fillCircle(x - 13, y - 12, 1.5);
-      g.fillCircle(x + 12, y - 9, 1.5);
-      g.fillCircle(x + 9, y + 10, 1.5);
+    if (t === 'grass') {
+      g.fillStyle(PLOT_COLOR.grass, alpha);
+      g.fillRoundedRect(l, top, s, s, 7);
     }
-    g.lineStyle(2, 0x3b2a17, 0.55 * alpha);
+    g.lineStyle(2, 0x3b2a17, 0.45 * alpha);
     g.strokeRoundedRect(l, top, s, s, 7);
   }
 
   private dots(g: Phaser.GameObjects.Graphics, x1: number, y1: number, x2: number, y2: number, color: number, alpha: number): void {
     const len = Math.hypot(x2 - x1, y2 - y1);
-    const start = T * 0.55; // from the plot's edge
-    const end = len - MARKER_R; // to the marker's edge
+    if (len < 1) return;
+    const start = T * 0.55; // from the building's edge
+    const end = len - T * 0.4; // to just short of the other hex's middle
     g.fillStyle(color, alpha);
-    for (let d = start; d < end; d += 8) {
+    for (let d = start; d < end; d += 10) {
       const f = d / len;
-      g.fillCircle(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, 1.5);
+      g.fillCircle(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, 2);
     }
   }
 
@@ -1198,7 +1307,7 @@ export class CityScene extends Phaser.Scene {
     return t;
   }
 
-  // The people on a tile: one by its left edge, one by its right (a lone guard stands on the right)
+  // The people on a cell: one by its left edge, one by its right (a lone guard stands on the right)
   private crowd(list: PxActor[], x: number, y: number, seed: number): void {
     list.forEach((a, k) => {
       const side = list.length === 1 || k === 1 ? 1 : -1;
