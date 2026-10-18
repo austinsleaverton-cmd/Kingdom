@@ -363,11 +363,23 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  // Scouts: A turns auto-explore on (it walks right away, then again every turn) or off
+  private toggleExplore(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit || unit.owner !== this.me || unit.type !== 'scout') return;
+    this.routePreview = null;
+    const on = !unit.explore;
+    if (!state.setExplore(unit, on).ok) return this.fail();
+    this.redraw();
+    if (on) this.autoAdvance(state.tileOf(unit));
+  }
+
   // Does this unit of yours still have a real move (or an attack) left this turn?
   // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
   // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
-    if (u.owner !== this.me || u.hold || u.goal || state.players[state.current].isAI) return false;
+    if (u.owner !== this.me || u.hold || u.goal || u.explore || state.players[state.current].isAI) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     if (state.unloadTiles(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
@@ -597,6 +609,7 @@ export class MapScene extends Phaser.Scene {
     return plan;
   }
 
+  // X: cancels a route preview, a route, or exploring
   private cancelRoute(): void {
     const state = this.state;
     const unit = this.selectedUnit;
@@ -952,8 +965,12 @@ export class MapScene extends Phaser.Scene {
         this.toggleHold();
         return;
       }
-      if (key === 'X' && unit && (unit.goal || this.routePreview)) {
+      if (key === 'X' && unit && (unit.goal || unit.explore || this.routePreview)) {
         this.cancelRoute();
+        return;
+      }
+      if (key === 'A' && unit && unit.type === 'scout') {
+        this.toggleExplore();
         return;
       }
       if (key === 'C' && unit && unit.type === 'settler') {
@@ -1171,6 +1188,7 @@ export class MapScene extends Phaser.Scene {
       status.lines!.push(aboard.length ? 'Green hexes = unload the next unit there.' : 'Land units board by moving onto it.');
     } else if (stats.scout) {
       status.lines!.push("Crosses closed borders at peace to look around. Hills, mountains and forests cost 1 less. Can't fight.");
+      if (unit.explore) status.lines!.push('Exploring: walks into the fog by itself every turn');
     } else {
       status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
     }
@@ -1191,19 +1209,34 @@ export class MapScene extends Phaser.Scene {
         lines.push(active ? `On a route: about ${turns(active.turns)} left` : 'On a route');
         lines.push('Moves by itself at the start of each turn. Stops if enemies show up.');
         if (unit.waited) lines.push(`Waiting for one of your units to get out of the way (${unit.waited})`);
+      } else if (unit.explore) {
+        lines.push('Exploring: picks its own way into the fog at the start of each turn.');
+        lines.push('Stops when enemy troops show up or nothing is left. Tap a far hex to send it somewhere instead.');
       } else {
         lines.push('Tap a far hex to plan a multi-turn route.');
       }
       if (unit.goal || pv) {
         buttons.push({ label: pv ? 'Cancel preview' : 'Cancel route', key: 'X', enabled: true, hint: pv ? 'clear the path' : 'stop here', onClick: () => this.cancelRoute() });
       }
-      sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : 'none', lines, buttons });
+      sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : unit.explore ? 'exploring' : 'none', lines, buttons });
     }
 
     const actions: PanelButton[] = [];
     if (unit.type === 'settler') {
       const c = state.foundCheck(unit);
       actions.push({ label: 'Found city here', key: 'C', enabled: c.ok, hint: c.ok ? 'uses the settler' : c.reason, onClick: () => this.foundCity() });
+    }
+    if (unit.type === 'scout' && unit.owner === this.me) {
+      // Exploring already: the button just stops it. Otherwise check there's somewhere left to go.
+      const c = unit.explore ? null : state.exploreCheck(unit);
+      actions.push({
+        label: unit.explore ? 'Stop exploring' : 'Explore',
+        key: 'A',
+        enabled: !c || c.ok,
+        hint: c ? (c.ok ? 'walks into the fog by itself' : c.reason) : 'exploring',
+        active: unit.explore === true,
+        onClick: () => this.toggleExplore(),
+      });
     }
     if (stats.military && unit.owner === this.me) {
       const c = state.pillageCheck(unit);
@@ -2096,13 +2129,20 @@ export class MapScene extends Phaser.Scene {
         badge.fillCircle(x - 9 + k * 6, y - 13, 2.5);
         badge.strokeCircle(x - 9 + k * 6, y - 13, 2.5);
       }
-      // Status badge for your units: cyan arrow = on a route, green dot = ready, gray = holding
+      // Status badge for your units: cyan arrow = on a route, cyan eye = exploring, green dot = ready, gray = holding
       if (u.owner === this.me && u.goal) {
         badge.fillStyle(0x22d3ee, 1);
         badge.lineStyle(1, 0x000000, 0.7);
         const tri = [new Phaser.Math.Vector2(x + 6, y - 15), new Phaser.Math.Vector2(x + 15, y - 10), new Phaser.Math.Vector2(x + 6, y - 5)];
         badge.fillPoints(tri, true);
         badge.strokePoints(tri, true);
+      } else if (u.owner === this.me && u.explore) {
+        badge.fillStyle(0x22d3ee, 1);
+        badge.lineStyle(1, 0x000000, 0.7);
+        badge.fillEllipse(x + 10, y - 10, 12, 8);
+        badge.strokeEllipse(x + 10, y - 10, 12, 8);
+        badge.fillStyle(0x0f172a, 1);
+        badge.fillCircle(x + 10, y - 10, 2.2);
       } else if (u.owner === this.me && !state.players[state.current].isAI && (u.moves > 0 || !u.acted)) {
         badge.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
         badge.lineStyle(1, 0x000000, 0.6);
