@@ -4,7 +4,7 @@ export type Terrain = 'water' | 'sand' | 'grass' | 'hills' | 'mountain';
 export type PlayerId = number; // 0 is always the human player
 export type Improvement = 'farm' | 'mine' | 'pasture' | 'forest' | 'fishery';
 export type Building = 'market' | 'temple' | 'granary' | 'park' | 'arena' | 'harbor' | 'barracks' | 'workshop' | 'mill';
-// City View: what a plot around the Keep is like (mountains count as hills)
+// City View: what a hex of the city's territory is like to build on (mountains count as hills)
 export type PlotTerrain = 'water' | 'sand' | 'grass' | 'hills';
 
 export interface Tile {
@@ -32,15 +32,17 @@ export interface Tile {
   project: Building | null; // amenity under construction
   projectTurns: number; // turns until it's done
   palisade?: number; // palisade HP on this tile (missing or 0 = none). Blocks the owner's enemies
-  // City View (city only, empty elsewhere). Plot i faces world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE).
-  plots: PlotTerrain[]; // terrain of each plot, snapshotted when the city is founded
-  placed: (Building | null)[]; // the amenity standing on each plot
-  projectPlot: number | null; // plot reserved for the amenity under construction
-  // City Builder (city only): highest level ever reached, drives the ground grid size (see world/grid.ts)
-  gridLevel?: number;
-  // City Builder decorations and painted paths: [dx, dy, kind] relative to the Keep, kind = index into
+  // City View (city only, empty elsewhere): amenities stand on the hexes of the city's own territory
+  // (see world/grid.ts and docs/CITY_BUILDER.md). Each finished amenity -> the map tile index of its hex,
+  // or -1 while it waits for a free hex (it still works while it waits). One amenity per hex.
+  sites: Partial<Record<Building, number>>;
+  projectSite: number | null; // hex (map tile index) reserved for the amenity under construction
+  // City Builder decorations and painted paths: [x, y, kind] in ground cells from the Keep, kind = index into
   // DECO_ORDER (see world/deco.ts). They stay with the city, even when it's captured.
   deco?: [number, number, number][];
+  // Decorations and paths that had no room after the city's land changed (or an old save moved to the
+  // territory layout). Kept, never thrown away: decorations come back by themselves once there's room.
+  decoStash?: number[];
 }
 
 export const MAX_HEIGHT = 5;
@@ -60,9 +62,10 @@ export const LEVEL_HP = 10; // extra max hp per level above 1
 // Population: a city's level (Village ... Metropolis) comes from how many people live there
 export const LEVEL_POP = [1, 3, 5, 8, 12]; // people needed for level 1..5
 
-// City View: 6 plots around the Keep, opened as the city grows (Village ... Metropolis)
-export const PLOT_COUNT = 6;
-export const PLOTS_BY_LEVEL = [2, 3, 4, 5, 6];
+// How many amenities a city can have at each size (Village ... Metropolis). More land gives them more places
+// to go, not more of them: the territory rework kept the old plot limits on purpose.
+export const MAX_AMENITIES = 6;
+export const AMENITY_SLOTS = [2, 3, 4, 5, 6];
 
 export function levelFromPop(pop: number): number {
   let lvl = 1;
@@ -90,8 +93,8 @@ export interface BuildingInfo {
   food: number;
   culture: number;
   minPop: number;
-  coastal?: boolean; // only cities next to water can build it
-  plot?: 'water' | 'hills' | 'grass'; // needs a plot of this kind (no value = any land plot)
+  coastal?: boolean; // only cities with water (next to them or in their land) can build it
+  plot?: 'water' | 'hills' | 'grass'; // needs a hex of this kind in the city's land (no value = any land hex)
   stone?: number; // stone per turn
   note: string;
 }
@@ -107,7 +110,7 @@ export const BUILDINGS: Record<Building, BuildingInfo> = {
   arena: { name: 'Arena', icon: '\u{1F3DF}', cost: 70, turns: 5, happy: 3, gold: 0, food: 0, culture: 1, minPop: 5, note: '+3 happy, +1 culture' },
   harbor: {
     name: 'Harbor', icon: '\u2693', cost: 40, turns: 3, happy: 0, gold: 1, food: 0, culture: 0, minPop: 2, coastal: true, plot: 'water',
-    note: 'builds boats, +1 food per fishery, +1 gold (water plot)',
+    note: 'builds boats, +1 food per fishery, +1 gold (water hex)',
   },
   barracks: {
     name: 'Barracks', icon: '\u2694\uFE0F', cost: 35, turns: 3, happy: 0, gold: 0, food: 0, culture: 0, minPop: 2,
@@ -115,11 +118,11 @@ export const BUILDINGS: Record<Building, BuildingInfo> = {
   },
   workshop: {
     name: 'Workshop', icon: '\u{1F528}', cost: 40, turns: 3, happy: 0, gold: 0, food: 0, culture: 0, minPop: 3, plot: 'hills', stone: 1,
-    note: '+1 stone, builds catapults (hills plot)',
+    note: '+1 stone, builds catapults (hills hex)',
   },
   mill: {
     name: 'Mill', icon: '\u2699\uFE0F', cost: 30, turns: 2, happy: 0, gold: 0, food: 0, culture: 0, minPop: 2, plot: 'grass',
-    note: `+1 food per worked farm, up to ${MILL_FARMS} (grass plot)`,
+    note: `+1 food per worked farm, up to ${MILL_FARMS} (grass hex)`,
   },
 };
 
@@ -143,6 +146,11 @@ export function terrainFromHeight(height: number): Terrain {
   return 'mountain';
 }
 
+// What a hex counts as for building in the City View (mountains count as hills)
+export function plotTerrainOf(t: Terrain): PlotTerrain {
+  return t === 'mountain' ? 'hills' : t;
+}
+
 export function isLand(tile: Tile): boolean {
   return tile.terrain !== 'water';
 }
@@ -160,6 +168,7 @@ export function improvementFits(tile: Tile, imp: Improvement): boolean {
 export const IMPROVEMENT_NAME: Record<Improvement, string> = { farm: 'farm', mine: 'mine', pasture: 'pasture', forest: 'forest', fishery: 'fishery' };
 
 // Drop anything that no longer fits after the terrain changed.
+// Amenities standing on a hex keep standing when its terrain changes (a Harbor stays a Harbor).
 export function fixAfterTerrainChange(tile: Tile): void {
   if (tile.improvement && !improvementFits(tile, tile.improvement)) tile.improvement = null;
   if (tile.terrain === 'water') {
@@ -180,11 +189,10 @@ export function fixAfterTerrainChange(tile: Tile): void {
     tile.buildings = [];
     tile.project = null;
     tile.projectTurns = 0;
-    tile.plots = [];
-    tile.placed = [];
-    tile.projectPlot = null;
-    tile.gridLevel = 0;
+    tile.sites = {};
+    tile.projectSite = null;
     tile.deco = [];
+    tile.decoStash = [];
   }
 }
 
@@ -230,10 +238,9 @@ export function makeTile(col: number, row: number, height: number): Tile {
     buildings: [],
     project: null,
     projectTurns: 0,
-    plots: [],
-    placed: [],
-    projectPlot: null,
-    gridLevel: 0,
+    sites: {},
+    projectSite: null,
     deco: [],
+    decoStash: [],
   };
 }
