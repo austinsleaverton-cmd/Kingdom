@@ -124,8 +124,10 @@ export function generateMap(seed: number, width = MAP_WIDTH, height = MAP_HEIGHT
       if (n < 0.4) h = 0;
       else if (n < 0.46) h = 1;
       else if (n < 0.58) h = 2;
-      else if (n < 0.68) h = 3;
-      else if (n < 0.76) h = 4;
+      // More usable flat land, with hills below the rare highest peaks.
+      // Only new maps change; saved terrain and builder terraforming keep their existing rules.
+      else if (n < 0.72) h = 3;
+      else if (n < 0.86) h = 4;
       else h = 5;
       tiles.push(makeTile(col, row, h));
     }
