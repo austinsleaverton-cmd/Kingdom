@@ -193,7 +193,7 @@ export const DECOR_ART: Record<DecoId, Cell[]> = {
   beehive: [c('t', 94, 1, 1)],
   hay: [c('t', 93, 1, 1)],
   barrel: [c('t', 130, 1, 1)],
-  cart: [c('t', 57, 3.1, 2)],
+  cart: [c('t', 57, 1, 1)],
   campfire: [c('r', 470, 1, 1)],
   grass: [],
 };
