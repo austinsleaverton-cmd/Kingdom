@@ -1,22 +1,23 @@
-// City View: the inside of one of your cities. The ground grid, plots and people are drawn by the Phaser
-// city screen (CityScene.ts, see docs/CITY_BUILDER.md). This file is the DOM around it: the header and the side
-// panel with plot info, bonuses and the build list, and the decorate tray (task 5) with the beauty meter (task 7).
+// City View: the inside of one of your cities. The city's territory, its amenities and people are drawn by the
+// Phaser city screen (CityScene.ts, see docs/CITY_BUILDER.md). This file is the DOM around it: the header and the
+// side panel with hex info, bonuses and the build list, and the decorate tray (task 5) with the beauty meter (task 7).
 // It reads the world and only changes it through GameState methods and the decoration actions in world/deco.ts.
-// Plot i sits in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), so it matches the map. See docs/CITY_VIEW.md.
+// Amenities stand on the hexes of the city's own land: tap a hex to see what fits there and what it would earn.
 import type Phaser from 'phaser';
 import type { Check, GameState } from '../world/game';
 import {
-  ADJACENCY, BEAUTY_MAX, BEAUTY_STEP, FACING_BONUS, TERRAIN_BONUS, beautyBonus, beautyOn, bestPlot, bonusAmount, cityBeauty, cityBonus,
-  facingTile, facingWork, openPlots, plotBonus, plotFits, plotNeighbors, plotTerrain,
+  ADJACENCY, BEAUTY_MAX, BEAUTY_STEP, TERRAIN_BONUS, WORK_BONUS, amenitiesUsed, amenitySlots, beautyBonus, beautyOn, bestSite, bonusAmount,
+  cityBeauty, cityBonus, hasSiteFor, nearbyWork, siteBonus, siteFits,
 } from '../world/city';
-import type { Outside } from '../world/city';
+import type { Outside, Sites } from '../world/city';
 import {
-  DECOS, DECO_ORDER, clearDeco, decoAt, decoCount, decoCost, decoKind, decoList, decorateReason, isPathKind, moveDeco, paintPath,
-  placeDeco, removeDeco, restoreDeco, snapDeco, trayCheck,
+  DECOS, DECO_ORDER, clearDeco, decoAt, decoCount, decoCost, decoKind, decoList, decorateReason, discardStoredPaths, isPathKind, moveDeco,
+  paintPath, placeDeco, removeDeco, restoreDeco, snapDeco, stashCounts, trayCheck,
 } from '../world/deco';
 import type { DecoEntry, DecoGroup, DecoId } from '../world/deco';
-import { gridSize, plotLevel } from '../world/grid';
-import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
+import { cityLayout, hexDirection, hexLabel } from '../world/grid';
+import type { CityHex } from '../world/grid';
+import { AMENITY_SLOTS, BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, MAX_AMENITIES, MAX_WALLS, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, PlotTerrain, Tile } from '../world/tile';
 import { CITY_SCENE, CityScene } from './CityScene';
 import type { CityPick } from './CityScene';
@@ -32,7 +33,7 @@ export interface CityOpenOptions {
 }
 
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
-const OUT_NAME: Record<Outside, string> = { farm: 'a farm', pasture: 'a pasture', mine: 'a mine', forest: 'a forest', fishery: 'a fishery', road: 'a road' };
+const WORK_NAME: Record<Outside, string> = { farm: 'a farm', pasture: 'a pasture', mine: 'a mine', forest: 'a forest', fishery: 'a fishery', road: 'a road' };
 const MAP_SCENE = 'map';
 const Z = 20; // the city screen's layer: anything below it (the HUD) is hidden while a city is open
 const UNDO_MAX = 30;
@@ -130,16 +131,15 @@ export function showToast(msg: string, ms = 4500): void {
   }, ms);
 }
 
-// Every bonus building b on plot i would bring: its own, plus what it gives the neighbors
-export function placementNotes(city: Tile, i: number, b: Building): string[] {
-  const out = [...plotBonus(city, i, b).notes];
-  const after = city.placed.slice();
-  after[i] = b;
-  for (const k of plotNeighbors(i)) {
-    const nb = city.placed[k];
-    if (!nb) continue;
-    const before = new Set(plotBonus(city, k, nb).notes);
-    for (const n of plotBonus(city, k, nb, after).notes) if (!before.has(n)) out.push(n);
+// Every bonus building b on hex `index` would bring: its own, plus what it gives the amenities next to it
+export function placementNotes(state: GameState, city: Tile, index: number, b: Building): string[] {
+  const out = [...siteBonus(state, city, index, b).notes];
+  const after: Sites = { ...city.sites, [b]: index };
+  for (const nb of BUILDING_ORDER) {
+    const at = city.sites[nb];
+    if (nb === b || at === undefined || at < 0) continue;
+    const before = new Set(siteBonus(state, city, at, nb).notes);
+    for (const n of siteBonus(state, city, at, nb, after).notes) if (!before.has(n)) out.push(n);
   }
   return out;
 }
@@ -149,10 +149,16 @@ export function shortNotes(notes: string[]): string {
   return notes.map((n) => n.split(':')[0]).join(', ');
 }
 
-// Does the city have any plot this amenity can stand on? (no water plot = no Harbor, no hills = no Workshop)
-export function hasPlotFor(city: Tile, b: Building): boolean {
-  const need = BUILDINGS[b].plot;
-  return need ? city.plots.includes(need) : city.plots.some((t) => t !== 'water');
+// "the grass hex 1 east of the Keep", for a map tile index of one of the city's hexes
+export function siteName(state: GameState, city: Tile, index: number): string {
+  const h = cityLayout(state, city).byIndex.get(index);
+  return h ? hexLabel(h) : 'a hex still to be found';
+}
+
+// "grass, 1 east": the short form, for buttons
+export function siteShort(state: GameState, city: Tile, index: number): string {
+  const h = cityLayout(state, city).byIndex.get(index);
+  return h ? `${h.terrain}, ${h.dist} ${hexDirection(h.q, h.r)}` : 'no free hex yet';
 }
 
 function esc(s: string): string {
@@ -165,21 +171,18 @@ function bonusRules(): string {
   return [
     ...TERRAIN_BONUS.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${amount(r)}`),
     ...ADJACENCY.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${amount(r)}`),
-    ...FACING_BONUS.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${bonusAmount(r)}`),
+    ...WORK_BONUS.map((r) => `${BUILDINGS[r.b].name} ${r.note} ${bonusAmount(r)}`),
   ].join(' \u00b7 ');
 }
 
-// "Looks out on a mine (your land): a Workshop here gets +1 stone"
-function facingLine(c: Tile, i: number): string {
-  const t = facingTile(c, i);
-  if (!t) return '';
-  const work = facingWork(c, i);
-  const theirs = t.owner !== null && t.owner !== c.owner;
-  const what = work ? OUT_NAME[work] : t.improvement ? OUT_NAME[t.improvement] : t.road ? 'a road' : `bare ${t.terrain}`;
-  const where = t.owner === null ? 'unclaimed' : theirs ? "someone else's land" : 'your land';
-  const fans = FACING_BONUS.filter((r) => r.imp === work || (r.imp === 'road' && work !== null && t.road));
-  const tip = fans.length ? `: ${fans.map((r) => `${BUILDINGS[r.b].name} ${bonusAmount(r)}`).join(', ')}` : t.owner === c.owner ? '' : ' (no bonus until it\'s yours)';
-  return `<p>Faces ${what} on ${where}${tip}.</p>`;
+// "Farm here (it keeps working). Next to: a mine, a road (your land): a Workshop here gets +1 stone"
+function hexLine(state: GameState, c: Tile, h: CityHex): string {
+  const here = h.tile.improvement ? `${WORK_NAME[h.tile.improvement].replace(/^an? /, '')} on this hex (it keeps working). ` : '';
+  const work = nearbyWork(state, c, h);
+  const kinds = [...new Set(work.map((w) => w.work))];
+  if (!kinds.length) return `<p>${esc(here)}Nothing worked on or next to this hex yet: farms, mines, roads and the like nearby earn bonuses.</p>`;
+  const fans = WORK_BONUS.filter((r) => kinds.includes(r.imp)).map((r) => `${BUILDINGS[r.b].name} ${bonusAmount(r)}`);
+  return `<p>${esc(here)}On or next to it: ${kinds.map((k) => WORK_NAME[k]).join(', ')}${fans.length ? ` (${esc(fans.join(', '))} here)` : ''}.</p>`;
 }
 
 // A tray picture: the decoration's Kenney tiles as CSS crops of the tilesheets (emoji if it has none)
@@ -247,10 +250,8 @@ export class CityView {
     this.city = city;
     this.me = me;
     this.handlers = handlers;
-    // Start on the first open, empty plot (or the Keep when there isn't one)
-    const open = openPlots(city, state.isSimple(me));
-    const free = Array.from({ length: open }, (_, i) => i).find((i) => !city.placed[i] && city.projectPlot !== i);
-    this.sel = free ?? 'keep';
+    state.settleCity(city); // anything waiting for room (an amenity, stored decorations) moves in first
+    this.sel = 'keep';
     this.root.style.display = 'block';
     if (!again) {
       this.hideOthers();
@@ -372,17 +373,17 @@ export class CityView {
     const s = this.state!;
     const c = this.city!;
     const simple = s.isSimple(this.me);
-    const open = openPlots(c, simple);
-    const used = c.placed.filter(Boolean).length + (c.projectPlot !== null ? 1 : 0);
+    const slots = amenitySlots(c, simple);
+    const used = amenitiesUsed(c);
     const lvl = cityLevel(c);
-    const nextLvl = PLOTS_BY_LEVEL.findIndex((n) => n > open);
-    const more = !simple && open < PLOT_COUNT && nextLvl >= 0 ? ` (${PLOTS_BY_LEVEL[nextLvl]} at ${LEVEL_NAMES[nextLvl]})` : '';
+    const more = !simple && slots < MAX_AMENITIES && lvl < AMENITY_SLOTS.length ? ` (${AMENITY_SLOTS[lvl]} at ${LEVEL_NAMES[lvl]})` : '';
     const gold = s.isFree(this.me) ? 'free building' : `${s.players[this.me].gold} gold`;
-    const size = gridSize(c);
+    const hexes = cityLayout(s, c).hexes.length;
     const canDeco = !decorateReason(s, c, this.me);
     if (!canDeco) this.decorating = false;
+    if (typeof this.sel === 'number' && !cityLayout(s, c).byIndex.has(this.sel)) this.sel = 'keep'; // that hex left the city
 
-    // Keep the panel and tray scroll positions across the redraw (tapping tiles redraws a lot)
+    // Keep the panel and tray scroll positions across the redraw (tapping cells redraws a lot)
     const side = this.root.querySelector<HTMLElement>('.k-city-side');
     const sideTop = side?.scrollTop ?? 0;
     const trays = Array.from(this.root.querySelectorAll<HTMLElement>('.k-deco-tray')).map((t) => t.scrollLeft);
@@ -392,13 +393,13 @@ export class CityView {
       : '';
     const head =
       `<div class="k-city-head"><div><h2>${esc(s.cityName(c))}</h2>` +
-      `<div class="k-city-sub">${LEVEL_NAMES[lvl - 1]} \u00b7 ${c.pop} people \u00b7 ${used}/${open} plots used${more} \u00b7 ${size}x${size} \u00b7 ${gold}</div></div>` +
+      `<div class="k-city-sub">${LEVEL_NAMES[lvl - 1]} \u00b7 ${c.pop} people \u00b7 ${used}/${slots} amenities${more} \u00b7 ${hexes} hex${hexes === 1 ? '' : 'es'} of land \u00b7 ${gold}</div></div>` +
       `<div class="k-city-btns">${decoBtn}<button type="button" data-close><kbd>Esc</kbd>Back to map</button></div></div>`;
     const rules =
       `<details class="k-city-rules"${this.rulesOpen ? ' open' : ''}><summary>Placement bonuses</summary>` +
       `\u2605 = best spot for it \u00b7 ${esc(bonusRules())}</details>` +
-      `<div class="k-city-hint">Tap a plot to pick it. Drag to look around, pinch or scroll to zoom. Keep zooming out to go back to the map.${canDeco ? ' Decorate to plant trees, paint paths and more.' : ''}</div>`;
-    const body = this.decorating ? this.decoPanel(s, c) : `${this.sidePanel(s, c, simple, open)}${rules}`;
+      `<div class="k-city-hint">Tap a hex of your land to pick it. The town grows as your borders do. Drag to look around, pinch or scroll to zoom. Keep zooming out to go back to the map.${canDeco ? ' Decorate to plant trees, paint paths and more.' : ''}</div>`;
+    const body = this.decorating ? this.decoPanel(s, c) : `${this.sidePanel(s, c, simple)}${rules}`;
     this.root.innerHTML = `${head}<div class="k-city-side">${body}</div>`;
 
     // Desktop: the panel starts under the header, whatever height it ended up
@@ -433,51 +434,55 @@ export class CityView {
     act('[data-deco-remove]', () => this.removePicked());
     act('[data-deco-undo]', () => this.undo());
     act('[data-deco-clear]', () => this.clearAll());
+    act('[data-deco-discard]', () => this.discardPaths());
     CityScene.refresh();
   }
 
-  private sidePanel(s: GameState, c: Tile, simple: boolean, open: number): string {
+  private sidePanel(s: GameState, c: Tile, simple: boolean): string {
     if (this.sel === 'keep') {
-      const bonus = cityBonus(c).notes;
+      const bonus = cityBonus(s, c).notes;
+      const waiting = BUILDING_ORDER.filter((b) => c.sites[b] === -1);
       return (
         `<h3>\u{1F3F0} Keep</h3>` +
         `<p>Health ${c.hp}/${cityMaxHp(c)} \u00b7 walls ${c.walls}/${MAX_WALLS}${c.walls ? ` (${c.shield}/${shieldMax(c)})` : ''}. Walls are built from the city panel (Defense).</p>` +
-        `<p>Tap a plot to build on it. Neighbors matter, and so does the map hex each plot faces (the small hexes past the edge of the town).</p>` +
+        `<p>Tap a hex of the city's land to build on it. What's worked on and around a hex matters, and so do the amenities next to it. Farms, mines and roads keep working under an amenity.</p>` +
+        (waiting.length
+          ? `<p><b>Waiting for a free hex:</b> ${waiting.map((b) => `${BUILDINGS[b].icon} ${esc(BUILDINGS[b].name)}`).join(', ')}. They still work, and move in as soon as the city has room.</p>`
+          : '') +
         `<h3>Bonuses in this city</h3>` +
-        (bonus.length ? `<p class="k-good">${bonus.map(esc).join('<br>')}</p>` : `<p>None yet. Put amenities next to the right neighbors to earn extra.</p>`)
+        (bonus.length ? `<p class="k-good">${bonus.map(esc).join('<br>')}</p>` : `<p>None yet. Build amenities next to the right neighbors to earn extra.</p>`)
       );
     }
-    const i = this.sel;
-    const t = plotTerrain(c, i);
-    const b = c.placed[i];
+    const index = this.sel;
+    const h = cityLayout(s, c).byIndex.get(index);
+    if (!h) return '';
+    const label = hexLabel(h);
+    const title = label.charAt(0).toUpperCase() + label.slice(1);
+    const b = BUILDING_ORDER.find((x) => c.sites[x] === index);
     if (b) {
       const info = BUILDINGS[b];
-      const notes = plotBonus(c, i, b).notes;
+      const notes = siteBonus(s, c, index, b).notes;
       return (
-        `<h3>${info.icon} ${esc(info.name)}</h3><p>${esc(info.note)} \u00b7 ${PLOT_NAME[t]} plot ${i + 1}</p>` +
-        facingLine(c, i) +
+        `<h3>${info.icon} ${esc(info.name)}</h3><p>${esc(info.note)} \u00b7 ${esc(title)}</p>` +
+        hexLine(s, c, h) +
         (notes.length ? `<p class="k-good">${notes.map(esc).join('<br>')}</p>` : `<p>No placement bonus here.</p>`)
       );
     }
-    if (c.projectPlot === i && c.project) {
+    if (c.projectSite === index && c.project) {
       const info = BUILDINGS[c.project];
-      const notes = placementNotes(c, i, c.project);
+      const notes = placementNotes(s, c, index, c.project);
       return (
         `<h3>${info.icon} ${esc(info.name)} (building)</h3><p>${c.projectTurns} turn${c.projectTurns === 1 ? '' : 's'} left \u00b7 ${esc(info.note)}</p>` +
         (notes.length ? `<p class="k-good">When done: ${notes.map(esc).join('; ')}</p>` : '')
       );
     }
-    if (i >= open) {
-      const k = plotLevel(i);
-      return `<h3>\u{1F512} ${PLOT_NAME[t]} plot</h3><p>Opens when ${esc(s.cityName(c))} grows into a ${LEVEL_NAMES[k]} (${LEVEL_POP[k]} people).</p>${facingLine(c, i)}`;
-    }
-    // Empty plot: everything not built yet that this city has a plot for, the ones that fit here first.
+    // Empty hex: everything not built yet that this city has a hex for, the ones that fit here first.
     // While the city is busy the list stays readable (dimmed, with its bonuses) and the reason shows once on top.
     const busy = s.busyWith(c);
-    const rows = BUILDING_ORDER.filter((x) => !c.buildings.includes(x) && c.project !== x && hasPlotFor(c, x)).map((x) => {
-      const check = s.buildCheck(c, x, this.me, i);
-      const fits = plotFits(c, i, x, simple);
-      return { b: x, check, fits, notes: fits ? placementNotes(c, i, x) : [], best: fits && bestPlot(c, x, simple) === i };
+    const rows = BUILDING_ORDER.filter((x) => !c.buildings.includes(x) && c.project !== x && hasSiteFor(s, c, x)).map((x) => {
+      const check = s.buildCheck(c, x, this.me, index);
+      const fits = siteFits(s, c, index, x, simple);
+      return { b: x, check, fits, notes: fits ? placementNotes(s, c, index, x) : [], best: fits && bestSite(s, c, x, simple) === index };
     });
     rows.sort((a, z) => Number(z.check.ok) - Number(a.check.ok) || Number(z.fits) - Number(a.fits));
     const list = rows
@@ -495,9 +500,9 @@ export class CityView {
       })
       .join('');
     return (
-      `<h3>${PLOT_NAME[t]} plot ${i + 1}</h3>` +
-      facingLine(c, i) +
-      `<p>${busy ? `<b>Busy ${esc(busy)}</b>: one project at a time. Here's what each would earn on this plot.` : 'Pick what to build here.'}</p>` +
+      `<h3>${PLOT_NAME[h.terrain]} hex</h3><p>${esc(title)}</p>` +
+      hexLine(s, c, h) +
+      `<p>${busy ? `<b>Busy ${esc(busy)}</b>: one project at a time. Here's what each would earn on this hex.` : 'Pick what to build here.'}</p>` +
       `<div class="k-city-list">${list || '<p>Everything is built.</p>'}</div>`
     );
   }
@@ -554,6 +559,19 @@ export class CityView {
     );
   }
 
+  // Things put away because the city's land changed and there was no room for them
+  private stashLine(c: Tile): string {
+    const st = stashCounts(c);
+    if (!st.deco && !st.paths) return '';
+    const parts: string[] = [];
+    if (st.deco) parts.push(`${st.deco} decoration${st.deco === 1 ? '' : 's'} stored: they come back by themselves when there's room`);
+    if (st.paths) parts.push(`${st.paths} path piece${st.paths === 1 ? '' : 's'} stored from an old layout`);
+    return (
+      `<p>${esc(parts.join('. '))}.</p>` +
+      (st.paths ? `<div class="k-deco-tools"><button type="button" data-deco-discard>Discard stored paths</button></div>` : '')
+    );
+  }
+
   private decoPanel(s: GameState, c: Tile): string {
     const me = this.me;
     const small = decoCost(s, me, decoKind('tree'));
@@ -563,12 +581,12 @@ export class CityView {
     const beautyCounts = beautyOn(s.options.difficulty, s.isFree(me));
     const t = this.tool;
     const hint = t === null
-      ? 'Pick something below, then tap open ground to place it. Tap a decoration to select it, drag it to move it.'
+      ? 'Pick something below, then tap open ground on your land to place it. Tap a decoration to select it, drag it to move it.'
       : t === 'erase'
         ? 'Tap or drag over things to remove them (no gold back, Undo brings them back).'
         : isPathKind(t)
-          ? 'Drag to paint a path, a tap paints one tile. Start on a painted tile to clear instead. Two fingers (or right-drag) move the view.'
-          : `Tap open tiles to place ${esc(DECOS[DECO_ORDER[t]].name)}s. Tap it again (or Esc) to stop.`;
+          ? 'Drag to paint a path, a tap paints one cell. Start on a painted cell to clear instead. Two fingers (or right-drag) move the view.'
+          : `Tap open ground to place ${esc(DECOS[DECO_ORDER[t]].name)}s. Tap it again (or Esc) to stop.`;
     const pk = this.picked;
     const pkKind = pk ? decoAt(c, pk[0], pk[1]) : null;
     const picked = pk && pkKind !== null
@@ -604,6 +622,7 @@ export class CityView {
       `<h3>\u{1F333} Decorate</h3>` +
       this.beautyMeter(s, c) +
       `<p>${price} ${decoCount(c)} decoration${decoCount(c) === 1 ? '' : 's'} here.</p>` +
+      this.stashLine(c) +
       `<p>${hint}</p>` +
       picked +
       tools +
@@ -660,12 +679,12 @@ export class CityView {
         return;
       }
     }
-    // Select (or unselect) the decoration on this tile
+    // Select (or unselect) the decoration on this cell
     this.picked = here !== null && !isPathKind(here) && !same ? [dx, dy] : null;
     this.render();
   }
 
-  // A stroke of path painting (or erasing). The first tile decides: start on the same path and it clears.
+  // A stroke of path painting (or erasing). The first cell decides: start on the same path and it clears.
   private decoPaint(dx: number, dy: number, first: boolean): void {
     const s = this.state;
     const c = this.city;
@@ -691,7 +710,7 @@ export class CityView {
       else if (isPathKind(here)) r = paintPath(s, c, dx, dy, here, false, this.me);
       if (r?.ok && this.picked && this.picked[0] === dx && this.picked[1] === dy) this.picked = null;
     } else if (st.kind >= 0) {
-      r = paintPath(s, c, dx, dy, st.kind, true, this.me); // blocked tiles are just skipped
+      r = paintPath(s, c, dx, dy, st.kind, true, this.me); // blocked cells are just skipped
     }
     if (r?.ok) CityScene.refresh();
   }
@@ -739,6 +758,15 @@ export class CityView {
     }
     this.picked = null;
     this.decoAct(() => clearDeco(s, c, this.me));
+  }
+
+  // The player chose to throw away path pieces stored from an old layout (not undoable, so it's a button of its own)
+  private discardPaths(): void {
+    const s = this.state;
+    const c = this.city;
+    if (!s || !c || !discardStoredPaths(s, c, this.me).ok) return;
+    this.handlers?.onChange();
+    this.render();
   }
 
   // Undo the last decorating action of this visit (gold spent on it comes back, nothing more)

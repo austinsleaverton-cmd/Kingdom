@@ -1,98 +1,213 @@
-// City Builder ground grid (docs/CITY_BUILDER.md). Pure logic, no Phaser imports.
-// Tiles are (dx, dy) offsets from the Keep, each from -r to r. Everything is stored relative to the Keep,
-// so growing the grid never moves anything.
-import { PLOTS_BY_LEVEL, cityLevel } from './tile';
-import type { Tile } from './tile';
+// City View ground (docs/CITY_BUILDER.md): the city's own territory, drawn as detailed ground. Pure logic, no Phaser.
+// Every map hex the city owns (its land and water, see GameState.cityLand) becomes a patch of small square ground
+// cells. Cells are (x, y) offsets from the Keep. The hex at axial offset (q, r) from the city is centred on cell
+// (HEX_W * q + HEX_W / 2 * r, HEX_H * r), and every cell belongs to the hex whose centre is nearest, so the patches
+// tile without gaps, every hex gets exactly HEX_CELLS cells and the town keeps the shape it has on the map.
+// Cells keep the size the old square town used, so anything saved relative to the Keep keeps its meaning.
+import type { GameState } from './game';
+import { plotTerrainOf } from './tile';
+import type { PlotTerrain, Tile } from './tile';
 
-// Grid side by city level 1..5 (Village 7x7, Town 9x9, City and up 11x11). Odd sizes keep the Keep dead center.
-export const GRID_SIZES = [7, 9, 11, 11, 11];
+export const HEX_W = 8; // cells between the centres of two hexes side by side
+export const HEX_H = 7; // cells between the centres of two rows of hexes
+export const HEX_CELLS = HEX_W * HEX_H; // ground cells per hex
 
-// Plot i sits in world direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE), one tile each
-export const PLOT_TILES: readonly (readonly [number, number])[] = [[2, 0], [1, -2], [-1, -2], [-2, 0], [-1, 2], [1, 2]];
+export type XY = [number, number];
 
-// Highest level the city has ever reached: the grid follows this, so it never shrinks when a city loses a level
-export function gridLevel(city: Tile): number {
-  return Math.max(city.gridLevel ?? 0, cityLevel(city));
+// Map direction i (0 E, 1 NE, 2 NW, 3 W, 4 SW, 5 SE) as an axial step, same order as WorldMap.neighborAt
+export const AXIAL_DIRS: readonly XY[] = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+
+export function cellKey(x: number, y: number): string {
+  return `${x},${y}`;
 }
 
-// Remember the current level if it's a new high (called on every save)
-export function syncGrid(city: Tile): void {
-  if (city.city) city.gridLevel = gridLevel(city);
+// Axial hex coordinates of a map tile (the map is pointy-top "odd-r")
+export function axial(t: Tile): XY {
+  return [t.col - (t.row - (t.row & 1)) / 2, t.row];
 }
 
-export function gridSize(city: Tile): number {
-  return GRID_SIZES[Math.min(GRID_SIZES.length, gridLevel(city)) - 1];
+export function hexSteps(q: number, r: number): number {
+  return (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
 }
 
-export function gridRadius(city: Tile): number {
-  return (gridSize(city) - 1) / 2;
+// The ground cell in the middle of the hex (q, r) from the Keep
+export function hexCenter(q: number, r: number): XY {
+  return [HEX_W * q + (HEX_W / 2) * r, HEX_H * r];
 }
 
-// Which plot stands on tile (dx, dy), if any
-export function plotAtTile(dx: number, dy: number): number | null {
-  const i = PLOT_TILES.findIndex(([x, y]) => x === dx && y === dy);
-  return i < 0 ? null : i;
-}
-
-// The Keep and the plots: nothing else can go there. Every other tile is open ground for decorations and
-// the paths you paint yourself (task 5). There are no built-in roads.
-export function reservedTile(dx: number, dy: number): boolean {
-  if (dx === 0 && dy === 0) return true;
-  return plotAtTile(dx, dy) !== null;
-}
-
-// The city level (index into LEVEL_NAMES) at which plot i opens
-export function plotLevel(i: number): number {
-  const k = PLOTS_BY_LEVEL.findIndex((n) => n > i);
-  return k < 0 ? PLOTS_BY_LEVEL.length - 1 : k;
-}
-
-// ---------- coast ----------
-// Coastal cities: the plots that face water on the map are part of the sea, and the water runs out from them
-// to the edge of the town. Every other ground tile belongs to the plot direction it's closest to (with a little
-// wobble so the shore isn't a ruler line), and is water when that plot faces water. The Keep, the ring of
-// tiles right around it and the land plots always stay dry. Tiles are keyed "dx,dy".
-
-const PLOT_ANGLE = PLOT_TILES.map(([x, y]) => Math.atan2(y, x));
-const WOBBLE = 0.35; // radians the shore can lean either way (about 10 degrees)
-
-export function tileKey(dx: number, dy: number): string {
-  return `${dx},${dy}`;
-}
-
-export function waterTiles(city: Tile): Set<string> {
-  const out = new Set<string>();
-  const wet = PLOT_TILES.map((_, i) => city.plots?.[i] === 'water');
-  if (!wet.some(Boolean)) return out;
-  const r = gridRadius(city);
-  const seed = city.col * 92821 + city.row * 68917;
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      const plot = plotAtTile(dx, dy);
-      if (plot !== null) {
-        if (wet[plot]) out.add(tileKey(dx, dy));
-        continue;
+// Which hex (q, r) a ground cell belongs to: the nearest hex centre, ties to the upper, then the left one.
+// The tie rule only compares hexes with each other, so every hex gets the same pattern of cells.
+export function cellHex(x: number, y: number): XY {
+  const r0 = Math.round(y / HEX_H);
+  let best: XY = [0, 0];
+  let bd = Infinity;
+  for (let r = r0 - 1; r <= r0 + 1; r++) {
+    const q0 = Math.round((x - (HEX_W / 2) * r) / HEX_W);
+    for (let q = q0 - 1; q <= q0 + 1; q++) {
+      const [cx, cy] = hexCenter(q, r);
+      const d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      if (d < bd || (d === bd && (r < best[1] || (r === best[1] && q < best[0])))) {
+        bd = d;
+        best = [q, r];
       }
-      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || Math.hypot(dx, dy) < 2) continue; // dry ground around the Keep
-      const a = Math.atan2(dy, dx) + (wobble(dx, dy, seed) - 0.5) * 2 * WOBBLE;
-      let best = 0;
-      let bestD = Infinity;
-      for (let i = 0; i < PLOT_ANGLE.length; i++) {
-        const d = Math.abs(Math.atan2(Math.sin(a - PLOT_ANGLE[i]), Math.cos(a - PLOT_ANGLE[i])));
-        if (d < bestD) {
-          bestD = d;
-          best = i;
-        }
-      }
-      if (wet[best]) out.add(tileKey(dx, dy));
+    }
+  }
+  return best;
+}
+
+// The cells of hex (0, 0) as offsets from its centre; every other hex is the same pattern moved over
+const HEX_OFFSETS: readonly XY[] = (() => {
+  const out: XY[] = [];
+  for (let y = -HEX_H; y <= HEX_H; y++) {
+    for (let x = -HEX_W; x <= HEX_W; x++) {
+      const [q, r] = cellHex(x, y);
+      if (q === 0 && r === 0) out.push([x, y]);
     }
   }
   return out;
+})();
+
+export function hexCells(q: number, r: number): XY[] {
+  const [cx, cy] = hexCenter(q, r);
+  return HEX_OFFSETS.map(([x, y]): XY => [cx + x, cy + y]);
 }
 
-// Same 0..1 number for the same tile of the same city every time
-function wobble(dx: number, dy: number, seed: number): number {
-  let h = Math.imul(dx + 101, 73856093) ^ Math.imul(dy + 211, 19349663) ^ Math.imul(41, 83492791) ^ seed;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+// One hex of the city's territory
+export interface CityHex {
+  tile: Tile;
+  index: number; // map tile index
+  q: number; // axial offset from the city
+  r: number;
+  terrain: PlotTerrain; // what it counts as for building (mountains count as hills)
+  center: XY; // its middle ground cell
+  keep: boolean; // the city's own hex (the Keep stands here, no amenity)
+  dist: number; // hexes from the Keep
+}
+
+// A hex just past the border: neighbouring land of another city, a rival kingdom, open land, the sea, or the map edge
+export interface OutsideHex {
+  tile: Tile | null; // null = off the map
+  q: number;
+  r: number;
+  center: XY;
+}
+
+export interface Layout {
+  city: Tile;
+  hexes: CityHex[]; // the Keep's hex first, then nearest first
+  byIndex: Map<number, CityHex>;
+  cells: Map<string, CityHex>; // every ground cell the city owns
+  outside: OutsideHex[];
+  outsideCells: Map<string, OutsideHex>;
+  bounds: { minX: number; maxX: number; minY: number; maxY: number }; // in cells, the outside ring included
+}
+
+// Map tile at axial offset (q, r) from the city, or null off the map
+export function tileAt(state: GameState, city: Tile, q: number, r: number): Tile | null {
+  const [cq, cr] = axial(city);
+  const row = cr + r;
+  const col = cq + q + (row - (row & 1)) / 2;
+  return state.map.get(col, row);
+}
+
+// Layouts are cached per game and cleared by GameState.invalidate(), which runs whenever land, cities or terrain change
+const CACHE = new WeakMap<GameState, Map<number, Layout>>();
+
+export function clearLayouts(state: GameState): void {
+  CACHE.delete(state);
+}
+
+export function cityLayout(state: GameState, city: Tile): Layout {
+  let m = CACHE.get(state);
+  if (!m) {
+    m = new Map();
+    CACHE.set(state, m);
+  }
+  const i = state.tileIndex(city);
+  const hit = m.get(i);
+  if (hit && hit.city === city) return hit;
+  const lay = buildLayout(state, city);
+  m.set(i, lay);
+  return lay;
+}
+
+function buildLayout(state: GameState, city: Tile): Layout {
+  const [cq, cr] = axial(city);
+  const land = city.owner === null ? [] : state.cityLand(city);
+  if (!land.includes(city)) land.unshift(city);
+  const hexes: CityHex[] = land.map((t) => {
+    const [aq, ar] = axial(t);
+    const q = aq - cq;
+    const r = ar - cr;
+    return { tile: t, index: state.tileIndex(t), q, r, terrain: plotTerrainOf(t.terrain), center: hexCenter(q, r), keep: t === city, dist: hexSteps(q, r) };
+  });
+  hexes.sort((a, b) => Number(b.keep) - Number(a.keep) || a.dist - b.dist || a.r - b.r || a.q - b.q);
+  const byIndex = new Map<number, CityHex>();
+  const cells = new Map<string, CityHex>();
+  const owned = new Set<string>();
+  let minX = 0;
+  let maxX = 0;
+  let minY = 0;
+  let maxY = 0;
+  const grow = (x: number, y: number) => {
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  };
+  for (const h of hexes) {
+    byIndex.set(h.index, h);
+    owned.add(`${h.q},${h.r}`);
+    for (const [x, y] of hexCells(h.q, h.r)) {
+      cells.set(cellKey(x, y), h);
+      grow(x, y);
+    }
+  }
+  const outside: OutsideHex[] = [];
+  const outsideCells = new Map<string, OutsideHex>();
+  const seen = new Set<string>();
+  for (const h of hexes) {
+    for (const [dq, dr] of AXIAL_DIRS) {
+      const q = h.q + dq;
+      const r = h.r + dr;
+      const key = `${q},${r}`;
+      if (owned.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      const o: OutsideHex = { tile: tileAt(state, city, q, r), q, r, center: hexCenter(q, r) };
+      outside.push(o);
+      for (const [x, y] of hexCells(q, r)) {
+        outsideCells.set(cellKey(x, y), o);
+        grow(x, y);
+      }
+    }
+  }
+  return { city, hexes, byIndex, cells, outside, outsideCells, bounds: { minX, maxX, minY, maxY } };
+}
+
+export function hexAt(lay: Layout, x: number, y: number): CityHex | null {
+  return lay.cells.get(cellKey(x, y)) ?? null;
+}
+
+export function inTerritory(lay: Layout, x: number, y: number): boolean {
+  return lay.cells.has(cellKey(x, y));
+}
+
+// Ground cells of the city that are water (its sea and lakes)
+export function waterCell(lay: Layout, x: number, y: number): boolean {
+  return hexAt(lay, x, y)?.terrain === 'water';
+}
+
+// "northeast": which way a hex lies from the Keep, by where it sits on screen
+const COMPASS = ['east', 'southeast', 'south', 'southwest', 'west', 'northwest', 'north', 'northeast'];
+
+export function hexDirection(q: number, r: number): string {
+  const [x, y] = hexCenter(q, r);
+  const k = Math.round(Math.atan2(y, x) / (Math.PI / 4)); // cells are close enough to square for this
+  return COMPASS[(k + 8) % 8];
+}
+
+// "the hills hex 2 northeast of the Keep"
+export function hexLabel(h: Pick<CityHex, 'q' | 'r' | 'terrain' | 'keep' | 'dist'>): string {
+  if (h.keep) return "the Keep's hex";
+  return `the ${h.terrain} hex ${h.dist} ${hexDirection(h.q, h.r)} of the Keep`;
 }

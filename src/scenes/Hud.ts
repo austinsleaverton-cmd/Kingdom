@@ -851,7 +851,7 @@ function cityIncome(state: GameState, c: Tile): number {
   let gold = c.capital ? CAPITAL_INCOME : CITY_INCOME;
   gold += cityLevel(c) - 1;
   for (const b of c.buildings) gold += BUILDINGS[b].gold;
-  gold += cityBonus(c).gold;
+  gold += cityBonus(state, c).gold;
   if (state.mood(c) === 'happy') gold += 1;
   return gold;
 }

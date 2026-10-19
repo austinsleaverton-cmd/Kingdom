@@ -2,14 +2,15 @@
 import Phaser from 'phaser';
 import { GameState, MIN_WAR_TURNS, MOOD_FACE, PEACE_RETRY, TRUCE_TURNS } from '../world/game';
 import type { AttackPreview, Check, GameOptions, RoutePlan } from '../world/game';
-import { describePlacement, openPlots } from '../world/city';
+import { amenitiesUsed, amenitySlots, describePlacement, hasSiteFor } from '../world/city';
+import type { Sites } from '../world/city';
 import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, Improvement, Terrain, Tile } from '../world/tile';
 import { JOBS, NAVY, PALISADE_HP, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
-import { CityView, hasPlotFor, placementNotes, shortNotes, showToast } from './CityView';
+import { CityView, placementNotes, shortNotes, showToast, siteName, siteShort } from './CityView';
 import { ART, KEEP_ART, TINY, canDraw, crispCityArt, loadCityArt } from './cityArt';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
@@ -57,7 +58,7 @@ export class MapScene extends Phaser.Scene {
   private state: GameState | null = null;
   private hud!: Hud;
   private menu!: Menu;
-  private cityView!: CityView; // full-screen look inside a city (plots around the Keep)
+  private cityView!: CityView; // full-screen look inside a city (its own land, hex by hex)
   private pendingToasts: string[] = []; // hot-seat: news held back until the next person starts their turn
   private mode: Mode = 'select';
   private hovered: Tile | null = null;
@@ -302,8 +303,8 @@ export class MapScene extends Phaser.Scene {
       return;
     }
     this.hud.hideIdle();
-    // Remember what stands on every plot, so finished amenities can be announced after the turn
-    const before = state.cities().map((c) => [c, c.placed.slice()] as const);
+    // Remember where every amenity stands, so finished ones can be announced after the turn
+    const before = state.cities().map((c) => [c, { ...c.sites }] as const);
     state.endTurn();
     const news = this.finishedNews(state, before);
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
@@ -319,13 +320,16 @@ export class MapScene extends Phaser.Scene {
   }
 
   // Amenities that finished for whoever's turn it is now, with where they went and why
-  private finishedNews(state: GameState, before: (readonly [Tile, (Building | null)[]])[]): string[] {
+  private finishedNews(state: GameState, before: (readonly [Tile, Sites])[]): string[] {
     const out: string[] = [];
     for (const [c, old] of before) {
       if (c.owner !== state.current || state.players[state.current].isAI) continue;
-      c.placed.forEach((b, i) => {
-        if (b && old[i] !== b) out.push(`${BUILDINGS[b].icon} ${state.cityName(c)} finished its ${BUILDINGS[b].name} on ${describePlacement(c, i, b)}`);
-      });
+      for (const b of BUILDING_ORDER) {
+        const at = c.sites[b];
+        if (at === undefined || old[b] !== undefined) continue;
+        const where = at >= 0 ? `on ${describePlacement(state, c, at, b)}` : '(waiting for a free hex, it already works)';
+        out.push(`${BUILDINGS[b].icon} ${state.cityName(c)} finished its ${BUILDINGS[b].name} ${where}`);
+      }
     }
     return out;
   }
@@ -680,21 +684,21 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  // Auto-place: the amenity goes to the best open plot. Say where, so the player learns the bonuses.
+  // Auto-place: the amenity goes to the best free hex of the city's land. Say where, so the player learns the bonuses.
   private build(city: Tile, b: Building): void {
     const state = this.state;
     if (!state) return;
     if (!state.startBuilding(city, b, this.me).ok) return this.fail();
     const info = BUILDINGS[b];
-    const at = city.projectPlot;
+    const at = city.projectSite;
     if (at !== null) {
-      const notes = placementNotes(city, at, b);
-      showToast(`${info.icon} ${info.name} going up on plot ${at + 1}${notes.length ? ` (${notes.join('; ')})` : ''}, ready in ${info.turns} turns`);
+      const notes = placementNotes(state, city, at, b);
+      showToast(`${info.icon} ${info.name} going up on ${siteName(state, city, at)}${notes.length ? ` (${notes.join('; ')})` : ''}, ready in ${info.turns} turns`);
     }
     this.redraw();
   }
 
-  // The City View: the city's plots around the Keep, pick a spot and build.
+  // The City View: the city's own land, pick a hex and build.
   // Every way in (double-tap, O, Open city, zooming in) eases the camera onto the city and fades into the city
   // screen, so it feels like zooming from the kingdom down into the town. Reduced motion: straight in.
   private openCity(city: Tile): void {
@@ -1122,7 +1126,11 @@ export class MapScene extends Phaser.Scene {
       ];
       const home = state.homeCity(tile);
       if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]}, ${tile.pop} people ${MOOD_FACE[state.mood(tile)]})`);
-      else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
+      else if (home && tile.owner !== null) {
+        const ti = state.tileIndex(tile);
+        const b = BUILDING_ORDER.find((k) => home.sites[k] === ti);
+        lines.push(`Land of ${state.cityName(home)}${b ? ` · ${BUILDINGS[b].icon} ${BUILDINGS[b].name}` : ''}`);
+      }
       if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}${tile.wallTurns ? ` · walls going up (${tile.wallTurns})` : ''}`);
       if (tile.city && tile.owner !== null && tile.owner !== this.me && !state.sandbox) {
         lines.push(state.atWar(this.me, tile.owner) ? `At war with ${state.players[tile.owner].name}` : `At peace with ${state.players[tile.owner].name}`);
@@ -1304,7 +1312,7 @@ export class MapScene extends Phaser.Scene {
     const growLines = [
       `${city.pop} people \u00b7 eat ${Math.floor(city.pop / 2)} food \u00b7 ${need > 0 ? note || `+${rate.toFixed(1)} growth/turn` : 'full size'}`,
     ];
-    if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)}, +1 plot)`);
+    if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)}, room for 1 more amenity)`);
     sections.push({
       heading: 'People',
       summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`,
@@ -1348,33 +1356,33 @@ export class MapScene extends Phaser.Scene {
       ],
     });
 
-    // Amenities: one project at a time, shared with training troops. Each one stands on a plot around the Keep:
-    // these buttons auto-place it on the best open plot, Open city picks the spot by hand.
-    const plotsOpen = openPlots(city, state.isSimple(this.me));
-    const plotsUsed = city.placed.filter(Boolean).length + (city.projectPlot !== null ? 1 : 0);
+    // Amenities: one project at a time, shared with training troops. Each one stands on a hex of the city's land:
+    // these buttons auto-place it on the best free hex, Open city picks the spot by hand.
+    const slots = amenitySlots(city, state.isSimple(this.me));
+    const used = amenitiesUsed(city);
     const buildButtons: PanelButton[] = [
       {
         label: '\u{1F3F0} Open city',
         key: 'O',
         enabled: true,
-        hint: `${plotsUsed}/${plotsOpen} plots used \u00b7 pick spots`,
+        hint: `${used}/${slots} amenities \u00b7 pick spots`,
         onClick: () => this.openCity(city),
       },
     ];
     const built = BUILDING_ORDER.filter((b) => city.buildings.includes(b));
     for (const b of BUILDING_ORDER) {
       if (city.buildings.includes(b)) continue;
-      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // inland: no Harbor
-      if (!hasPlotFor(city, b)) continue; // no plot it can stand on (no hills: no Workshop)
+      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // no water: no Harbor
+      if (!hasSiteFor(state, city, b)) continue; // no hex it can stand on (no hills: no Workshop)
       const info = BUILDINGS[b];
       const c = state.buildCheck(city, b, this.me);
       const doing = city.project === b;
       let where = '';
-      if (doing && city.projectPlot !== null) where = ` \u00b7 plot ${city.projectPlot + 1}`;
+      if (doing && city.projectSite !== null) where = ` \u00b7 ${siteShort(state, city, city.projectSite)}`;
       else if (c.ok) {
-        const at = state.autoPlot(city, b, this.me);
-        const bonus = at !== null ? shortNotes(placementNotes(city, at, b)) : '';
-        where = at !== null ? ` \u00b7 plot ${at + 1}${bonus ? ` ${bonus}` : ''}` : '';
+        const at = state.autoSite(city, b, this.me);
+        const bonus = at !== null ? shortNotes(placementNotes(state, city, at, b)) : '';
+        where = at !== null ? ` \u00b7 ${siteShort(state, city, at)}${bonus ? ` ${bonus}` : ''}` : '';
       }
       buildButtons.push({
         label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`,
@@ -1386,10 +1394,10 @@ export class MapScene extends Phaser.Scene {
     }
     sections.push({
       heading: 'Amenities',
-      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${plotsUsed}/${plotsOpen} plots`,
+      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${used}/${slots}`,
       lines: [
         built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
-        'Buttons pick the best plot for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.',
+        "Buttons pick the best hex of the city's land for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.",
       ],
       buttons: buildButtons,
       grid: true,
@@ -1429,7 +1437,7 @@ export class MapScene extends Phaser.Scene {
       summary: `${state.cityLand(city).length} tiles${open > 0 ? ` \u00b7 ${open} open` : ''}`,
       lines: claiming
         ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
-        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'}`],
+        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'} \u00b7 every tile is also room in the city`],
       buttons: [
         {
           label: claiming ? 'Done claiming' : 'Claim land',
@@ -1881,7 +1889,6 @@ export class MapScene extends Phaser.Scene {
     const unit = this.selectedUnit;
 
     if (this.reach.size > 0 && unit) {
-      // Dim everything the unit can't reach so the lit hexes pop.
       const home = state.tileOf(unit);
       g.fillStyle(0x000000, 0.4);
       for (const t of state.map.tiles) {
@@ -1904,7 +1911,6 @@ export class MapScene extends Phaser.Scene {
         }
       }
     }
-    // Where a transport can drop off its passengers: green
     for (const t of this.unloadAt) {
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE - 3);
@@ -1917,7 +1923,6 @@ export class MapScene extends Phaser.Scene {
     }
     if (this.targets.size > 0 && unit) {
       if (this.reach.size === 0) {
-        // No moves left but can still attack: dim the rest so targets stand out
         const home = state.tileOf(unit);
         g.fillStyle(0x000000, 0.4);
         for (const t of state.map.tiles) {
@@ -1933,7 +1938,6 @@ export class MapScene extends Phaser.Scene {
         g.fillPoints(pts, true);
         g.lineStyle(3, 0xf87171, 1);
         g.strokePoints(pts, true);
-        // crosshair
         g.lineStyle(2, 0xffffff, 0.9);
         g.strokeCircle(x, y - 14, 5);
         g.lineBetween(x - 8, y - 14, x + 8, y - 14);
@@ -1941,7 +1945,6 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
       const city = this.claimCity;
       const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, this.me))));
       g.fillStyle(0x000000, 0.55);
@@ -1950,9 +1953,8 @@ export class MapScene extends Phaser.Scene {
         const { x, y } = tileCenter(t);
         g.fillPoints(hexCorners(x, y, SIZE), true);
       }
-      // Inside the zone: green + price = buy now; darkened = not reachable yet (or water / someone else's)
       for (const t of zone) {
-        if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue; // already this city's
+        if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue;
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
         const c = state.check('claim', t, this.me, city);
@@ -1967,7 +1969,6 @@ export class MapScene extends Phaser.Scene {
           g.fillPoints(pts, true);
         }
       }
-      // Yellow line around the edge of the zone
       g.lineStyle(3, 0xfacc15, 0.95);
       for (const t of zone) {
         const { x, y } = tileCenter(t);
@@ -1975,9 +1976,7 @@ export class MapScene extends Phaser.Scene {
         for (let i = 0; i < 6; i++) {
           const n = state.map.neighborAt(t, EDGE_TO_DIR[i]);
           if (n && zone.has(n)) continue;
-          const a = pts[i];
-          const b = pts[(i + 1) % 6];
-          g.lineBetween(a.x, a.y, b.x, b.y);
+          g.lineBetween(pts[i].x, pts[i].y, pts[(i + 1) % 6].x, pts[(i + 1) % 6].y);
         }
       }
     }
