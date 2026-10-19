@@ -70,9 +70,9 @@ export function hasFrame(scene: Phaser.Scene, s: Sheet, f: number): boolean {
   return scene.textures.exists(key) && scene.textures.get(key).has(String(f));
 }
 
-// True when every cell of a picture is available
+// True when a nonempty picture is available. Empty art deliberately uses the drawn fallback.
 export function canDraw(scene: Phaser.Scene, cells: readonly Cell[]): boolean {
-  return cells.every((k) => hasFrame(scene, k.s, k.f));
+  return cells.length > 0 && cells.every((k) => hasFrame(scene, k.s, k.f));
 }
 
 // ---------- ground ----------
@@ -80,13 +80,15 @@ export function canDraw(scene: Phaser.Scene, cells: readonly Cell[]): boolean {
 // Open grass: plain, tufts, and (rarely) the two little flowers
 export const GRASS = { plain: 0, tufts: 1, flowers: 2 };
 
-// An empty plot's ground, 3x3 art tiles (row by row): a dirt building lot, a pond, sand or rocky hills.
-// Hills cover entire hexes: repeat Tiny Town's borderless dirt center, not RPG frame 6, whose dark
-// edges turn the landscape into a dense grid. CityScene adds scattered rocks separately; selection
-// outlines, territory borders and the decorate-mode grid remain independent of the terrain art.
+// Ground interiors must be borderless: never repeat a rim or shoreline across an entire hex.
+// Grass uses GRASS above; its plot below is only the small building lot. Hills repeat the dirt
+// center with scattered rocks added by CityScene. Sand deliberately uses the continuous sand-color
+// fallback, plus the existing sparse scenery, rather than RPG frame 8's dark tile borders.
+// CityScene joins water cells and applies shore tiles only where water touches land.
+// Selection outlines, territory borders and the decorate-mode grid are separate from terrain art.
 export const PLOT_GROUND: Record<PlotTerrain, Cell[]> = {
   grass: rows('t', [[12, 13, 14], [24, 25, 26], [36, 37, 38]]),
-  sand: rows('r', [[8, 8, 8], [8, 8, 8], [8, 8, 8]]),
+  sand: [],
   hills: rows('t', [[25, 25, 25], [25, 25, 25], [25, 25, 25]]),
   water: rows('r', [[2, 3, 4], [59, 60, 61], [116, 117, 118]]),
 };
