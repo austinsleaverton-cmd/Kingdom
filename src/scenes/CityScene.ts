@@ -73,8 +73,10 @@ const INTRO_ZOOM = 2.2;
 const INTRO_MS = 340;
 const OUTRO_MS = 240;
 
-// The sea: the RPG pack's pond tiles as a 9-slice (grass shore on the outer edges and corners, open water in the middle)
-const SEA = { tl: 2, t: 3, tr: 4, l: 59, mid: 60, r: 61, bl: 116, b: 117, br: 118 };
+// Water is a continuous fill, not repeated pond sprites (their baked-in borders made a dark grid).
+const SEA_COLOR = 0x62bec9;
+const SEA_SHALLOWS = 0x83ced4;
+const SEA_FOAM = 0xc3e8df;
 
 const GRASS_COLOR = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
@@ -970,8 +972,9 @@ export class CityScene extends Phaser.Scene {
     }
   }
 
-  // The sea: open water in the middle of each water cell, a grass shore on any side that touches land.
-  // Water past the border (and the map's edge) counts as water, so the sea runs out of the picture.
+  // Continuous water with sparse, seeded ripples. No pond sprites: even their center frame has a rim.
+  // Fill complete horizontal runs first so shared cell edges cannot form a tile grid. Shallows and foam
+  // are drawn only against actual land, never between water cells or along the open sea/map edge.
   private drawWater(g: Phaser.GameObjects.Graphics, lay: Layout, water: Set<string>): void {
     const wet = (x: number, y: number) => {
       const key = cellKey(x, y);
@@ -980,28 +983,63 @@ export class CityScene extends Phaser.Scene {
       const o = lay.outsideCells.get(key);
       return !o || !o.tile || o.tile.terrain === 'water';
     };
-    const W = SEA;
-    const art = canDraw(this, Object.values(W).map((f): Cell => ({ s: 'r', f, x: 0, y: 0 })));
+    const rows = new Map<number, number[]>();
+    for (const key of water) {
+      const [x, y] = parseKey(key);
+      const row = rows.get(y);
+      if (row) row.push(x);
+      else rows.set(y, [x]);
+    }
+    g.fillStyle(SEA_COLOR, 1);
+    for (const [y, xs] of rows) {
+      xs.sort((a, b) => a - b);
+      let start = xs[0];
+      let end = start;
+      const fill = () => g.fillRect(start * T - T / 2, y * T - T / 2, (end - start + 1) * T, T);
+      for (let i = 1; i < xs.length; i++) {
+        if (xs[i] === end + 1) end = xs[i];
+        else {
+          fill();
+          start = end = xs[i];
+        }
+      }
+      fill();
+    }
+    const c = CityScene.link?.city;
+    const seed = c ? c.col * 92821 + c.row * 68917 : 0;
     for (const key of water) {
       const [dx, dy] = parseKey(key);
       const left = dx * T - T / 2;
       const top = dy * T - T / 2;
-      if (!art) {
-        g.fillStyle(PLOT_COLOR.water, 1);
-        g.fillRect(left, top, T, T);
-        continue;
+      // A few short highlights, jittered inside the cell rather than aligned along its edges.
+      for (let k = 0; k < 3; k++) {
+        if (hash01(dx, dy, seed, 70 + k) > 0.4) continue;
+        const x = left + 8 + Math.floor(hash01(dx, dy, seed, 80 + k) * (T - 20));
+        const y = top + 8 + Math.floor(hash01(dx, dy, seed, 90 + k) * (T - 16));
+        const w = 2 + Math.floor(hash01(dx, dy, seed, 100 + k) * 4);
+        g.fillStyle(SEA_FOAM, 0.28);
+        g.fillRect(x, y, w, 1);
       }
-      // true = land on that side
       const n = !wet(dx, dy - 1);
       const s = !wet(dx, dy + 1);
       const w = !wet(dx - 1, dy);
       const e = !wet(dx + 1, dy);
-      const grid = [
-        [n && w ? W.tl : n ? W.t : w ? W.l : W.mid, n ? W.t : W.mid, n && e ? W.tr : n ? W.t : e ? W.r : W.mid],
-        [w ? W.l : W.mid, W.mid, e ? W.r : W.mid],
-        [s && w ? W.bl : s ? W.b : w ? W.l : W.mid, s ? W.b : W.mid, s && e ? W.br : s ? W.b : e ? W.r : W.mid],
-      ];
-      grid.forEach((row, j) => row.forEach((f, i) => this.bob('ground', 'r', f, left + i * ART, top + j * ART)));
+      g.fillStyle(SEA_SHALLOWS, 1);
+      if (n) g.fillRect(left, top, T, 5);
+      if (s) g.fillRect(left, top + T - 5, T, 5);
+      if (w) g.fillRect(left, top, 5, T);
+      if (e) g.fillRect(left + T - 5, top, 5, T);
+      g.fillStyle(SEA_FOAM, 0.65);
+      if (n) g.fillRect(left, top, T, 1);
+      if (s) g.fillRect(left, top + T - 1, T, 1);
+      if (w) g.fillRect(left, top, 1, T);
+      if (e) g.fillRect(left + T - 1, top, 1, T);
+      // Concave shoreline corners: a diagonal land cell touches this water cell at one point.
+      g.fillStyle(SEA_SHALLOWS, 1);
+      if (!n && !w && !wet(dx - 1, dy - 1)) g.fillRect(left, top, 3, 3);
+      if (!n && !e && !wet(dx + 1, dy - 1)) g.fillRect(left + T - 3, top, 3, 3);
+      if (!s && !w && !wet(dx - 1, dy + 1)) g.fillRect(left, top + T - 3, 3, 3);
+      if (!s && !e && !wet(dx + 1, dy + 1)) g.fillRect(left + T - 3, top + T - 3, 3, 3);
     }
   }
 
