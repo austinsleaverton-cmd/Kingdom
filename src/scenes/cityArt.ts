@@ -80,11 +80,14 @@ export function canDraw(scene: Phaser.Scene, cells: readonly Cell[]): boolean {
 // Open grass: plain, tufts, and (rarely) the two little flowers
 export const GRASS = { plain: 0, tufts: 1, flowers: 2 };
 
-// An empty plot's ground, 3x3 art tiles (row by row): a dirt building lot, a pond, sand or rocky hills
+// An empty plot's ground, 3x3 art tiles (row by row): a dirt building lot, a pond, sand or rocky hills.
+// Hills cover entire hexes: repeat Tiny Town's borderless dirt center, not RPG frame 6, whose dark
+// edges turn the landscape into a dense grid. CityScene adds scattered rocks separately; selection
+// outlines, territory borders and the decorate-mode grid remain independent of the terrain art.
 export const PLOT_GROUND: Record<PlotTerrain, Cell[]> = {
   grass: rows('t', [[12, 13, 14], [24, 25, 26], [36, 37, 38]]),
   sand: rows('r', [[8, 8, 8], [8, 8, 8], [8, 8, 8]]),
-  hills: rows('r', [[6, 6, 6], [6, 6, 6], [6, 6, 6]]),
+  hills: rows('t', [[25, 25, 25], [25, 25, 25], [25, 25, 25]]),
   water: rows('r', [[2, 3, 4], [59, 60, 61], [116, 117, 118]]),
 };
 export const HILL_ROCK = c('r', 614); // pebbles
@@ -130,8 +133,8 @@ export const BUILDING_ART: Record<Building, BuildingPic> = {
   mill: { cells: rows('t', [[52, 53, 54], [64, 65, 66], [84, 86, 87]]), props: [c('t', 93, 3.1, 1), c('t', 116, 3.1, 2)] }, // hay, pitchfork
   granary: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [72, 86, 75]]), props: [c('t', 94, 3.1, 1), c('t', 94, 3.1, 2)] }, // beehives
   market: { cells: rows('t', [[52, 55, 54], [64, 65, 66], [88, 90, 91]]), props: [c('t', 130, 3.1, 1), c('t', 57, 3.1, 2)] }, // barrel, cart
-  harbor: { cells: rows('t', [[48, 49, 50], [60, 63, 62], [72, 86, 75]]), props: [c('t', 131, 3.1, 2)] }, // water barrel
-  temple: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [88, 90, 91]]), props: [c('r', 544, 3.3, 1.5), c('r', 542, 3.1, 2.2)] }, // flowers
+  harbor: { cells: rows('t', [[48, 49, 50], [60, 63, 62], [72, 86, 87]]), props: [c('t', 131, 3.1, 2)] }, // water barrel
+  temple: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [88, 91, 91]]), props: [c('r', 544, 3.3, 1.5), c('r', 542, 3.1, 2.2)] }, // flowers
   park: {
     cells: [
       c('t', 4, 0, -0.8), c('t', 16, 0, 0.2), c('t', 4, 1.6, -0.6), c('t', 16, 1.6, 0.4),
