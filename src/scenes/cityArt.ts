@@ -134,7 +134,7 @@ export const BUILDING_ART: Record<Building, BuildingPic> = {
   granary: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [72, 86, 75]]), props: [c('t', 94, 3.1, 1), c('t', 94, 3.1, 2)] }, // beehives
   market: { cells: rows('t', [[52, 55, 54], [64, 65, 66], [88, 90, 91]]), props: [c('t', 130, 3.1, 1), c('t', 57, 3.1, 2)] }, // barrel, cart
   harbor: { cells: rows('t', [[48, 49, 50], [60, 63, 62], [72, 86, 87]]), props: [c('t', 131, 3.1, 2)] }, // water barrel
-  temple: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [88, 91, 91]]), props: [c('r', 544, 3.3, 1.5), c('r', 542, 3.1, 2.2)] }, // flowers
+  temple: { cells: rows('t', [[52, 53, 54], [64, 67, 66], [88, 90, 91]]), props: [c('r', 544, 3.3, 1.5), c('r', 542, 3.1, 2.2)] }, // flowers
   park: {
     cells: [
       c('t', 4, 0, -0.8), c('t', 16, 0, 0.2), c('t', 4, 1.6, -0.6), c('t', 16, 1.6, 0.4),
@@ -193,7 +193,7 @@ export const DECOR_ART: Record<DecoId, Cell[]> = {
   beehive: [c('t', 94, 1, 1)],
   hay: [c('t', 93, 1, 1)],
   barrel: [c('t', 130, 1, 1)],
-  cart: [c('t', 57, 1, 1)],
+  cart: [c('t', 57, 3.1, 2)],
   campfire: [c('r', 470, 1, 1)],
   grass: [],
 };
