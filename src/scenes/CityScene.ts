@@ -12,7 +12,8 @@
 // Art: Kenney tilesheets (cityArt.ts), one ground cell = 3x3 art tiles. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Matches the world map (task 10): hills are green with low pixel mounds, and each hex shows what's worked on it
-// on the map (crop fields, thick woods, a mine, a fenced paddock, fishing nets).
+// on the map (crop fields, thick woods, a mine, a fenced paddock, fishing nets). Life: horses, farmers,
+// woodcutters, miners and townsfolk wander around their own patch of the city.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -23,7 +24,7 @@ import { DECOS, DECO_ORDER, fenceLinks, isGrassKind, isPathKind, keepTile, lotAt
 import { cellKey, cityLayout, hexAt, hexCells } from '../world/grid';
 import type { CityHex, Layout, XY } from '../world/grid';
 import { BUILDINGS, BUILDING_ORDER } from '../world/tile';
-import type { Building, PlotTerrain, Terrain, Tile } from '../world/tile';
+import type { Building, Improvement, PlotTerrain, Terrain, Tile } from '../world/tile';
 import { BUILDER_PEOPLE, PLOT_PEOPLE, keepPeople, makeCitySprites } from './citySprites';
 import type { PxActor } from './citySprites';
 import {
@@ -105,6 +106,19 @@ const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', g
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x5e9a3a, mountain: 0x9a9a9a };
 const WORK_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
 
+// Life in the city: who wanders around each worked hex (horses in the paddock, farmers in the fields, woodcutters
+// in the woods, miners by the mine). n = how many at most (fewer on a hex with little open ground), speed in px/s.
+const LIFE: Partial<Record<Improvement, { key: string; fps: number; n: number; speed: number }>> = {
+  pasture: { key: 'px-horse', fps: 1.2, n: 4, speed: 14 },
+  farm: { key: 'px-farmer', fps: 2.5, n: 3, speed: 8 },
+  forest: { key: 'px-woodcutter', fps: 2.5, n: 2, speed: 8 },
+  mine: { key: 'px-miner', fps: 3, n: 2, speed: 8 },
+};
+const TOWNSFOLK_MAX = 6; // townsfolk strolling the open grass: about half the city's people, up to this many
+const TOWNSFOLK_SPEED = 10;
+const WANDER_DEPTH = 2.95; // above trees and buildings, under the names
+const PAUSE_MS: [number, number] = [1200, 4700]; // how long someone stands still between walks
+
 type Layer = 'ground' | 'obj';
 
 // Same pattern every time you open the same city: a 0..1 number per cell and salt
@@ -142,6 +156,15 @@ interface Town {
   built: Map<number, Building>; // hex -> finished amenity
 }
 
+// Someone (or a horse) wandering around their own patch of the city. Kept across redraws so they don't jump.
+interface Wanderer {
+  s: Phaser.GameObjects.Sprite;
+  cells: XY[]; // the cells they may walk to
+  speed: number;
+  tw: Phaser.Tweens.Tween | null;
+  timer: Phaser.Time.TimerEvent | null;
+}
+
 export class CityScene extends Phaser.Scene {
   static link: CityLink | null = null;
   static intro = false; // set by CityView: play the zoom-in when the screen next shows
@@ -164,6 +187,8 @@ export class CityScene extends Phaser.Scene {
   private labels: Phaser.GameObjects.Text[] = []; // name labels, hidden when zoomed far out
   private people: Phaser.GameObjects.Sprite[] = [];
   private nPeople = 0;
+  private wanderers = new Map<string, Wanderer>(); // the city's walking life, by a stable id
+  private wanderCity: Tile | null = null; // which city they belong to
   private bigLabels = true;
   private minZoom = 0.3;
   private maxZoom = 3;
@@ -242,7 +267,10 @@ export class CityScene extends Phaser.Scene {
       if (this.sys.isActive()) this.show();
     };
     this.scale.on('resize', onResize);
-    this.events.once('shutdown', () => this.scale.off('resize', onResize));
+    this.events.once('shutdown', () => {
+      this.scale.off('resize', onResize);
+      this.clearLife();
+    });
     this.events.on('wake', () => this.show());
     this.events.on('sleep', () => {
       this.resetPointer();
@@ -773,6 +801,8 @@ export class CityScene extends Phaser.Scene {
     // Decorations and the wild scenery, row by row so lower things overlap the ones behind them
     this.scenery.clear();
     this.drawTown(c, town, seed);
+    // The walking life: horses, workers and townsfolk (kept between redraws so nobody jumps)
+    this.drawLife(c, town, !!ui);
 
     // The Keep: the towered castle, or a stone yard with an emoji if the art is missing
     const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
@@ -888,6 +918,112 @@ export class CityScene extends Phaser.Scene {
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
     for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
+  }
+
+  // ---------- life: horses, workers and townsfolk walking around ----------
+
+  // Work out who should be out and about, keep the ones already walking (just update where they may go),
+  // add the new ones and send off the ones that no longer belong (a farm got pillaged, the city shrank).
+  private drawLife(c: Tile, town: Town, decorating: boolean): void {
+    if (this.wanderCity !== c) {
+      this.clearLife();
+      this.wanderCity = c;
+    }
+    const lay = town.lay;
+    // Open ground per hex: not water, the Keep, an amenity spot or a placed decoration
+    const open = new Map<number, XY[]>();
+    const strolls: XY[] = []; // plain land (no farm, woods, mine or paddock) for the townsfolk
+    for (const [key, h] of lay.cells) {
+      if (h.terrain === 'water' || town.objs.has(key)) continue;
+      const [dx, dy] = parseKey(key);
+      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || lotAt(lay, dx, dy)) continue;
+      const list = open.get(h.index);
+      if (list) list.push([dx, dy]);
+      else open.set(h.index, [[dx, dy]]);
+      if (!h.tile.improvement) strolls.push([dx, dy]);
+    }
+    const want = new Map<string, { key: string; fps: number; speed: number; cells: XY[] }>();
+    for (const h of lay.hexes) {
+      if (h.keep || !h.tile.improvement) continue;
+      const crew = LIFE[h.tile.improvement];
+      const cells = open.get(h.index);
+      if (!crew || !cells?.length) continue;
+      const n = Math.min(crew.n, Math.ceil(cells.length / 2));
+      for (let k = 0; k < n; k++) want.set(`${h.index}:${k}`, { key: crew.key, fps: crew.fps, speed: crew.speed, cells });
+    }
+    const folk = Math.min(TOWNSFOLK_MAX, Math.max(1, Math.floor(c.pop / 2)), strolls.length);
+    for (let k = 0; k < folk; k++) want.set(`folk:${k}`, { key: 'px-villager', fps: 3, speed: TOWNSFOLK_SPEED, cells: strolls });
+
+    for (const [id, w] of this.wanderers) {
+      const spec = want.get(id);
+      if (spec && spec.key === w.s.texture.key) continue;
+      this.dropWanderer(w);
+      this.wanderers.delete(id);
+    }
+    for (const [id, spec] of want) {
+      if (!this.textures.exists(spec.key)) continue;
+      const have = this.wanderers.get(id);
+      if (have) {
+        have.cells = spec.cells;
+        have.s.setAlpha(decorating ? 0.35 : 1);
+        continue;
+      }
+      const start = spec.cells[Math.floor(Math.random() * spec.cells.length)];
+      const p = this.spot(start);
+      const s = this.add.sprite(p.x, p.y, spec.key, '0').setOrigin(0.5, 1).setScale(PERSON_SCALE).setDepth(WANDER_DEPTH);
+      s.setFlipX(Math.random() < 0.5).setAlpha(decorating ? 0.35 : 1);
+      if (!this.reduced && this.anims.exists(spec.key)) s.play({ key: spec.key, frameRate: spec.fps, startFrame: Math.floor(Math.random() * 2) });
+      const w: Wanderer = { s, cells: spec.cells, speed: spec.speed, tw: null, timer: null };
+      this.wanderers.set(id, w);
+      if (!this.reduced) this.wander(w, Math.random() * PAUSE_MS[1]);
+    }
+  }
+
+  // A random standing spot in a cell (feet a little below its middle)
+  private spot(c: XY): { x: number; y: number } {
+    return {
+      x: Math.round(c[0] * T + (Math.random() - 0.5) * T * 0.6),
+      y: Math.round(c[1] * T + T * 0.15 + (Math.random() - 0.5) * T * 0.4),
+    };
+  }
+
+  // Wait a moment, then walk to a spot in a neighbouring cell of the same area, and repeat.
+  // Short hops keep everyone inside their own patch (horses in the paddock, farmers in the fields).
+  private wander(w: Wanderer, wait: number): void {
+    w.timer = this.time.delayedCall(wait, () => {
+      w.timer = null;
+      if (!w.cells.length || !w.s.active) return;
+      const cx = Math.round(w.s.x / T);
+      const cy = Math.round((w.s.y - T * 0.15) / T);
+      const near = w.cells.filter(([x, y]) => Math.abs(x - cx) <= 1 && Math.abs(y - cy) <= 1);
+      const pool = near.length ? near : w.cells;
+      const p = this.spot(pool[Math.floor(Math.random() * pool.length)]);
+      const dist = Math.hypot(p.x - w.s.x, p.y - w.s.y);
+      if (Math.abs(p.x - w.s.x) > 1) w.s.setFlipX(p.x < w.s.x); // face the way they walk
+      w.tw = this.tweens.add({
+        targets: w.s,
+        x: p.x,
+        y: p.y,
+        duration: Math.max(400, (dist / w.speed) * 1000),
+        ease: 'Linear',
+        onComplete: () => {
+          w.tw = null;
+          this.wander(w, PAUSE_MS[0] + Math.random() * (PAUSE_MS[1] - PAUSE_MS[0]));
+        },
+      });
+    });
+  }
+
+  private dropWanderer(w: Wanderer): void {
+    w.tw?.stop();
+    w.timer?.remove(false);
+    w.s.destroy();
+  }
+
+  private clearLife(): void {
+    for (const w of this.wanderers.values()) this.dropWanderer(w);
+    this.wanderers.clear();
+    this.wanderCity = null;
   }
 
   // The hexes just past the border: dimmed, tinted in their owner's color, unexplored ones dark.
