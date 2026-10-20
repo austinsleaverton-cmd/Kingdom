@@ -11,7 +11,8 @@
 // past the min zoom (wheel, or pinch and release) and it zooms out and fades back to the map (zoomPush.ts).
 // Art: Kenney tilesheets (cityArt.ts), one ground cell = 3x3 art tiles. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
-// Hills match the world map (task 10): green ground with a light shade and low pixel mounds, not bare dirt.
+// Matches the world map (task 10): hills are green with low pixel mounds, and each hex shows what's worked on it
+// on the map (crop fields, thick woods, a mine, paddock fences, fishing nets).
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -88,6 +89,12 @@ const HILL_TINT_ALPHA = 0.14;
 const HILL_LIT = 0x82c050;
 const HILL_SHADE = 0x5f9b3b;
 const HILL_TOP = 0x9fd36a;
+// Crop fields on farm hexes: the same wheat and green rows as the farms on the world map
+const WHEAT = 0xe2bd4f;
+const WHEAT_ROW = 0xc49a2f;
+const CROP = 0x8fc456;
+const CROP_ROW = 0x6e9f3c;
+const FIELD_EDGE = 0x8b6a35;
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x6aa84f };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x5e9a3a, mountain: 0x9a9a9a };
@@ -1071,9 +1078,10 @@ export class CityScene extends Phaser.Scene {
     return !!link && moveReason(link.state, link.city, m.from[0], m.from[1], m.to[0], m.to[1]) === '';
   }
 
-  // Your decorations, then the wild trees and flowers on any cell you haven't used, top row first.
-  // No wild scenery on the water, the Keep, amenity spots or right around them. Forest hexes grow thick woods,
-  // farm hexes stay mostly open, sand is sparse.
+  // Your decorations, then what the map works on each hex, then the wild trees and flowers on any cell you
+  // haven't used, top row first. Nothing wild on the Keep, amenity spots or right around them.
+  // Worked hexes match the map: farm hexes are crop fields, forest hexes thick woods, mine hexes get the mine
+  // entrance and rocks, pastures fence rows and hay, fisheries nets on the water. Sand is sparse.
   private drawTown(c: Tile, town: Town, seed: number): void {
     const g = this.scenery;
     const lay = town.lay;
@@ -1085,6 +1093,7 @@ export class CityScene extends Phaser.Scene {
     const order = [...lay.cells.keys()].map(parseKey).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
     const nearLot = (x: number, y: number) =>
       !!lotAt(lay, x, y) || !!lotAt(lay, x + 1, y) || !!lotAt(lay, x - 1, y) || !!lotAt(lay, x, y + 1) || !!lotAt(lay, x, y - 1);
+    const mines = new Set<number>(); // mine hexes that already have their entrance
     for (const [dx, dy] of order) {
       const key = cellKey(dx, dy);
       const k = town.objs.get(key);
@@ -1096,11 +1105,31 @@ export class CityScene extends Phaser.Scene {
       if (town.ground.has(key)) continue; // anything you painted here (a path or grass) replaces the wild scenery
       if (mv && mv.to[0] === dx && mv.to[1] === dy) continue; // room for the one being dragged here
       const h = lay.cells.get(key)!;
-      if (h.terrain === 'water') continue;
-      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
       const imp = h.tile.improvement;
       const roll = hash01(dx, dy, seed, 10);
-      if (imp === 'farm' && roll > 0.06) continue; // fields stay open
+      if (h.terrain === 'water') {
+        if (imp === 'fishery' && roll < 0.45 && !nearLot(dx, dy)) this.nets(g, dx, dy, seed);
+        continue;
+      }
+      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
+      if (imp === 'farm') {
+        this.field(g, dx, dy, seed);
+        continue;
+      }
+      if (imp === 'mine') {
+        if (!mines.has(h.index)) {
+          mines.add(h.index);
+          this.mineEntrance(g, dx * T, dy * T);
+        } else if (roll < 0.55) {
+          this.rock(g, dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.4, dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.4);
+          if (roll < 0.2) this.rock(g, dx * T + T * 0.25, dy * T + T * 0.2);
+        }
+        continue;
+      }
+      if (imp === 'pasture') {
+        this.paddock(g, dx, dy, roll);
+        continue;
+      }
       if (h.terrain === 'sand' && roll > 0.18) continue;
       const edge = !lay.cells.has(cellKey(dx + 1, dy)) || !lay.cells.has(cellKey(dx - 1, dy)) || !lay.cells.has(cellKey(dx, dy + 1)) || !lay.cells.has(cellKey(dx, dy - 1));
       if (art) {
@@ -1111,19 +1140,91 @@ export class CityScene extends Phaser.Scene {
         this.mounds(dx, dy, seed);
         continue;
       }
-      if (roll > (imp === 'forest' ? 0.7 : 0.42)) continue;
+      if (roll > (imp === 'forest' ? 0.85 : 0.42)) continue;
       const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
       const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
       if (roll < 0.2 || imp === 'forest') this.tree(g, x, y, 0.85 + hash01(dx, dy, seed, 13) * 0.35);
       else if (roll < 0.33) this.bush(g, x, y);
       else this.rock(g, x, y);
-      if (roll < 0.1) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
+      if (roll < 0.1 || (imp === 'forest' && roll < 0.5)) this.tree(g, x + T * 0.28, y + T * 0.18, 0.7);
     }
     // The decoration being dragged, on top of everything at the cell under your finger
     if (mv && (mv.to[0] !== mv.from[0] || mv.to[1] !== mv.from[1])) {
       const k = town.objs.get(cellKey(mv.from[0], mv.from[1]));
       if (k !== undefined) this.deco(c, k, mv.to[0], mv.to[1], 0.85);
     }
+  }
+
+  // A crop field filling a farm cell: wheat (mostly) or green rows inside a dirt edge, like the map's farms.
+  // Neighbouring cells line up into a patchwork of fields.
+  private field(g: Phaser.GameObjects.Graphics, dx: number, dy: number, seed: number): void {
+    const left = dx * T - T / 2 + 3;
+    const top = dy * T - T / 2 + 3;
+    const s = T - 6;
+    const wheat = hash01(dx, dy, seed, 50) < 0.6;
+    g.fillStyle(FIELD_EDGE, 1);
+    g.fillRect(left, top, s, s);
+    g.fillStyle(wheat ? WHEAT : CROP, 1);
+    g.fillRect(left + 2, top + 2, s - 4, s - 4);
+    g.fillStyle(wheat ? WHEAT_ROW : CROP_ROW, 1);
+    for (let y = top + 5; y < top + s - 3; y += 5) g.fillRect(left + 4, y, s - 8, 2);
+  }
+
+  // A mine dug into a rock face: timber frame around a dark opening, with a gold nugget out front
+  private mineEntrance(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+    g.fillStyle(0x000000, 0.16);
+    g.fillRect(x - 15, y + 10, 30, 3);
+    g.fillStyle(0x7d8189, 1);
+    g.fillRect(x - 15, y - 8, 30, 18);
+    g.fillRect(x - 11, y - 12, 22, 4);
+    g.fillStyle(0x9ca1a8, 1);
+    g.fillRect(x - 11, y - 12, 14, 2);
+    g.fillRect(x - 15, y - 8, 8, 2);
+    g.fillStyle(0x1a1a1a, 1);
+    g.fillRect(x - 6, y - 2, 12, 12);
+    g.fillStyle(0x8b5a2b, 1);
+    g.fillRect(x - 8, y - 5, 16, 3);
+    g.fillRect(x - 8, y - 5, 3, 15);
+    g.fillRect(x + 5, y - 5, 3, 15);
+    g.fillStyle(0xd4a017, 1);
+    g.fillRect(x + 10, y + 6, 3, 3);
+  }
+
+  // A pasture cell: a fence row across the bottom, and now and then a hay bale
+  private paddock(g: Phaser.GameObjects.Graphics, dx: number, dy: number, roll: number): void {
+    const left = dx * T - T / 2;
+    const top = dy * T - T / 2;
+    const rail: Cell[] = [
+      { s: 't', f: FENCE.e, x: 0, y: 2 },
+      { s: 't', f: FENCE.ew, x: 1, y: 2 },
+      { s: 't', f: FENCE.w, x: 2, y: 2 },
+    ];
+    if (canDraw(this, rail)) this.cells('obj', rail, left, top);
+    else {
+      g.fillStyle(0x8b5a2b, 1);
+      g.fillRect(left + 4, top + T - 12, T - 8, 2);
+      g.fillRect(left + 4, top + T - 7, T - 8, 2);
+      for (const px of [4, T / 2 - 1, T - 6]) g.fillRect(left + px, top + T - 15, 2, 11);
+    }
+    if (roll < 0.3) {
+      const hay = DECOR_ART.hay;
+      if (canDraw(this, hay)) this.cells('obj', hay, left, top - ART * 0.5);
+    }
+  }
+
+  // Fishing nets on a fishery's water: a net square with orange floats at the corners
+  private nets(g: Phaser.GameObjects.Graphics, dx: number, dy: number, seed: number): void {
+    const x = Math.round(dx * T + (hash01(dx, dy, seed, 60) - 0.5) * T * 0.3);
+    const y = Math.round(dy * T + (hash01(dx, dy, seed, 61) - 0.5) * T * 0.3);
+    g.fillStyle(0xe5e7eb, 0.6);
+    g.fillRect(x - 9, y - 7, 18, 1);
+    g.fillRect(x - 9, y, 18, 1);
+    g.fillRect(x - 9, y + 7, 18, 1);
+    g.fillRect(x - 9, y - 7, 1, 15);
+    g.fillRect(x, y - 7, 1, 15);
+    g.fillRect(x + 8, y - 7, 1, 15);
+    g.fillStyle(0xf97316, 1);
+    for (const [ox, oy] of [[-10, -8], [7, -8], [-10, 6], [7, 6]] as const) g.fillRect(x + ox, y + oy, 3, 3);
   }
 
   // One decoration on cell (dx, dy)
@@ -1234,11 +1335,12 @@ export class CityScene extends Phaser.Scene {
 
   // One cell of Kenney scenery. Along the border: thick clumps of round trees, like the woods in Kenney's sample.
   // Inside: tall trees (a few in autumn colors), bushes, sprouts, mushrooms, bare patches and flowers.
-  // forest: a planted forest hex, mostly trees. Hills get low mounds and the odd pebble, sand only the odd bush.
+  // forest: a forest hex on the map, so mostly thick tree clumps. Hills get low mounds and the odd pebble,
+  // sand only the odd bush.
   private artScenery(dx: number, dy: number, seed: number, roll: number, edge: boolean, forest: boolean, t: PlotTerrain): void {
     const cx = dx * T;
     const cy = dy * T;
-    if ((edge && roll < 0.3) || (forest && roll < 0.35)) {
+    if ((edge && roll < 0.3) || (forest && roll < 0.65)) {
       const autumn = hash01(dx, dy, seed, 17) < 0.15;
       for (let j = 0; j < 4; j++) {
         const across = j % 2 === 0 ? 3 : 2;
@@ -1262,7 +1364,7 @@ export class CityScene extends Phaser.Scene {
         return;
       }
     }
-    if (roll > (forest ? 0.75 : 0.5)) return;
+    if (roll > (forest ? 0.9 : 0.5)) return;
     const flower = (salt: number) => SCENERY.flowers[Math.floor(hash01(dx, dy, seed, salt) * SCENERY.flowers.length)];
     const tall = (px: number, py: number, autumn: boolean) => {
       this.bob('obj', 't', autumn ? SCENERY.autumnTop : SCENERY.tallTop, px - 8, py - 24);
@@ -1274,7 +1376,7 @@ export class CityScene extends Phaser.Scene {
     }
     if (roll < 0.22 || forest) {
       tall(x, y, hash01(dx, dy, seed, 17) < 0.15);
-      if (roll < 0.12) tall(x + 11, y + 8, false);
+      if (roll < 0.12 || forest) tall(x + 11, y + 8, false);
     } else if (roll < 0.3) {
       this.bob('obj', 't', SCENERY.bush, x - 8, y - 8);
       const f = flower(15);
