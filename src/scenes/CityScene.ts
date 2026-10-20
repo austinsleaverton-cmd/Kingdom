@@ -11,6 +11,7 @@
 // past the min zoom (wheel, or pinch and release) and it zooms out and fades back to the map (zoomPush.ts).
 // Art: Kenney tilesheets (cityArt.ts), one ground cell = 3x3 art tiles. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
+// Hills match the world map (task 10): green ground with a light shade and low pixel mounds, not bare dirt.
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -81,9 +82,15 @@ const SEA_FOAM = 0xc3e8df;
 const GRASS_COLOR = 0x62a948;
 const GRASS_LIGHT = 0x6db552;
 const GRASS_DARK = 0x58993f;
-const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x8c7a4c };
+// Hills: the grass with a light darker-green veil, and low mounds in Tiny Town's greens (lit left, shaded right)
+const HILL_TINT = 0x1e3d12;
+const HILL_TINT_ALPHA = 0.14;
+const HILL_LIT = 0x82c050;
+const HILL_SHADE = 0x5f9b3b;
+const HILL_TOP = 0x9fd36a;
+const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x6aa84f };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
-const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x8c7a4c, mountain: 0x9a9a9a };
+const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x5e9a3a, mountain: 0x9a9a9a };
 const WORK_ICON: Record<Outside, string> = { farm: '\u{1F33E}', pasture: '\u{1F40E}', mine: '\u26CF\uFE0F', forest: '\u{1F332}', fishery: '\u{1F41F}', road: '\u{1F6E4}\uFE0F' };
 
 type Layer = 'ground' | 'obj';
@@ -129,6 +136,7 @@ export class CityScene extends Phaser.Scene {
   private static instance: CityScene | null = null;
 
   private ground!: Phaser.GameObjects.Graphics;
+  private hillG!: Phaser.GameObjects.Graphics; // the darker-green veil over hill cells, just above the ground tiles
   private scenery!: Phaser.GameObjects.Graphics;
   private marks!: Phaser.GameObjects.Graphics;
   private gridG!: Phaser.GameObjects.Graphics;
@@ -204,6 +212,7 @@ export class CityScene extends Phaser.Scene {
     crispCityArt(this);
     this.cameras.main.setBackgroundColor('#141a26');
     this.ground = this.add.graphics().setDepth(0);
+    this.hillG = this.add.graphics().setDepth(0.47);
     this.gridG = this.add.graphics().setDepth(0.5);
     this.scenery = this.add.graphics().setDepth(1.5);
     this.marks = this.add.graphics().setDepth(1);
@@ -726,6 +735,7 @@ export class CityScene extends Phaser.Scene {
     // The ring past the border first: dimmed land and sea, tinted for whoever owns it
     const g = this.ground;
     g.clear();
+    this.hillG.clear();
     this.drawOutside(g, s, c, lay, link.me);
 
     // The city's own land, hex by hex: grass, sand and hills straight from the map. Water is the sea, below.
@@ -899,11 +909,13 @@ export class CityScene extends Phaser.Scene {
     }
   }
 
-  // One ground cell of land: Kenney grass (a few variants scattered by a seeded hash), sand or rocky hills
+  // One ground cell of land: Kenney grass (a few variants scattered by a seeded hash), sand, or hills.
+  // Hills are the same grass with a light darker-green veil (mounds come with the scenery), like the map.
   private landCell(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, seed: number, artGrass: boolean): void {
     const left = x * T - T / 2;
     const top = y * T - T / 2;
-    if (t === 'grass' && artGrass) {
+    const green = t === 'grass' || t === 'hills';
+    if (green && artGrass) {
       for (let j = 0; j < 3; j++) {
         for (let i = 0; i < 3; i++) {
           const v = hash01(x * 3 + i, y * 3 + j, seed, 20);
@@ -911,21 +923,31 @@ export class CityScene extends Phaser.Scene {
           this.bob('ground', 't', f, left + i * ART, top + j * ART);
         }
       }
+      if (t === 'hills') this.hillShade(left, top);
       return;
     }
-    if (t !== 'grass' && canDraw(this, PLOT_GROUND[t])) {
+    if (!green && canDraw(this, PLOT_GROUND[t])) {
       this.cells('ground', PLOT_GROUND[t], left, top);
-      if (t === 'hills' && hash01(x, y, seed, 21) < 0.18) this.bob('ground', 'r', 614, left + 16, top + 18);
       return;
     }
     g.fillStyle(t === 'grass' ? GRASS_COLOR : PLOT_COLOR[t], 1);
     g.fillRect(left, top, T, T);
+    if (t === 'hills') {
+      this.hillShade(left, top);
+      return;
+    }
     if (t !== 'grass') return;
     const a = hash01(x, y, seed, 1);
     if (a < 0.55) {
       g.fillStyle(a < 0.28 ? GRASS_LIGHT : GRASS_DARK, 0.35);
       g.fillEllipse(x * T + (hash01(x, y, seed, 2) - 0.5) * T * 0.6, y * T + (hash01(x, y, seed, 3) - 0.5) * T * 0.6, T * (0.7 + a), T * (0.45 + a * 0.6));
     }
+  }
+
+  // The darker-green veil that marks a hill cell (so you can still spot the Workshop's hills)
+  private hillShade(left: number, top: number): void {
+    this.hillG.fillStyle(HILL_TINT, HILL_TINT_ALPHA);
+    this.hillG.fillRect(left, top, T, T);
   }
 
   // The border: a line in the owner's color around the city's land. lines: faint dividers between its hexes too.
@@ -1085,6 +1107,10 @@ export class CityScene extends Phaser.Scene {
         this.artScenery(dx, dy, seed, roll, edge, imp === 'forest', h.terrain);
         continue;
       }
+      if (h.terrain === 'hills' && roll < 0.45) {
+        this.mounds(dx, dy, seed);
+        continue;
+      }
       if (roll > (imp === 'forest' ? 0.7 : 0.42)) continue;
       const x = dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.35;
       const y = dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.35;
@@ -1208,7 +1234,7 @@ export class CityScene extends Phaser.Scene {
 
   // One cell of Kenney scenery. Along the border: thick clumps of round trees, like the woods in Kenney's sample.
   // Inside: tall trees (a few in autumn colors), bushes, sprouts, mushrooms, bare patches and flowers.
-  // forest: a planted forest hex, mostly trees. Hills get rocks, sand only the odd bush.
+  // forest: a planted forest hex, mostly trees. Hills get low mounds and the odd pebble, sand only the odd bush.
   private artScenery(dx: number, dy: number, seed: number, roll: number, edge: boolean, forest: boolean, t: PlotTerrain): void {
     const cx = dx * T;
     const cy = dy * T;
@@ -1224,18 +1250,24 @@ export class CityScene extends Phaser.Scene {
       }
       return;
     }
-    if (roll > (forest ? 0.75 : 0.5)) return;
     const x = cx + (hash01(dx, dy, seed, 11) - 0.5) * ART;
     const y = cy + (hash01(dx, dy, seed, 12) - 0.5) * ART;
+    if (t === 'hills' && !forest) {
+      if (roll < 0.45) {
+        this.mounds(dx, dy, seed);
+        return;
+      }
+      if (roll > 0.85) {
+        this.bob('obj', 'r', 614, x - 8, y - 8);
+        return;
+      }
+    }
+    if (roll > (forest ? 0.75 : 0.5)) return;
     const flower = (salt: number) => SCENERY.flowers[Math.floor(hash01(dx, dy, seed, salt) * SCENERY.flowers.length)];
     const tall = (px: number, py: number, autumn: boolean) => {
       this.bob('obj', 't', autumn ? SCENERY.autumnTop : SCENERY.tallTop, px - 8, py - 24);
       this.bob('obj', 't', autumn ? SCENERY.autumnBottom : SCENERY.tallBottom, px - 8, py - 8);
     };
-    if (t === 'hills' && roll > 0.3) {
-      this.bob('obj', 'r', 614, x - 8, y - 8);
-      return;
-    }
     if (t === 'sand') {
       this.bob('obj', 't', SCENERY.bush, x - 8, y - 8);
       return;
@@ -1258,6 +1290,31 @@ export class CityScene extends Phaser.Scene {
       const b = flower(16);
       this.bob('obj', a.s, a.f, x - 8, y - 8);
       this.bob('obj', b.s, b.f, x + 2, y + 2);
+    }
+  }
+
+  // A hill cell's mounds: one big, sometimes a small one in front, nudged a little so rows don't line up
+  private mounds(dx: number, dy: number, seed: number): void {
+    const g = this.scenery;
+    const x = dx * T + Math.round((hash01(dx, dy, seed, 40) - 0.5) * 10);
+    const y = dy * T + 8;
+    this.mound(g, x - 5, y, 28, 12);
+    if (hash01(dx, dy, seed, 41) < 0.6) this.mound(g, x + 11, y + 6, 16, 8);
+  }
+
+  // One low mound in 2px steps (so it sits with the pixel art): lit on the left, shaded on the right, light cap
+  private mound(g: Phaser.GameObjects.Graphics, cx: number, base: number, w: number, h: number): void {
+    g.fillStyle(0x000000, 0.14);
+    g.fillRect(cx - w / 2 + 2, base, w - 2, 2);
+    for (let k = 0; k < h; k += 2) {
+      const half = Math.max(2, Math.round(((w / 2) * Math.sqrt(1 - (k / h) ** 2)) / 2) * 2);
+      const row = base - k - 2;
+      g.fillStyle(k >= h - 4 ? HILL_TOP : HILL_LIT, 1);
+      g.fillRect(cx - half, row, half * 2, 2);
+      if (half > 2) {
+        g.fillStyle(HILL_SHADE, 1);
+        g.fillRect(cx + 2, row, half - 2, 2);
+      }
     }
   }
 
@@ -1295,18 +1352,19 @@ export class CityScene extends Phaser.Scene {
     g.fillEllipse(x - 2, y - 2, 6, 3);
   }
 
-  // An open amenity spot's ground: a dirt lot on grass, a rim on sand and hills. Water spots are part of the sea.
+  // An open amenity spot's ground: a dirt lot on grass and hills, a rim on sand. Water spots are part of the sea.
   private lotGround(g: Phaser.GameObjects.Graphics, x: number, y: number, t: PlotTerrain, alpha: number): void {
     if (t === 'water') return;
-    if (t === 'grass' && canDraw(this, PLOT_GROUND.grass)) {
+    const green = t === 'grass' || t === 'hills';
+    if (green && canDraw(this, PLOT_GROUND.grass)) {
       this.cells('ground', PLOT_GROUND.grass, x - T / 2, y - T / 2, alpha);
       return;
     }
     const l = x - T / 2 + 3;
     const top = y - T / 2 + 3;
     const s = T - 6;
-    if (t === 'grass') {
-      g.fillStyle(PLOT_COLOR.grass, alpha);
+    if (green) {
+      g.fillStyle(PLOT_COLOR[t], alpha);
       g.fillRoundedRect(l, top, s, s, 7);
     }
     g.lineStyle(2, 0x3b2a17, 0.45 * alpha);
