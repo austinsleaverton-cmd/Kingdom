@@ -39,27 +39,29 @@ const GROUND_OF: Record<Terrain, Ground | null> = { water: null, sand: 'sand', g
 // The hex is about 69 px from the center to a corner at that size.
 type Prop = [string, number, number];
 
-const TERRAIN_PROPS: Partial<Record<Terrain, Prop[]>> = {
-  // Rolling ground: a couple of rocks, brown and grey
-  hills: [['rockBrown_small.png', 12, -16], ['rockGrey_medium3.png', -18, 22], ['rockBrown_large.png', 22, 30], ['rockGrey_small5.png', -36, 34]],
-  // A peak: the big grey crag with smaller ones around it
-  mountain: [
-    ['rockGrey_medium1.png', -26, 10],
-    ['rockGrey_medium2.png', 28, 14],
-    ['rockGrey_large.png', 0, 34],
-    ['rockGrey_small1.png', -34, 40],
-    ['rockGrey_small6.png', 36, 40],
-  ],
+// A set of props and how big to draw them (1 = the pack's own size next to its tiles).
+// Kept small on purpose so units, borders and labels stay easy to read on top.
+interface PropSet {
+  props: Prop[];
+  scale: number;
+}
+
+const TERRAIN_PROPS: Partial<Record<Terrain, PropSet>> = {
+  // Rolling ground: two small rocks
+  hills: { props: [['rockGrey_medium3.png', -14, 18], ['rockBrown_large.png', 18, 26]], scale: 0.6 },
+  // A peak: one crag with a pebble beside it
+  mountain: { props: [['rockGrey_large.png', 0, 30], ['rockGrey_small6.png', 34, 34]], scale: 0.65 },
 };
 
-// Improvements that replace the whole tile
-const IMPROVEMENT_TILE: Partial<Record<Improvement, string>> = { farm: 'medieval_farm.png' };
+// Improvements that replace the whole tile (none right now: the full farmhouse tile was too busy)
+const IMPROVEMENT_TILE: Partial<Record<Improvement, string>> = {};
 
 // Improvements drawn as props on the terrain tile. Fisheries stay drawn (they're on water).
-const IMPROVEMENT_PROPS: Partial<Record<Improvement, Prop[]>> = {
-  forest: [['treePine_large.png', 0, -4], ['treePine_large.png', -26, 18], ['treePine_large.png', 24, 20], ['treePine_small.png', -2, 38]],
-  mine: [['mine.png', -4, 26], ['rockGrey_small1.png', 30, 34]],
-  pasture: [['fence.png', -38, 6], ['fence.png', -18, 10], ['hay.png', 30, 6], ['horseTrough.png', 2, 32]],
+const IMPROVEMENT_PROPS: Partial<Record<Improvement, PropSet>> = {
+  forest: { props: [['treePine_large.png', 0, -4], ['treePine_large.png', -26, 18], ['treePine_large.png', 24, 20], ['treePine_small.png', -2, 38]], scale: 1 },
+  farm: { props: [['farmland.png', -4, 30]], scale: 0.75 },
+  mine: { props: [['mine.png', -4, 26], ['rockGrey_small1.png', 30, 34]], scale: 0.8 },
+  pasture: { props: [['fence.png', -38, 6], ['fence.png', -18, 10], ['hay.png', 30, 6], ['horseTrough.png', 2, 32]], scale: 0.8 },
 };
 
 const hash = (col: number, row: number): number => ((col * 73856093) ^ (row * 19349663)) >>> 0;
@@ -213,7 +215,8 @@ export class HexArt {
     if (t.city) return { ground: true, improvement: whole }; // the castle stands here
     const imp = t.improvement ? IMPROVEMENT_PROPS[t.improvement] : undefined;
     if (imp) return { ground: true, improvement: this.place(imp, x, y) };
-    if (!whole) this.place(TERRAIN_PROPS[t.terrain] ?? [], x, y);
+    const deco = TERRAIN_PROPS[t.terrain];
+    if (!whole && deco) this.place(deco, x, y);
     return { ground: true, improvement: whole };
   }
 
@@ -229,14 +232,16 @@ export class HexArt {
     return bottom - tex.get(f).height * this.keepScale;
   }
 
-  // All or nothing: if any prop is missing, draw none and let the caller use the drawn version
-  private place(list: readonly Prop[], x: number, y: number): boolean {
+  // All or nothing: if any prop is missing, draw none and let the caller use the drawn version.
+  // Positions shrink with the set's scale too, so small props stay bunched in the middle of the hex.
+  private place(set: PropSet, x: number, y: number): boolean {
     const pool = this.props;
-    if (!pool || !list.length) return false;
+    if (!pool || !set.props.length) return false;
     const tex = this.scene.textures.get(HEX_OBJECTS);
-    if (!list.every(([f]) => tex.has(f))) return false;
+    if (!set.props.every(([f]) => tex.has(f))) return false;
     const s = this.propScale;
-    for (const [f, px, py] of [...list].sort((p, q) => p[2] - q[2])) pool.put(f, x + px * s, y + py * s, s, 0.5, 1);
+    const k = s * set.scale;
+    for (const [f, px, py] of [...set.props].sort((p, q) => p[2] - q[2])) pool.put(f, x + px * k, y + py * k, k, 0.5, 1);
     return true;
   }
 }
