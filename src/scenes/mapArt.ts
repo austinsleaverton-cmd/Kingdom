@@ -40,8 +40,16 @@ const GROUND_OF: Record<Terrain, Ground | null> = { water: null, sand: 'sand', g
 type Prop = [string, number, number];
 
 const TERRAIN_PROPS: Partial<Record<Terrain, Prop[]>> = {
-  hills: [['rockBrown_small.png', 10, -14], ['rockGrey_medium3.png', -16, 22], ['rockGrey_small5.png', 26, 30]],
-  mountain: [['rockGrey_large.png', 0, 34], ['rockGrey_small1.png', -36, 38], ['rockGrey_small6.png', 36, 36]],
+  // Rolling ground: a couple of rocks, brown and grey
+  hills: [['rockBrown_small.png', 12, -16], ['rockGrey_medium3.png', -18, 22], ['rockBrown_large.png', 22, 30], ['rockGrey_small5.png', -36, 34]],
+  // A peak: the big grey crag with smaller ones around it
+  mountain: [
+    ['rockGrey_medium1.png', -26, 10],
+    ['rockGrey_medium2.png', 28, 14],
+    ['rockGrey_large.png', 0, 34],
+    ['rockGrey_small1.png', -34, 40],
+    ['rockGrey_small6.png', 36, 40],
+  ],
 };
 
 // Improvements that replace the whole tile
@@ -120,13 +128,45 @@ function variation(ctx: CanvasRenderingContext2D, img: CanvasImageSource, sx: nu
   return v;
 }
 
-// Draws the map's terrain tiles, props and castles. Three blitters (cheap even on huge maps):
-// tiles at the bottom, props over the roads, castles over the kingdom colors.
+// Reusable scaled images from one sheet at one depth. Every redraw hands them out again in the same order,
+// so things drawn later stay in front. (Blitters can't be used here: they ignore scale when rendering.)
+class Pool {
+  private scene: Phaser.Scene;
+  private key: string;
+  private depth: number;
+  private items: Phaser.GameObjects.Image[] = [];
+  private used = 0;
+
+  constructor(scene: Phaser.Scene, key: string, depth: number) {
+    this.scene = scene;
+    this.key = key;
+    this.depth = depth;
+  }
+
+  reset(): void {
+    for (let i = 0; i < this.used; i++) this.items[i].setVisible(false);
+    this.used = 0;
+  }
+
+  // An image of frame f with its origin (ox, oy) at world (x, y)
+  put(f: string, x: number, y: number, scale: number, ox: number, oy: number): void {
+    let img = this.items[this.used];
+    if (!img) {
+      img = this.scene.add.image(0, 0, this.key, f).setDepth(this.depth);
+      this.items.push(img);
+    } else img.setFrame(f);
+    img.setOrigin(ox, oy).setScale(scale).setPosition(x, y).setVisible(true);
+    this.used++;
+  }
+}
+
+// Draws the map's terrain tiles, props and castles: tiles at the bottom, props over the roads, castles over the
+// kingdom colors.
 export class HexArt {
   private scene: Phaser.Scene;
-  private tiles: Phaser.GameObjects.Blitter | null = null;
-  private props: Phaser.GameObjects.Blitter | null = null;
-  private keeps: Phaser.GameObjects.Blitter | null = null;
+  private tiles: Pool | null = null;
+  private props: Pool | null = null;
+  private keeps: Pool | null = null;
   private base: Partial<Record<Ground, string[]>> = {};
   private tileScale: number;
   private propScale: number;
@@ -142,22 +182,22 @@ export class HexArt {
       const tex = scene.textures.get(HEX_TILES);
       tex.setFilter(Phaser.Textures.FilterMode.LINEAR);
       this.base = pickGround(tex);
-      if (Object.keys(this.base).length) this.tiles = scene.add.blitter(0, 0, HEX_TILES).setDepth(depth.tiles).setScale(this.tileScale);
+      if (Object.keys(this.base).length) this.tiles = new Pool(scene, HEX_TILES, depth.tiles);
     }
     if (scene.textures.exists(HEX_OBJECTS)) {
       scene.textures.get(HEX_OBJECTS).setFilter(Phaser.Textures.FilterMode.LINEAR);
-      this.props = scene.add.blitter(0, 0, HEX_OBJECTS).setDepth(depth.props).setScale(this.propScale);
-      this.keeps = scene.add.blitter(0, 0, HEX_OBJECTS).setDepth(depth.keeps).setScale(this.keepScale);
+      this.props = new Pool(scene, HEX_OBJECTS, depth.props);
+      this.keeps = new Pool(scene, HEX_OBJECTS, depth.keeps);
     }
   }
 
   clearGround(): void {
-    this.tiles?.clear();
-    this.props?.clear();
+    this.tiles?.reset();
+    this.props?.reset();
   }
 
   clearCastles(): void {
-    this.keeps?.clear();
+    this.keeps?.reset();
   }
 
   // The terrain tile for one explored hex at world (x, y), plus its rocks / trees / improvement
@@ -169,7 +209,7 @@ export class HexArt {
     const tex = this.scene.textures.get(HEX_TILES);
     const whole = special !== undefined && tex.has(special);
     const frame = whole && special ? special : choices[hash(t.col, t.row) % choices.length];
-    this.tiles.create(x / this.tileScale - TILE_W / 2, y / this.tileScale - TILE_H / 2, frame);
+    this.tiles.put(frame, x, y, this.tileScale, 0.5, 0.5);
     if (t.city) return { ground: true, improvement: whole }; // the castle stands here
     const imp = t.improvement ? IMPROVEMENT_PROPS[t.improvement] : undefined;
     if (imp) return { ground: true, improvement: this.place(imp, x, y) };
@@ -179,27 +219,24 @@ export class HexArt {
 
   // A city's castle (the large one on capitals). Returns the world y of its top, or null if the art is missing.
   castle(x: number, y: number, capital: boolean): number | null {
-    const b = this.keeps;
+    const pool = this.keeps;
     const f = capital ? 'castle_large.png' : 'castle_small.png';
-    if (!b) return null;
+    if (!pool) return null;
     const tex = this.scene.textures.get(HEX_OBJECTS);
     if (!tex.has(f)) return null;
-    const fr = tex.get(f);
     const bottom = y + KEEP_BASE;
-    b.create(x / this.keepScale - fr.width / 2, bottom / this.keepScale - fr.height, f);
-    return bottom - fr.height * this.keepScale;
+    pool.put(f, x, bottom, this.keepScale, 0.5, 1);
+    return bottom - tex.get(f).height * this.keepScale;
   }
 
   // All or nothing: if any prop is missing, draw none and let the caller use the drawn version
   private place(list: readonly Prop[], x: number, y: number): boolean {
-    const b = this.props;
-    if (!b || !list.length) return false;
+    const pool = this.props;
+    if (!pool || !list.length) return false;
     const tex = this.scene.textures.get(HEX_OBJECTS);
     if (!list.every(([f]) => tex.has(f))) return false;
-    for (const [f, px, py] of [...list].sort((p, q) => p[2] - q[2])) {
-      const fr = tex.get(f);
-      b.create(x / this.propScale + px - fr.width / 2, y / this.propScale + py - fr.height, f);
-    }
+    const s = this.propScale;
+    for (const [f, px, py] of [...list].sort((p, q) => p[2] - q[2])) pool.put(f, x + px * s, y + py * s, s, 0.5, 1);
     return true;
   }
 }
