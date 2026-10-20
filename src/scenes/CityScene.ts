@@ -12,7 +12,7 @@
 // Art: Kenney tilesheets (cityArt.ts), one ground cell = 3x3 art tiles. If a sheet or a tile is missing, that
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Matches the world map (task 10): hills are green with low pixel mounds, and each hex shows what's worked on it
-// on the map (crop fields, thick woods, a mine, paddock fences, fishing nets).
+// on the map (crop fields, thick woods, a mine, a fenced paddock, fishing nets).
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -95,6 +95,11 @@ const WHEAT_ROW = 0xc49a2f;
 const CROP = 0x8fc456;
 const CROP_ROW = 0x6e9f3c;
 const FIELD_EDGE = 0x8b6a35;
+// The paddock fence around a pasture hex: two wooden rails with darker posts
+const FENCE_RAIL = 0xa0703f;
+const FENCE_POST = 0x5b3a1e;
+const FENCE_INSET = 5; // px inside the hex edge
+const FENCE_GAP = 12; // px between posts
 const PLOT_COLOR: Record<PlotTerrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x7cc463, hills: 0x6aa84f };
 const PLOT_NAME: Record<PlotTerrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills' };
 const OUT_COLOR: Record<Terrain, number> = { water: 0x1f5f9e, sand: 0xd9c38a, grass: 0x6bb352, hills: 0x5e9a3a, mountain: 0x9a9a9a };
@@ -1081,7 +1086,7 @@ export class CityScene extends Phaser.Scene {
   // Your decorations, then what the map works on each hex, then the wild trees and flowers on any cell you
   // haven't used, top row first. Nothing wild on the Keep, amenity spots or right around them.
   // Worked hexes match the map: farm hexes are crop fields, forest hexes thick woods, mine hexes get the mine
-  // entrance and rocks, pastures fence rows and hay, fisheries nets on the water. Sand is sparse.
+  // entrance and rocks, a pasture hex is fenced all the way round, fisheries get nets on the water. Sand is sparse.
   private drawTown(c: Tile, town: Town, seed: number): void {
     const g = this.scenery;
     const lay = town.lay;
@@ -1111,7 +1116,13 @@ export class CityScene extends Phaser.Scene {
         if (imp === 'fishery' && roll < 0.45 && !nearLot(dx, dy)) this.nets(g, dx, dy, seed);
         continue;
       }
-      if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
+      const nearKeep = (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy);
+      // The paddock fence runs all the way round the hex, even past the amenity spot (it hugs the hex's edge)
+      if (imp === 'pasture' && !nearKeep && !lotAt(lay, dx, dy)) {
+        this.paddock(g, lay, h, dx, dy, roll < 0.12 && !nearLot(dx, dy) && !yardOf(lay, dx, dy));
+        continue;
+      }
+      if (nearKeep || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
       if (imp === 'farm') {
         this.field(g, dx, dy, seed);
         continue;
@@ -1124,10 +1135,6 @@ export class CityScene extends Phaser.Scene {
           this.rock(g, dx * T + (hash01(dx, dy, seed, 11) - 0.5) * T * 0.4, dy * T + (hash01(dx, dy, seed, 12) - 0.5) * T * 0.4);
           if (roll < 0.2) this.rock(g, dx * T + T * 0.25, dy * T + T * 0.2);
         }
-        continue;
-      }
-      if (imp === 'pasture') {
-        this.paddock(g, dx, dy, roll);
         continue;
       }
       if (h.terrain === 'sand' && roll > 0.18) continue;
@@ -1190,25 +1197,45 @@ export class CityScene extends Phaser.Scene {
     g.fillRect(x + 10, y + 6, 3, 3);
   }
 
-  // A pasture cell: a fence row across the bottom, and now and then a hay bale
-  private paddock(g: Phaser.GameObjects.Graphics, dx: number, dy: number, roll: number): void {
-    const left = dx * T - T / 2;
-    const top = dy * T - T / 2;
-    const rail: Cell[] = [
-      { s: 't', f: FENCE.e, x: 0, y: 2 },
-      { s: 't', f: FENCE.ew, x: 1, y: 2 },
-      { s: 't', f: FENCE.w, x: 2, y: 2 },
-    ];
-    if (canDraw(this, rail)) this.cells('obj', rail, left, top);
-    else {
-      g.fillStyle(0x8b5a2b, 1);
-      g.fillRect(left + 4, top + T - 12, T - 8, 2);
-      g.fillRect(left + 4, top + T - 7, T - 8, 2);
-      for (const px of [4, T / 2 - 1, T - 6]) g.fillRect(left + px, top + T - 15, 2, 11);
-    }
-    if (roll < 0.3) {
-      const hay = DECOR_ART.hay;
-      if (canDraw(this, hay)) this.cells('obj', hay, left, top - ART * 0.5);
+  // One cell of a pasture hex. The paddock fence goes once around the whole hex: each cell only draws the sides
+  // that face a different hex (a little inside the edge), so together they make one closed fence. Open grass
+  // inside, and now and then a hay bale.
+  private paddock(g: Phaser.GameObjects.Graphics, lay: Layout, h: CityHex, dx: number, dy: number, hay: boolean): void {
+    const px = dx * T;
+    const py = dy * T;
+    const half = T / 2;
+    const inset = half - FENCE_INSET;
+    const out = (x: number, y: number) => lay.cells.get(cellKey(x, y)) !== h;
+    const n = out(dx, dy - 1);
+    const s = out(dx, dy + 1);
+    const w = out(dx - 1, dy);
+    const e = out(dx + 1, dy);
+    // Rails stop at the fence corner on a fenced side and run on to the next cell on an open one
+    const x0 = w ? px - inset : px - half;
+    const x1 = e ? px + inset : px + half;
+    const y0 = n ? py - inset : py - half;
+    const y1 = s ? py + inset : py + half;
+    const across = (y: number) => {
+      g.fillStyle(FENCE_RAIL, 1);
+      g.fillRect(x0, y - 3, x1 - x0, 2);
+      g.fillRect(x0, y + 1, x1 - x0, 2);
+      g.fillStyle(FENCE_POST, 1);
+      for (let x = x0; x <= x1; x += FENCE_GAP) g.fillRect(Math.round(x) - 1, y - 5, 3, 9);
+    };
+    const down = (x: number) => {
+      g.fillStyle(FENCE_RAIL, 1);
+      g.fillRect(x - 3, y0, 2, y1 - y0);
+      g.fillRect(x + 1, y0, 2, y1 - y0);
+      g.fillStyle(FENCE_POST, 1);
+      for (let y = y0; y <= y1; y += FENCE_GAP) g.fillRect(x - 1, Math.round(y) - 4, 3, 7);
+    };
+    if (n) across(py - inset);
+    if (w) down(px - inset);
+    if (e) down(px + inset);
+    if (s) across(py + inset);
+    if (hay) {
+      const bale = DECOR_ART.hay;
+      if (canDraw(this, bale)) this.cells('obj', bale, px - half, py - half);
     }
   }
 
