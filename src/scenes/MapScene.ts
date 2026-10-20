@@ -2,23 +2,33 @@
 import Phaser from 'phaser';
 import { GameState, MIN_WAR_TURNS, MOOD_FACE, PEACE_RETRY, TRUCE_TURNS } from '../world/game';
 import type { AttackPreview, Check, GameOptions, RoutePlan } from '../world/game';
-import { describePlacement, openPlots } from '../world/city';
+import { amenitiesUsed, amenitySlots, describePlacement, hasSiteFor } from '../world/city';
+import type { Sites } from '../world/city';
 import { hexDistance } from '../world/map';
 import { loadGame, saveGame, saveSummary } from '../world/save';
 import { BUILDINGS, BUILDING_ORDER, LEVEL_NAMES, LEVEL_POP, MAX_LEVEL, MAX_WALLS, YIELD, cityLevel, cityMaxHp, shieldMax } from '../world/tile';
 import type { Building, Improvement, Terrain, Tile } from '../world/tile';
 import { JOBS, NAVY, PALISADE_HP, TROOPS, UNIT_STATS } from '../world/units';
 import type { Job, Unit, UnitType } from '../world/units';
-import { CityView, hasPlotFor, placementNotes, shortNotes, showToast } from './CityView';
+import { CityView, placementNotes, shortNotes, showToast, siteName, siteShort } from './CityView';
+import { ART, KEEP_ART, TINY, canDraw, crispCityArt, loadCityArt } from './cityArt';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
 import { Menu } from './Menu';
 import { UNIT_SPRITE, WORKER_SPRITE, makeSprites } from './sprites';
+import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
 
 const SIZE = 28; // hex radius in px
 const SQRT3 = Math.sqrt(3);
 const DRAG_THRESHOLD = 6;
 const DOUBLE_TAP_MS = 320; // two taps on your own city this close together open the City View
+
+// Camera zoom range. At max zoom, keep zooming in on your own city to open it (task 6, zoomPush.ts).
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 3;
+const BACK_ZOOM = 2; // coming back out of a city eases out to your old zoom, at most this close
+const FADE: [number, number, number] = [20, 26, 38]; // same dark blue as the city screen's background
+const REDUCED = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
 const HEIGHT_COLOR = [0x1f5f9e, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
 const TERRAIN_NAME: Record<Terrain, string> = {
@@ -48,7 +58,7 @@ export class MapScene extends Phaser.Scene {
   private state: GameState | null = null;
   private hud!: Hud;
   private menu!: Menu;
-  private cityView!: CityView; // full-screen look inside a city (plots around the Keep)
+  private cityView!: CityView; // full-screen look inside a city (its own land, hex by hex)
   private pendingToasts: string[] = []; // hot-seat: news held back until the next person starts their turn
   private mode: Mode = 'select';
   private hovered: Tile | null = null;
@@ -64,6 +74,8 @@ export class MapScene extends Phaser.Scene {
 
   private terrainGfx!: Phaser.GameObjects.Graphics;
   private ownerGfx!: Phaser.GameObjects.Graphics;
+  private castleGfx!: Phaser.GameObjects.Graphics; // flags and crowns on the castles (or the drawn fallback city)
+  private castles: Phaser.GameObjects.Blitter | null = null; // Kenney castle tiles, one per city (null = art missing)
   private fogGfx!: Phaser.GameObjects.Graphics;
   private overlayGfx!: Phaser.GameObjects.Graphics;
   private unitGfx!: Phaser.GameObjects.Graphics;
@@ -74,7 +86,6 @@ export class MapScene extends Phaser.Scene {
   private unitSprites: Phaser.GameObjects.Sprite[] = [];
   private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
   private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
-  private cityIcons: Phaser.GameObjects.Text[] = []; // a few amenity icons above each city
   private lastTap: { tile: Tile; at: number } | null = null; // for double-tap on a city
   private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
   private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
@@ -87,14 +98,31 @@ export class MapScene extends Phaser.Scene {
   private pinchDist = 0; // distance between two fingers last frame (0 = not pinching)
   private pinching = false; // a pinch happened during this touch: don't treat release as a click
 
+  // Zoom transition into cities (task 6)
+  private push = new ZoomPush(); // wheel past max zoom over your own city
+  private pushCity: Tile | null = null; // the city that wheel push is piling up on
+  private pinchPush = new PinchPush(); // pinch past max zoom over your own city
+  private pinchCity: Tile | null = null; // your city under the fingers while pinching past max
+  private transitioning = false; // easing onto a city: input waits
+  private zoomBack = 1.2; // zoom to ease back out to when you leave the city
+
   constructor() {
     super('map');
   }
 
+  // Kenney tilesheets (castle for cities here, the whole town in the city screen). A failed download just
+  // leaves the sheet out and cities fall back to the drawn house.
+  preload(): void {
+    loadCityArt(this);
+  }
+
   create(): void {
     makeSprites(this);
+    crispCityArt(this);
     this.terrainGfx = this.add.graphics().setDepth(0);
     this.ownerGfx = this.add.graphics().setDepth(1);
+    if (this.textures.exists(TINY)) this.castles = this.add.blitter(0, 0, TINY).setDepth(1.1);
+    this.castleGfx = this.add.graphics().setDepth(1.15);
     this.fogGfx = this.add.graphics().setDepth(1.5);
     this.overlayGfx = this.add.graphics().setDepth(2);
     this.unitGfx = this.add.graphics().setDepth(3);
@@ -124,10 +152,7 @@ export class MapScene extends Phaser.Scene {
     const small = this.cameras.main.zoom < WORKER_ZOOM;
     if (small === this.smallZoom) return;
     this.smallZoom = small;
-    if (this.state) {
-      this.drawWorkers(this.state);
-      this.drawOwners(this.state); // city amenity icons hide when zoomed far out too
-    }
+    if (this.state) this.drawWorkers(this.state);
   }
 
   // ---------- flow ----------
@@ -204,7 +229,7 @@ export class MapScene extends Phaser.Scene {
   }
 
   private get playing(): boolean {
-    return this.state !== null && !this.menu.visible && !this.hud.passVisible && !this.hud.dialogVisible && !this.cityView.visible;
+    return this.state !== null && !this.menu.visible && !this.hud.passVisible && !this.hud.dialogVisible && !this.cityView.visible && !this.transitioning;
   }
 
   // Whose turn it is: with hot-seat play this is whichever person is holding the device
@@ -278,8 +303,8 @@ export class MapScene extends Phaser.Scene {
       return;
     }
     this.hud.hideIdle();
-    // Remember what stands on every plot, so finished amenities can be announced after the turn
-    const before = state.cities().map((c) => [c, c.placed.slice()] as const);
+    // Remember where every amenity stands, so finished ones can be announced after the turn
+    const before = state.cities().map((c) => [c, { ...c.sites }] as const);
     state.endTurn();
     const news = this.finishedNews(state, before);
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
@@ -295,13 +320,16 @@ export class MapScene extends Phaser.Scene {
   }
 
   // Amenities that finished for whoever's turn it is now, with where they went and why
-  private finishedNews(state: GameState, before: (readonly [Tile, (Building | null)[]])[]): string[] {
+  private finishedNews(state: GameState, before: (readonly [Tile, Sites])[]): string[] {
     const out: string[] = [];
     for (const [c, old] of before) {
       if (c.owner !== state.current || state.players[state.current].isAI) continue;
-      c.placed.forEach((b, i) => {
-        if (b && old[i] !== b) out.push(`${BUILDINGS[b].icon} ${state.cityName(c)} finished its ${BUILDINGS[b].name} on ${describePlacement(c, i, b)}`);
-      });
+      for (const b of BUILDING_ORDER) {
+        const at = c.sites[b];
+        if (at === undefined || old[b] !== undefined) continue;
+        const where = at >= 0 ? `on ${describePlacement(state, c, at, b)}` : '(waiting for a free hex, it already works)';
+        out.push(`${BUILDINGS[b].icon} ${state.cityName(c)} finished its ${BUILDINGS[b].name} ${where}`);
+      }
     }
     return out;
   }
@@ -339,11 +367,23 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
+  // Scouts: A turns auto-explore on (it walks right away, then again every turn) or off
+  private toggleExplore(): void {
+    const state = this.state;
+    const unit = this.selectedUnit;
+    if (!state || !unit || unit.owner !== this.me || unit.type !== 'scout') return;
+    this.routePreview = null;
+    const on = !unit.explore;
+    if (!state.setExplore(unit, on).ok) return this.fail();
+    this.redraw();
+    if (on) this.autoAdvance(state.tileOf(unit));
+  }
+
   // Does this unit of yours still have a real move (or an attack) left this turn?
   // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
   // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
-    if (u.owner !== this.me || u.hold || u.goal || state.players[state.current].isAI) return false;
+    if (u.owner !== this.me || u.hold || u.goal || u.explore || state.players[state.current].isAI) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     if (state.unloadTiles(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
@@ -573,6 +613,7 @@ export class MapScene extends Phaser.Scene {
     return plan;
   }
 
+  // X: cancels a route preview, a route, or exploring
   private cancelRoute(): void {
     const state = this.state;
     const unit = this.selectedUnit;
@@ -643,30 +684,90 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
   }
 
-  // Auto-place: the amenity goes to the best open plot. Say where, so the player learns the bonuses.
+  // Auto-place: the amenity goes to the best free hex of the city's land. Say where, so the player learns the bonuses.
   private build(city: Tile, b: Building): void {
     const state = this.state;
     if (!state) return;
     if (!state.startBuilding(city, b, this.me).ok) return this.fail();
     const info = BUILDINGS[b];
-    const at = city.projectPlot;
+    const at = city.projectSite;
     if (at !== null) {
-      const notes = placementNotes(city, at, b);
-      showToast(`${info.icon} ${info.name} going up on plot ${at + 1}${notes.length ? ` (${notes.join('; ')})` : ''}, ready in ${info.turns} turns`);
+      const notes = placementNotes(state, city, at, b);
+      showToast(`${info.icon} ${info.name} going up on ${siteName(state, city, at)}${notes.length ? ` (${notes.join('; ')})` : ''}, ready in ${info.turns} turns`);
     }
     this.redraw();
   }
 
-  // The City View: the city's plots around the Keep, pick a spot and build
+  // The City View: the city's own land, pick a hex and build.
+  // Every way in (double-tap, O, Open city, zooming in) eases the camera onto the city and fades into the city
+  // screen, so it feels like zooming from the kingdom down into the town. Reduced motion: straight in.
   private openCity(city: Tile): void {
     const state = this.state;
-    if (!state || !city.city || city.owner !== this.me || state.players[this.me].isAI) return;
+    if (!state || !city.city || city.owner !== this.me || state.players[this.me].isAI || this.transitioning) return;
     this.hud.hideTip();
     this.hud.hideIdle();
-    this.cityView.open(state, city, this.me, {
-      onChange: () => this.redraw(),
-      onClose: () => this.redraw(),
+    pushHint(null);
+    const cam = this.cameras.main;
+    this.zoomBack = Math.min(cam.zoom, BACK_ZOOM);
+    if (REDUCED || this.cityView.visible) {
+      this.showCity(state, city, false);
+      return;
+    }
+    this.transitioning = true;
+    const { x, y } = tileCenter(city);
+    cam.pan(x, y, 260, 'Sine.easeInOut', true);
+    cam.zoomTo(Math.min(Math.max(cam.zoom, MAX_ZOOM) * 1.3, 4.5), 300, 'Sine.easeIn', true);
+    this.time.delayedCall(180, () => cam.fadeOut(120, FADE[0], FADE[1], FADE[2]));
+    cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.transitioning = false;
+      if (this.state === state && city.city && city.owner === this.me) this.showCity(state, city, true);
+      cam.resetFX();
+      cam.setZoom(MAX_ZOOM);
     });
+  }
+
+  private showCity(state: GameState, city: Tile, zoomIn: boolean): void {
+    this.cityView.open(
+      state,
+      city,
+      this.me,
+      {
+        onChange: () => this.redraw(),
+        onClose: (user) => {
+          this.arrive(city, user);
+          this.redraw();
+        },
+      },
+      { zoomIn },
+    );
+  }
+
+  // Back from a city you chose to leave: fade in on that city and ease out to your old zoom.
+  // Forced closes (menu, next player's turn) leave the camera alone.
+  private arrive(city: Tile, user: boolean): void {
+    if (!user) return;
+    const cam = this.cameras.main;
+    const { x, y } = tileCenter(city);
+    this.push.cool(performance.now()); // leftover zoom from the city can't bounce you straight back in
+    this.pushCity = null;
+    if (REDUCED) {
+      cam.setZoom(this.zoomBack);
+      cam.centerOn(x, y);
+      return;
+    }
+    cam.resetFX();
+    cam.setZoom(MAX_ZOOM);
+    cam.centerOn(x, y);
+    cam.fadeIn(200, FADE[0], FADE[1], FADE[2]);
+    cam.zoomTo(this.zoomBack, 380, 'Sine.easeOut', true);
+  }
+
+  // Your own city under a screen point (only in select mode: claim, raise and lower never open a city)
+  private ownCityAt(sx: number, sy: number): Tile | null {
+    const state = this.state;
+    if (!state || this.mode !== 'select' || state.players[this.me].isAI) return null;
+    const t = this.tileAtScreen(sx, sy);
+    return t && t.city && t.owner === this.me ? t : null;
   }
 
   private pillage(): void {
@@ -691,6 +792,8 @@ export class MapScene extends Phaser.Scene {
   // ---------- input ----------
 
   // Two-finger pinch on phones/tablets: zoom around the point between the fingers.
+  // At max zoom over your own city, spreading further stretches the view a little; let go once it says
+  // "Release to enter" and the city opens. Not far enough (or fingers moved off the city): it springs back.
   private handlePinch(): boolean {
     const a = this.input.pointer1;
     const b = this.input.pointer2;
@@ -706,8 +809,18 @@ export class MapScene extends Phaser.Scene {
     const my = (a.y + b.y) / 2;
     const cam = this.cameras.main;
     if (this.pinchDist > 0 && dist > 0) {
+      const ratio = dist / this.pinchDist;
       const before = cam.getWorldPoint(mx, my);
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * (dist / this.pinchDist), 0.3, 3));
+      const city = this.ownCityAt(mx, my);
+      const pp = this.pinchPush;
+      if (pp.active || (city && ratio > 1 && cam.zoom >= MAX_ZOOM - 0.001 && !this.push.cooling(performance.now()))) {
+        pp.stretch(ratio);
+        this.pinchCity = city;
+        cam.setZoom(MAX_ZOOM * pp.give);
+        pushHint(pp.armed && city ? `Release to enter ${this.state?.cityName(city) ?? 'the city'}` : null);
+      } else {
+        cam.setZoom(Phaser.Math.Clamp(cam.zoom * ratio, MIN_ZOOM, MAX_ZOOM));
+      }
       cam.preRender(); // refresh the camera matrix so the next lookup uses the new zoom
       const after = cam.getWorldPoint(mx, my);
       cam.scrollX += before.x - after.x;
@@ -715,6 +828,21 @@ export class MapScene extends Phaser.Scene {
     }
     this.pinchDist = dist;
     return true;
+  }
+
+  // Both fingers are up after a pinch: open the city if the stretch was armed, otherwise spring back to max zoom
+  private endPinchPush(): void {
+    const pp = this.pinchPush;
+    if (!pp.active) return;
+    const city = pp.armed ? this.pinchCity : null;
+    pp.reset();
+    this.pinchCity = null;
+    pushHint(null);
+    if (city && this.playing) {
+      this.openCity(city);
+      return;
+    }
+    this.cameras.main.zoomTo(MAX_ZOOM, 160, 'Sine.easeOut', true);
   }
 
   private setupInput(): void {
@@ -756,6 +884,7 @@ export class MapScene extends Phaser.Scene {
           this.pinchDist = 0;
           this.pressed = false;
           this.dragging = false;
+          this.endPinchPush();
         }
         return;
       }
@@ -779,14 +908,27 @@ export class MapScene extends Phaser.Scene {
 
     // Smooth zoom: scale by how far the wheel/trackpad actually moved, so
     // trackpads (many tiny events) and mouse wheels (few big ones) feel the same.
+    // At max zoom with the pointer on your own city, zooming in keeps piling up until the city opens.
     this.input.on('wheel', (p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
       if (!this.playing) return;
       const ev = p.event as WheelEvent;
       const pinch = ev.ctrlKey; // macOS trackpad pinch arrives as ctrl+wheel
       const delta = Phaser.Math.Clamp(dy, -60, 60);
-      const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
       const cam = this.cameras.main;
-      cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, 0.3, 3));
+      const now = performance.now();
+      const city = delta < 0 ? this.ownCityAt(p.x, p.y) : null;
+      if (city !== this.pushCity) {
+        this.push.atLimit(false, now);
+        this.pushCity = city;
+      }
+      this.push.atLimit(!!city && cam.zoom >= MAX_ZOOM - 0.001, now);
+      if (city && this.push.feed(-delta * (pinch ? TRACKPAD_PINCH : 1), now)) {
+        this.pushCity = null;
+        this.openCity(city);
+        return;
+      }
+      const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM));
     });
 
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
@@ -797,7 +939,7 @@ export class MapScene extends Phaser.Scene {
       }
       // Inside a city: Esc (or O again) goes back to the map, other keys wait
       if (this.cityView.visible) {
-        if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close();
+        if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close(true);
         return;
       }
       if (this.hud.passVisible && !this.menu.visible) {
@@ -827,8 +969,12 @@ export class MapScene extends Phaser.Scene {
         this.toggleHold();
         return;
       }
-      if (key === 'X' && unit && (unit.goal || this.routePreview)) {
+      if (key === 'X' && unit && (unit.goal || unit.explore || this.routePreview)) {
         this.cancelRoute();
+        return;
+      }
+      if (key === 'A' && unit && unit.type === 'scout') {
+        this.toggleExplore();
         return;
       }
       if (key === 'C' && unit && unit.type === 'settler') {
@@ -980,7 +1126,11 @@ export class MapScene extends Phaser.Scene {
       ];
       const home = state.homeCity(tile);
       if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]}, ${tile.pop} people ${MOOD_FACE[state.mood(tile)]})`);
-      else if (home && tile.owner !== null) lines.push(`Land of ${state.cityName(home)}`);
+      else if (home && tile.owner !== null) {
+        const ti = state.tileIndex(tile);
+        const b = BUILDING_ORDER.find((k) => home.sites[k] === ti);
+        lines.push(`Land of ${state.cityName(home)}${b ? ` · ${BUILDINGS[b].icon} ${BUILDINGS[b].name}` : ''}`);
+      }
       if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}${tile.wallTurns ? ` · walls going up (${tile.wallTurns})` : ''}`);
       if (tile.city && tile.owner !== null && tile.owner !== this.me && !state.sandbox) {
         lines.push(state.atWar(this.me, tile.owner) ? `At war with ${state.players[tile.owner].name}` : `At peace with ${state.players[tile.owner].name}`);
@@ -1046,6 +1196,7 @@ export class MapScene extends Phaser.Scene {
       status.lines!.push(aboard.length ? 'Green hexes = unload the next unit there.' : 'Land units board by moving onto it.');
     } else if (stats.scout) {
       status.lines!.push("Crosses closed borders at peace to look around. Hills, mountains and forests cost 1 less. Can't fight.");
+      if (unit.explore) status.lines!.push('Exploring: walks into the fog by itself every turn');
     } else {
       status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
     }
@@ -1066,19 +1217,34 @@ export class MapScene extends Phaser.Scene {
         lines.push(active ? `On a route: about ${turns(active.turns)} left` : 'On a route');
         lines.push('Moves by itself at the start of each turn. Stops if enemies show up.');
         if (unit.waited) lines.push(`Waiting for one of your units to get out of the way (${unit.waited})`);
+      } else if (unit.explore) {
+        lines.push('Exploring: picks its own way into the fog at the start of each turn.');
+        lines.push('Stops when enemy troops show up or nothing is left. Tap a far hex to send it somewhere instead.');
       } else {
         lines.push('Tap a far hex to plan a multi-turn route.');
       }
       if (unit.goal || pv) {
         buttons.push({ label: pv ? 'Cancel preview' : 'Cancel route', key: 'X', enabled: true, hint: pv ? 'clear the path' : 'stop here', onClick: () => this.cancelRoute() });
       }
-      sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : 'none', lines, buttons });
+      sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : unit.explore ? 'exploring' : 'none', lines, buttons });
     }
 
     const actions: PanelButton[] = [];
     if (unit.type === 'settler') {
       const c = state.foundCheck(unit);
       actions.push({ label: 'Found city here', key: 'C', enabled: c.ok, hint: c.ok ? 'uses the settler' : c.reason, onClick: () => this.foundCity() });
+    }
+    if (unit.type === 'scout' && unit.owner === this.me) {
+      // Exploring already: the button just stops it. Otherwise check there's somewhere left to go.
+      const c = unit.explore ? null : state.exploreCheck(unit);
+      actions.push({
+        label: unit.explore ? 'Stop exploring' : 'Explore',
+        key: 'A',
+        enabled: !c || c.ok,
+        hint: c ? (c.ok ? 'walks into the fog by itself' : c.reason) : 'exploring',
+        active: unit.explore === true,
+        onClick: () => this.toggleExplore(),
+      });
     }
     if (stats.military && unit.owner === this.me) {
       const c = state.pillageCheck(unit);
@@ -1146,7 +1312,7 @@ export class MapScene extends Phaser.Scene {
     const growLines = [
       `${city.pop} people \u00b7 eat ${Math.floor(city.pop / 2)} food \u00b7 ${need > 0 ? note || `+${rate.toFixed(1)} growth/turn` : 'full size'}`,
     ];
-    if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)}, +1 plot)`);
+    if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)}, room for 1 more amenity)`);
     sections.push({
       heading: 'People',
       summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`,
@@ -1190,33 +1356,33 @@ export class MapScene extends Phaser.Scene {
       ],
     });
 
-    // Amenities: one project at a time, shared with training troops. Each one stands on a plot around the Keep:
-    // these buttons auto-place it on the best open plot, Open city picks the spot by hand.
-    const plotsOpen = openPlots(city, state.isSimple(this.me));
-    const plotsUsed = city.placed.filter(Boolean).length + (city.projectPlot !== null ? 1 : 0);
+    // Amenities: one project at a time, shared with training troops. Each one stands on a hex of the city's land:
+    // these buttons auto-place it on the best free hex, Open city picks the spot by hand.
+    const slots = amenitySlots(city, state.isSimple(this.me));
+    const used = amenitiesUsed(city);
     const buildButtons: PanelButton[] = [
       {
         label: '\u{1F3F0} Open city',
         key: 'O',
         enabled: true,
-        hint: `${plotsUsed}/${plotsOpen} plots used \u00b7 pick spots`,
+        hint: `${used}/${slots} amenities \u00b7 pick spots`,
         onClick: () => this.openCity(city),
       },
     ];
     const built = BUILDING_ORDER.filter((b) => city.buildings.includes(b));
     for (const b of BUILDING_ORDER) {
       if (city.buildings.includes(b)) continue;
-      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // inland: no Harbor
-      if (!hasPlotFor(city, b)) continue; // no plot it can stand on (no hills: no Workshop)
+      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // no water: no Harbor
+      if (!hasSiteFor(state, city, b)) continue; // no hex it can stand on (no hills: no Workshop)
       const info = BUILDINGS[b];
       const c = state.buildCheck(city, b, this.me);
       const doing = city.project === b;
       let where = '';
-      if (doing && city.projectPlot !== null) where = ` \u00b7 plot ${city.projectPlot + 1}`;
+      if (doing && city.projectSite !== null) where = ` \u00b7 ${siteShort(state, city, city.projectSite)}`;
       else if (c.ok) {
-        const at = state.autoPlot(city, b, this.me);
-        const bonus = at !== null ? shortNotes(placementNotes(city, at, b)) : '';
-        where = at !== null ? ` \u00b7 plot ${at + 1}${bonus ? ` ${bonus}` : ''}` : '';
+        const at = state.autoSite(city, b, this.me);
+        const bonus = at !== null ? shortNotes(placementNotes(state, city, at, b)) : '';
+        where = at !== null ? ` \u00b7 ${siteShort(state, city, at)}${bonus ? ` ${bonus}` : ''}` : '';
       }
       buildButtons.push({
         label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`,
@@ -1228,10 +1394,10 @@ export class MapScene extends Phaser.Scene {
     }
     sections.push({
       heading: 'Amenities',
-      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${plotsUsed}/${plotsOpen} plots`,
+      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${used}/${slots}`,
       lines: [
         built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
-        'Buttons pick the best plot for you. Open city (O or double-tap the city) to choose the spot yourself.',
+        "Buttons pick the best hex of the city's land for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.",
       ],
       buttons: buildButtons,
       grid: true,
@@ -1271,7 +1437,7 @@ export class MapScene extends Phaser.Scene {
       summary: `${state.cityLand(city).length} tiles${open > 0 ? ` \u00b7 ${open} open` : ''}`,
       lines: claiming
         ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
-        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'}`],
+        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'} \u00b7 every tile is also room in the city`],
       buttons: [
         {
           label: claiming ? 'Done claiming' : 'Claim land',
@@ -1551,6 +1717,8 @@ export class MapScene extends Phaser.Scene {
   private drawOwners(state: GameState): void {
     const g = this.ownerGfx;
     g.clear();
+    this.castles?.clear();
+    this.castleGfx.clear();
     const map = state.map;
     let names = 0;
     for (const t of map.tiles) {
@@ -1591,14 +1759,44 @@ export class MapScene extends Phaser.Scene {
           g.lineStyle(1.5 + t.walls * 1.5, 0x9ca3af, 1);
           g.strokePoints(hexCorners(x, y, SIZE - 4), true);
         }
-        this.drawCity(g, x, y, color, t.capital);
+        this.drawCastle(x, y, color, t.capital);
         this.drawCityBars(g, t, x, y);
-        this.cityIcon(names, x, y, t);
         this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
-    for (let i = names; i < this.cityIcons.length; i++) this.cityIcons[i].setVisible(false);
+  }
+
+  // A city on the map: the Kenney castle (the same one as the Keep inside the city) with a flag in the owner's
+  // color on top. Capitals get a gold crown on the flagpole. Falls back to the drawn house if the art is missing.
+  private drawCastle(x: number, y: number, color: number, capital: boolean): void {
+    const b = this.castles;
+    const g = this.castleGfx;
+    if (!b || !canDraw(this, KEEP_ART.cells)) {
+      this.drawCity(g, x, y, color, capital);
+      return;
+    }
+    const left = Math.round(x - (KEEP_ART.w * ART) / 2);
+    const top = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
+    for (const c of KEEP_ART.cells) b.create(left + c.x * ART, top + c.y * ART, c.f);
+    // Flag on the battlements
+    const px = Math.round(x);
+    const py = top + 1;
+    const h = 8;
+    g.lineStyle(1.5, 0x2a1d14, 1);
+    g.lineBetween(px, py, px, py - h);
+    g.fillStyle(color, 1);
+    g.fillTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    g.lineStyle(1, 0x111111, 0.85);
+    g.strokeTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    if (capital) {
+      const base = py - h - 1;
+      g.fillStyle(0xfacc15, 1);
+      g.fillRect(px - 4, base - 2, 8, 2);
+      g.fillTriangle(px - 4, base - 2, px - 4, base - 6, px - 2, base - 2);
+      g.fillTriangle(px - 1.5, base - 2, px, base - 7, px + 1.5, base - 2);
+      g.fillTriangle(px + 2, base - 2, px + 4, base - 6, px + 4, base - 2);
+    }
   }
 
   // Explored land that's out of sight right now gets a dark veil
@@ -1655,17 +1853,6 @@ export class MapScene extends Phaser.Scene {
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
 
-  // Up to 3 amenity icons above a city (the latest ones built), so you can read a city's build from the map
-  private cityIcon(i: number, x: number, y: number, t: Tile): void {
-    let label = this.cityIcons[i];
-    if (!label) {
-      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '10px' }).setOrigin(0.5).setDepth(4.1);
-      this.cityIcons.push(label);
-    }
-    const icons = t.buildings.slice(-3).map((b) => BUILDINGS[b].icon).join('');
-    label.setText(icons).setPosition(x, y - (t.capital ? 31 : 21)).setVisible(icons.length > 0 && !this.smallZoom);
-  }
-
   // Health bar (only when damaged) with the wall shield bar above it.
   private drawCityBars(g: Phaser.GameObjects.Graphics, t: Tile, x: number, y: number): void {
     const w = 30;
@@ -1702,7 +1889,6 @@ export class MapScene extends Phaser.Scene {
     const unit = this.selectedUnit;
 
     if (this.reach.size > 0 && unit) {
-      // Dim everything the unit can't reach so the lit hexes pop.
       const home = state.tileOf(unit);
       g.fillStyle(0x000000, 0.4);
       for (const t of state.map.tiles) {
@@ -1725,7 +1911,6 @@ export class MapScene extends Phaser.Scene {
         }
       }
     }
-    // Where a transport can drop off its passengers: green
     for (const t of this.unloadAt) {
       const { x, y } = tileCenter(t);
       const pts = hexCorners(x, y, SIZE - 3);
@@ -1738,7 +1923,6 @@ export class MapScene extends Phaser.Scene {
     }
     if (this.targets.size > 0 && unit) {
       if (this.reach.size === 0) {
-        // No moves left but can still attack: dim the rest so targets stand out
         const home = state.tileOf(unit);
         g.fillStyle(0x000000, 0.4);
         for (const t of state.map.tiles) {
@@ -1754,7 +1938,6 @@ export class MapScene extends Phaser.Scene {
         g.fillPoints(pts, true);
         g.lineStyle(3, 0xf87171, 1);
         g.strokePoints(pts, true);
-        // crosshair
         g.lineStyle(2, 0xffffff, 0.9);
         g.strokeCircle(x, y - 14, 5);
         g.lineBetween(x - 8, y - 14, x + 8, y - 14);
@@ -1762,7 +1945,6 @@ export class MapScene extends Phaser.Scene {
       }
     }
     if (this.mode === 'claim') {
-      // Claim zone: this city's area (hexes within CLAIM_RADIUS of it). Dim everything else hard.
       const city = this.claimCity;
       const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, this.me))));
       g.fillStyle(0x000000, 0.55);
@@ -1771,9 +1953,8 @@ export class MapScene extends Phaser.Scene {
         const { x, y } = tileCenter(t);
         g.fillPoints(hexCorners(x, y, SIZE), true);
       }
-      // Inside the zone: green + price = buy now; darkened = not reachable yet (or water / someone else's)
       for (const t of zone) {
-        if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue; // already this city's
+        if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue;
         const { x, y } = tileCenter(t);
         const pts = hexCorners(x, y, SIZE - 3);
         const c = state.check('claim', t, this.me, city);
@@ -1788,7 +1969,6 @@ export class MapScene extends Phaser.Scene {
           g.fillPoints(pts, true);
         }
       }
-      // Yellow line around the edge of the zone
       g.lineStyle(3, 0xfacc15, 0.95);
       for (const t of zone) {
         const { x, y } = tileCenter(t);
@@ -1796,9 +1976,7 @@ export class MapScene extends Phaser.Scene {
         for (let i = 0; i < 6; i++) {
           const n = state.map.neighborAt(t, EDGE_TO_DIR[i]);
           if (n && zone.has(n)) continue;
-          const a = pts[i];
-          const b = pts[(i + 1) % 6];
-          g.lineBetween(a.x, a.y, b.x, b.y);
+          g.lineBetween(pts[i].x, pts[i].y, pts[(i + 1) % 6].x, pts[(i + 1) % 6].y);
         }
       }
     }
@@ -1841,7 +2019,7 @@ export class MapScene extends Phaser.Scene {
       g.strokeCircle(p.x, p.y, 15);
     } else if (tile.city) {
       g.lineStyle(3, 0xfacc15, 1);
-      g.strokeCircle(x, y - 2, tile.capital ? 21 : 18);
+      g.strokeCircle(x, y - 2, 23);
     }
     this.drawRoute(g);
   }
@@ -1950,13 +2128,20 @@ export class MapScene extends Phaser.Scene {
         badge.fillCircle(x - 9 + k * 6, y - 13, 2.5);
         badge.strokeCircle(x - 9 + k * 6, y - 13, 2.5);
       }
-      // Status badge for your units: cyan arrow = on a route, green dot = ready, gray = holding
+      // Status badge for your units: cyan arrow = on a route, cyan eye = exploring, green dot = ready, gray = holding
       if (u.owner === this.me && u.goal) {
         badge.fillStyle(0x22d3ee, 1);
         badge.lineStyle(1, 0x000000, 0.7);
         const tri = [new Phaser.Math.Vector2(x + 6, y - 15), new Phaser.Math.Vector2(x + 15, y - 10), new Phaser.Math.Vector2(x + 6, y - 5)];
         badge.fillPoints(tri, true);
         badge.strokePoints(tri, true);
+      } else if (u.owner === this.me && u.explore) {
+        badge.fillStyle(0x22d3ee, 1);
+        badge.lineStyle(1, 0x000000, 0.7);
+        badge.fillEllipse(x + 10, y - 10, 12, 8);
+        badge.strokeEllipse(x + 10, y - 10, 12, 8);
+        badge.fillStyle(0x0f172a, 1);
+        badge.fillCircle(x + 10, y - 10, 2.2);
       } else if (u.owner === this.me && !state.players[state.current].isAI && (u.moves > 0 || !u.acted)) {
         badge.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
         badge.lineStyle(1, 0x000000, 0.6);
@@ -1978,6 +2163,7 @@ export class MapScene extends Phaser.Scene {
     if (s.anims.currentAnim?.key !== key) s.play({ key, startFrame: i % 2 });
   }
 
+  // Fallback city (no Kenney art): a little house in the owner's color, with a crown on capitals
   private drawCity(g: Phaser.GameObjects.Graphics, x: number, y: number, color: number, capital: boolean): void {
     const s = capital ? 1.25 : 1;
     g.fillStyle(0x1b1b1b, 1);

@@ -1,7 +1,12 @@
-// DOM overlay: stats, mode bar, selection panel, tooltip and game-over screen.
+// DOM overlay: top resource bar, mode bar, selection panel, tooltip and game-over screen.
 // Reads from the world, never writes to it: clicks go back through handlers.
 import type { GameState } from '../world/game';
-import { CLAIM_RADIUS, DIFFICULTY } from '../world/game';
+import { CAPITAL_INCOME, CITY_INCOME, CLAIM_RADIUS, DIFFICULTY, troopUpkeep } from '../world/game';
+import { cityBonus } from '../world/city';
+import { BUILDINGS, cityLevel } from '../world/tile';
+import type { Tile } from '../world/tile';
+import { UNIT_STATS } from '../world/units';
+import type { UnitType } from '../world/units';
 
 export type BarMode = 'select' | 'claim';
 
@@ -67,15 +72,15 @@ export interface DialogModel {
   buttons: DialogButton[];
 }
 
+// Dropdowns under the top bar: gold breakdown (income and army upkeep), kingdoms table, recent news
+type Drop = 'gold' | 'kingdoms' | 'log';
+
 // Claiming land is a city action now (city panel), so the bar only needs Select.
 const MODES: { id: BarMode; label: string; key: string }[] = [{ id: 'select', label: 'Select', key: '1' }];
 
 const CSS = `
 .k-hud { position: fixed; inset: 0; pointer-events: none; font: 14px/1.35 system-ui, sans-serif; color: #eee; }
 .k-panel { position: absolute; background: rgba(15,15,20,0.9); border: 1px solid #333; border-radius: 8px; padding: 10px 12px; pointer-events: auto; }
-.k-stats { top: 12px; left: 12px; min-width: 230px; }
-.k-stats b { color: #fff; }
-.k-row { display: flex; justify-content: space-between; gap: 12px; }
 .k-res { font-size: 12px; color: #ccc; }
 .k-dead { opacity: 0.4; text-decoration: line-through; }
 .k-log { font-size: 12px; color: #aaa; }
@@ -86,9 +91,31 @@ const CSS = `
 .k-hud button:disabled { opacity: 0.45; cursor: default; }
 .k-bar button.k-end { background: #15803d; border-color: #22c55e; margin-left: 8px; }
 .k-hud kbd { opacity: 0.6; font-size: 11px; margin-right: 4px; }
-.k-help { top: 12px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
-/* Selection panel sits top-right (under the ? button) so it never covers the stats panel */
-.k-sel { top: 56px; right: 12px; width: 280px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
+/* Top resource bar (Civ style): one slim strip, tap gold or taxes for the breakdown. Leaves room for the ? button. */
+.k-top { top: 8px; left: 8px; right: 56px; display: flex; align-items: center; gap: 2px; padding: 3px 6px; overflow-x: auto; scrollbar-width: none; white-space: nowrap; touch-action: pan-x; box-sizing: border-box; }
+.k-top::-webkit-scrollbar { display: none; }
+.k-top .k-turn { font-weight: 600; flex: none; margin-right: 6px; padding-left: 4px; }
+.k-top .k-sep { width: 1px; height: 20px; background: #34343f; margin: 0 4px; flex: none; }
+.k-top .k-right { margin-left: auto; display: flex; gap: 2px; flex: none; padding-left: 8px; }
+.k-chip { position: relative; display: inline-flex; align-items: baseline; gap: 5px; flex: none; padding: 5px 8px; border-radius: 6px; font-size: 13px; color: #ccc; }
+.k-hud button.k-chip { background: transparent; border: 1px solid transparent; padding: 5px 8px; font-size: 13px; }
+.k-hud button.k-chip:hover:not(:disabled) { background: #262630; }
+.k-hud button.k-chip.k-on { background: #262630; border-color: #4b4b58; }
+.k-chip .k-ic { font-size: 13px; }
+.k-chip .k-lab { color: #9ca3af; }
+.k-chip b { color: #fff; font-size: 14px; }
+.k-chip small { color: #8b8b99; font-size: 12px; }
+.k-chip.k-warn b, .k-chip.k-warn small { color: #f87171; }
+.k-chip .k-mini { position: absolute; left: 8px; right: 8px; bottom: 1px; height: 2px; background: #23232b; border-radius: 2px; overflow: hidden; }
+.k-chip .k-mini span { display: block; height: 100%; }
+.k-drop { top: 56px; left: 8px; width: 290px; max-height: calc(100% - 140px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; box-sizing: border-box; display: none; }
+.k-drop h4:first-child { margin-top: 0; }
+.k-line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: #ccc; padding: 2px 0; }
+.k-line.k-total { border-top: 1px solid #2c2c36; margin-top: 3px; padding-top: 4px; color: #fff; font-weight: 600; }
+.k-line.k-net { margin-top: 10px; border-top-color: #4b4b58; font-size: 14px; }
+.k-help { top: 56px; right: 12px; max-width: 260px; font-size: 12px; color: #bbb; }
+/* Selection panel sits top-right under the How to play box */
+.k-sel { top: 100px; right: 12px; width: 280px; max-height: calc(100% - 180px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-sizing: border-box; }
 .k-sel .k-lines { font-size: 12px; line-height: 1.45; color: #bbb; margin: 2px 0 6px; }
 .k-sel .k-sub { font-size: 12px; color: #9ca3af; margin: -2px 0 6px; }
 .k-sel .k-sec { border-top: 1px solid #2c2c36; padding-top: 4px; margin-top: 4px; }
@@ -106,24 +133,16 @@ const CSS = `
 .k-meter .k-fill { height: 100%; border-radius: 4px; }
 .k-meter span:last-child { width: 52px; text-align: right; }
 .k-sel .k-foot { font-size: 11px; color: #777; margin-top: 8px; }
-.k-stats h4, .k-help h4 { margin: 8px 0 3px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; }
+.k-drop h4, .k-help h4 { margin: 10px 0 3px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8b8b99; }
 .k-help ul { margin: 0; padding-left: 16px; }
 .k-help li { margin: 2px 0; }
 .k-mode { font-weight: 400; font-size: 11px; color: #8b8b99; margin-left: 6px; }
-.k-resrow { display: flex; align-items: baseline; gap: 6px; font-size: 12px; margin: 3px 0; }
-.k-resrow .k-ic { width: 16px; text-align: center; }
-.k-resrow .k-lab { width: 38px; color: #9ca3af; }
-.k-resrow b { min-width: 34px; font-size: 14px; color: #fff; }
-.k-resrow .k-note { color: #8b8b99; font-size: 11px; }
-.k-resrow .k-note.k-warn { color: #f87171; }
-.k-foodbar { height: 4px; background: #23232b; border-radius: 3px; margin: -1px 0 5px 60px; overflow: hidden; }
-.k-foodbar div { height: 100%; }
 .k-tab { width: 100%; border-collapse: collapse; font-size: 12px; color: #ccc; }
 .k-tab th { font-size: 10px; font-weight: 500; color: #8b8b99; text-align: right; padding: 0 0 2px; }
 .k-tab td { padding: 2px 0 2px 10px; text-align: right; }
 .k-tab td:first-child { text-align: left; padding-left: 0; }
 .k-tab tr.k-you td { color: #fff; font-weight: 600; }
-.k-tab .k-war { color: #f87171; font-size: 10px; font-weight: 600; margin-left: 4px; }
+.k-war { color: #f87171; font-size: 10px; font-weight: 600; margin-left: 4px; }
 .k-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
 .k-sel button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; margin-top: 5px; padding: 7px 10px; font-size: 13px; text-align: left; box-sizing: border-box; }
 /* Button = name on top (one line), cost or reason underneath in small grey text */
@@ -168,18 +187,21 @@ const CSS = `
 .k-collapsed { padding: 6px 10px; }
 @media (max-width: 700px) {
   .k-hud { font-size: 12px; }
-  .k-stats { min-width: 0; max-width: 46vw; }
+  .k-top { right: 48px; }
+  .k-top .k-mode, .k-chip .k-lab { display: none; }
+  .k-hud button.k-chip, .k-chip { padding: 5px 6px; }
+  .k-drop { right: 8px; width: auto; }
   .k-help { max-width: 46vw; }
   .k-bar { flex-wrap: wrap; justify-content: center; width: calc(100% - 40px); bottom: 8px; padding: 6px; }
   .k-hud button { padding: 6px 8px; }
-  .k-sel { top: auto; right: auto; left: 12px; bottom: 120px; width: 210px; max-height: calc(100% - 180px); }
+  .k-sel { top: auto; right: auto; left: 12px; bottom: 120px; width: 210px; max-height: calc(100% - 220px); }
   .k-idle { bottom: 120px; }
   .k-sel .k-grid { grid-template-columns: 1fr; }
 }
 /* Phones sideways: not much height, so the selection panel runs down the right side and scrolls */
 @media (orientation: landscape) and (max-height: 500px) {
-  .k-sel { left: auto; right: max(8px, env(safe-area-inset-right)); top: 52px; bottom: auto; width: 230px; max-height: calc(100% - 60px); }
-  .k-stats { max-height: calc(100% - 70px); overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+  .k-sel { left: auto; right: max(8px, env(safe-area-inset-right)); top: 96px; bottom: auto; width: 230px; max-height: calc(100% - 104px); }
+  .k-drop { max-height: calc(100% - 64px); }
 }
 `;
 
@@ -353,15 +375,29 @@ class Collapsible {
   }
 }
 
+// One item in the top bar. With a drop key it's a button that opens that dropdown.
+interface Chip {
+  drop?: Drop;
+  icon: string;
+  label: string;
+  value?: string;
+  note?: string; // small text after the value (trusted HTML)
+  tip: string; // hover text
+  warn?: boolean; // red: losing gold, out of food
+  bar?: { pct: number; color: string }; // thin meter under the chip (food)
+}
+
 export class Hud {
   private root: HTMLDivElement;
-  private stats: HTMLDivElement;
+  private top: HTMLDivElement; // resource bar across the top
+  private dropBox: HTMLDivElement; // dropdown under the bar
+  private drop: Drop | null = null;
+  private last: { state: GameState; mode: string } | null = null; // to redraw when a dropdown opens
   private tip: HTMLDivElement;
   private over: HTMLDivElement;
   private overText: HTMLDivElement;
   private help: HTMLDivElement;
   private sel: HTMLDivElement;
-  private statsBox: Collapsible;
   private helpBox: Collapsible;
   private selBox: Collapsible;
   private modeBtns = new Map<BarMode, HTMLButtonElement>();
@@ -383,10 +419,6 @@ export class Hud {
     const prefs = loadCollapsed();
     this.prefs = prefs;
 
-    this.statsBox = new Collapsible('k-panel k-stats', 'stats', false, prefs);
-    this.stats = this.statsBox.body;
-    this.root.appendChild(this.statsBox.panel);
-
     // Starts minimized so it doesn't cover the map; open it when you need it
     this.helpBox = new Collapsible('k-panel k-help', 'help2', true, prefs);
     this.helpBox.head.textContent = 'How to play';
@@ -397,6 +429,20 @@ export class Hud {
     this.sel = this.selBox.body;
     this.root.appendChild(this.selBox.panel);
     this.selBox.panel.style.display = 'none';
+
+    // Top bar and its dropdown go after the side panels so the dropdown draws on top of them
+    this.top = el('k-panel k-top');
+    this.top.onclick = (e) => {
+      const b = (e.target as HTMLElement).closest('[data-drop]') as HTMLElement | null;
+      if (!b) return;
+      const key = b.dataset.drop as Drop;
+      this.drop = this.drop === key ? null : key;
+      b.blur();
+      if (this.last) this.update(this.last.state, this.last.mode);
+    };
+    this.root.appendChild(this.top);
+    this.dropBox = el('k-panel k-drop');
+    this.root.appendChild(this.dropBox);
 
     const bar = el('k-panel k-bar');
     for (const m of MODES) {
@@ -439,7 +485,6 @@ export class Hud {
   }
 
   private placePanels(): void {
-    this.statsBox.place();
     this.helpBox.place();
     if (this.selBox.panel.style.display !== 'none') this.selBox.place();
   }
@@ -450,7 +495,7 @@ export class Hud {
   }
 
   update(state: GameState, mode: string): void {
-    const land = state.landCount();
+    this.last = { state, mode };
     const cur = state.current; // whoever is playing right now (hot-seat: changes every turn)
     const me = state.players[cur];
     const free = state.options.freeBuild;
@@ -466,45 +511,61 @@ export class Hud {
     const who = state.hotseat
       ? ` <span class="k-who"><span class="k-dot" style="background:#${me.color.toString(16).padStart(6, '0')}"></span>${escape(me.name)}</span>`
       : '';
-    this.statsBox.head.innerHTML = `Turn ${state.turn}${who} <span class="k-mode">${modeLabel}</span>`;
 
-    // One row per resource: name, amount, plain-English note
-    const row = (icon: string, label: string, value: string, note: string, warn = false) =>
-      `<div class="k-resrow"><span class="k-ic">${icon}</span><span class="k-lab">${label}</span>` +
-      `<b>${value}</b><span class="k-note${warn ? ' k-warn' : ''}">${note}</span></div>`;
+    // Taxes = gold you actually get each turn: city and land income minus army upkeep. Tap for the breakdown.
+    const taxes = state.grossIncome(cur) - state.upkeep(cur);
     const foodPct = made > 0 ? Math.min(100, (used / made) * 100) : 100;
-    const net = state.income(cur);
-    const pay = state.upkeep(cur);
-    const goldNote = free
-      ? 'free building on'
-      : `${net >= 0 ? '+' : ''}${net} next turn${pay ? ` (troops cost ${pay})` : ''}`;
-    const mine =
-      row('\u{1FA99}', 'Gold', free ? '\u221e' : String(me.gold), goldNote, !free && net < 0) +
-      row('\u{1F33E}', 'Food', `${used}/${made}`, left > 0 ? `${left} spare: room for more units` : 'full: build farms', left <= 0) +
-      `<div class="k-foodbar"><div style="width:${foodPct}%;background:${left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e'}"></div></div>` +
-      row('\u{1F465}', 'People', String(state.population(cur)), `eat ${state.popFood(cur)} food`) +
-      row('\u{1FAA8}', 'Stone', String(me.stone), state.stoneIncome(cur) > 0 ? `+${state.stoneIncome(cur)} next turn` : 'build mines for walls') +
-      row('\u{1F40E}', 'Horses', `${state.horsesUsed(cur)}/${state.horsesMade(cur)}`, state.horsesMade(cur) > 0 ? 'knights' : 'build a pasture for knights') +
-      row('\u{1F332}', 'Bows', `${state.bowsUsed(cur)}/${state.bowsMade(cur)}`, state.bowsMade(cur) > 0 ? 'archers' : 'plant a forest for archers');
+    const foodColor = left <= 0 ? '#ef4444' : left <= 2 ? '#eab308' : '#22c55e';
+    const stoneIn = state.stoneIncome(cur);
+    const horsesMade = state.horsesMade(cur);
+    const lumberMade = state.bowsMade(cur); // forests: each one supplies lumber for 2 archers
+    const atWar = state.players.some((p) => p.alive && p.id !== cur && state.atWar(cur, p.id));
 
-    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
-    const rows = state.players
-      .map((p) => {
-        const tiles = state.ownedLand(p.id);
-        const color = `#${p.color.toString(16).padStart(6, '0')}`;
-        const cells = p.alive
-          ? `<td>${Math.round((tiles / land) * 100)}%</td><td>${state.cityCount(p.id)}</td><td>${state.unitsOf(p.id).length}</td>`
-          : `<td colspan="3">defeated</td>`;
-        const war = p.alive && state.atWar(cur, p.id) ? '<span class="k-war">AT WAR</span>' : '';
-        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === cur ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${escape(p.name)}${war}</td>${cells}</tr>`;
-      })
-      .join('');
-    const table = state.sandbox
-      ? `<div class="k-res" style="margin-top:6px">${plural(state.cityCount(cur), 'city')} · ${plural(state.unitsOf(cur).length, 'unit')}</div>`
-      : `<h4>Kingdoms</h4><table class="k-tab"><tr><th></th><th>Land</th><th>Cities</th><th>Units</th></tr>${rows}</table>`;
-    const recent = state.log.slice(-4).reverse().map((l) => escape(l.replace(/^T(\d+): /, 'Turn $1 · ')));
-    this.stats.innerHTML =
-      mine + table + (recent.length ? `<h4>What happened</h4><div class="k-log">${recent.join('<br>')}</div>` : '');
+    this.top.innerHTML =
+      `<span class="k-turn">Turn ${state.turn}${who}<span class="k-mode">${modeLabel}</span></span>` +
+      chip(this.drop, {
+        drop: 'gold', icon: '\u{1FA99}', label: 'Gold', value: free ? '\u221e' : String(me.gold),
+        tip: free ? 'Free building is on' : 'Gold: tap for the breakdown',
+      }) +
+      (free
+        ? ''
+        : chip(this.drop, {
+          drop: 'gold', icon: '\u{1F4B0}', label: 'Taxes', value: signed(taxes), warn: taxes < 0,
+          tip: 'Taxes: gold you get each turn after paying your army (tap for the breakdown)',
+        })) +
+      '<span class="k-sep"></span>' +
+      chip(this.drop, {
+        icon: '\u{1F33E}', label: 'Food', value: `${used}/${made}`, warn: left <= 0, bar: { pct: foodPct, color: foodColor },
+        tip: left > 0 ? `Food: ${left} spare, room for more units` : 'Food: full, build farms or fisheries',
+      }) +
+      chip(this.drop, { icon: '\u{1F465}', label: 'People', value: String(state.population(cur)), tip: `People: eat ${state.popFood(cur)} food` }) +
+      chip(this.drop, {
+        icon: '\u{1FAA8}', label: 'Stone', value: String(me.stone), note: stoneIn > 0 ? `+${stoneIn}` : '',
+        tip: stoneIn > 0 ? `Stone: +${stoneIn} next turn` : 'Stone: build mines for walls',
+      }) +
+      chip(this.drop, {
+        icon: '\u{1F40E}', label: 'Horses', value: `${state.horsesUsed(cur)}/${horsesMade}`,
+        tip: horsesMade > 0 ? 'Horses: room for knights' : 'Horses: build a pasture for knights',
+      }) +
+      chip(this.drop, {
+        icon: '\u{1FAB5}', label: 'Lumber', value: `${state.bowsUsed(cur)}/${lumberMade}`,
+        tip: lumberMade > 0 ? 'Lumber: room for archers' : 'Lumber: plant a forest for archers',
+      }) +
+      '<span class="k-right">' +
+      chip(this.drop, {
+        drop: 'kingdoms', icon: '\u{1F451}', label: state.sandbox ? 'Kingdom' : 'Kingdoms',
+        note: atWar ? '<span class="k-war">AT WAR</span>' : '', tip: 'Kingdoms: land, cities and units',
+      }) +
+      chip(this.drop, { drop: 'log', icon: '\u{1F4DC}', label: 'News', tip: 'What happened lately' }) +
+      '</span>';
+
+    if (this.drop) {
+      this.dropBox.innerHTML =
+        this.drop === 'gold' ? this.goldHtml(state) : this.drop === 'kingdoms' ? this.kingdomsHtml(state) : this.logHtml(state);
+      this.dropBox.style.display = 'block';
+    } else {
+      this.dropBox.style.display = 'none';
+    }
 
     const uses = DIFFICULTY[state.options.difficulty].builderUses;
     this.help.innerHTML =
@@ -512,11 +573,12 @@ export class Hud {
       `<li>Click a <b>city</b> to train units, build walls (W), claim land (K) or rename it.</li>` +
       `<li>Click a <b>unit</b>, then a lit hex to move. Click it again or Esc to deselect.</li>` +
       `<li><b>Routes:</b> with a unit selected, tap a far hex to see the path and turns, tap it again to go. It walks there by itself each turn (X cancels).</li>` +
-      `<li><b>End turn</b> (Space) when you're done.</li></ul>` +
+      `<li><b>End turn</b> (Space) when you're done.</li>` +
+      `<li><b>Taxes</b> in the top bar is the gold you get each turn after paying your army. Tap it to see where it comes from.</li></ul>` +
       `<h4>Units</h4><ul>` +
-      `<li><b>Builder</b> (hammer): farms (food), pastures (horses), forests (bows), mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
-      `<li>Each pasture lets you keep 2 Knights, each forest 2 Archers. Forests are slow to cross but good cover.</li>` +
-      `<li>Troops eat 2 food (Knights 3), workers 1. Farms make 2.</li>` +
+      `<li><b>Builder</b> (hammer): farms (food), pastures (horses), forests (lumber), mines (stone), roads, raise/lower land. One job per turn${uses ? `, ${uses} jobs total` : ''}.</li>` +
+      `<li>Each pasture lets you keep 2 Knights, each forest gives lumber for 2 Archers. Forests are slow to cross but good cover.</li>` +
+      `<li>Troops eat 2 food (Knights 3) and cost the same in gold each turn, workers eat 1. Farms make 2.</li>` +
       `<li><b>Settler</b> (flag): founds a new city on grass, 3+ hexes from others.</li>` +
       `<li><b>Swordsman</b> beats Archer, <b>Archer</b> (shoots 2 hexes) beats Knight, <b>Knight</b> (fast) beats Swordsman.</li>` +
       `<li>Units heal 25% per turn on your land.</li></ul>` +
@@ -537,6 +599,64 @@ export class Hud {
     } else {
       this.over.style.display = 'none';
     }
+  }
+
+  // ---------- top bar dropdowns ----------
+
+  // Income per city (biggest first) plus worked land, then army upkeep per troop type, then taxes per turn
+  private goldHtml(state: GameState): string {
+    const p = state.current;
+    if (state.isFree(p)) return '<h4>Gold</h4><div class="k-log">Free building is on: nothing costs gold.</div>';
+    const line = (name: string, n: number, cls = '') => `<div class="k-line${cls}"><span>${name}</span><span>${signed(n)}</span></div>`;
+    const cities = state
+      .cities()
+      .filter((c) => c.owner === p)
+      .map((c) => ({ name: state.cityName(c), gold: cityIncome(state, c) }))
+      .sort((a, b) => b.gold - a.gold);
+    const income = state.grossIncome(p);
+    const land = income - cities.reduce((s, c) => s + c.gold, 0);
+    let html = '<h4>Income</h4>' + cities.map((c) => line(escape(c.name), c.gold)).join('');
+    if (land) html += line('Worked land', land);
+    html += line('Total income', income, ' k-total');
+
+    const counts = new Map<UnitType, number>();
+    for (const u of state.armyOf(p)) if (troopUpkeep(u.type) > 0) counts.set(u.type, (counts.get(u.type) ?? 0) + 1);
+    const pay = state.upkeep(p);
+    html += '<h4>Army upkeep</h4>';
+    if (!counts.size) {
+      html += '<div class="k-log">No troops: nothing to pay</div>';
+    } else {
+      for (const [t, n] of counts) html += line(`${n} ${unitPlural(UNIT_STATS[t].name, n)}`, -n * troopUpkeep(t));
+      html += line('Total upkeep', -pay, ' k-total');
+    }
+    html += line('Taxes per turn', income - pay, ' k-total k-net');
+    return html;
+  }
+
+  private kingdomsHtml(state: GameState): string {
+    const cur = state.current;
+    const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    if (state.sandbox) {
+      return `<h4>Your kingdom</h4><div class="k-res">${plural(state.cityCount(cur), 'city')} · ${plural(state.unitsOf(cur).length, 'unit')}</div>`;
+    }
+    const land = state.landCount();
+    const rows = state.players
+      .map((p) => {
+        const tiles = state.ownedLand(p.id);
+        const color = `#${p.color.toString(16).padStart(6, '0')}`;
+        const cells = p.alive
+          ? `<td>${Math.round((tiles / land) * 100)}%</td><td>${state.cityCount(p.id)}</td><td>${state.unitsOf(p.id).length}</td>`
+          : `<td colspan="3">defeated</td>`;
+        const war = p.alive && state.atWar(cur, p.id) ? '<span class="k-war">AT WAR</span>' : '';
+        return `<tr class="${p.alive ? '' : 'k-dead'}${p.id === cur ? ' k-you' : ''}"><td><span class="k-dot" style="background:${color}"></span>${escape(p.name)}${war}</td>${cells}</tr>`;
+      })
+      .join('');
+    return `<h4>Kingdoms</h4><table class="k-tab"><tr><th></th><th>Land</th><th>Cities</th><th>Units</th></tr>${rows}</table>`;
+  }
+
+  private logHtml(state: GameState): string {
+    const recent = state.log.slice().reverse().map((l) => escape(l.replace(/^T(\d+): /, 'Turn $1 · ')));
+    return `<h4>What happened</h4><div class="k-log">${recent.length ? recent.join('<br>') : 'Nothing yet'}</div>`;
   }
 
   showPanel(model: PanelModel | null): void {
@@ -724,6 +844,40 @@ export class Hud {
   hideTip(): void {
     this.tip.style.display = 'none';
   }
+}
+
+// What one city brings in each turn. Mirrors GameState.grossIncome (worked land is counted separately).
+function cityIncome(state: GameState, c: Tile): number {
+  let gold = c.capital ? CAPITAL_INCOME : CITY_INCOME;
+  gold += cityLevel(c) - 1;
+  for (const b of c.buildings) gold += BUILDINGS[b].gold;
+  gold += cityBonus(state, c).gold;
+  if (state.mood(c) === 'happy') gold += 1;
+  return gold;
+}
+
+function chip(open: Drop | null, c: Chip): string {
+  const cls = `k-chip${c.warn ? ' k-warn' : ''}${c.drop && open === c.drop ? ' k-on' : ''}`;
+  const inner =
+    `<span class="k-ic">${c.icon}</span><span class="k-lab">${c.label}</span>` +
+    (c.value ? `<b>${c.value}</b>` : '') +
+    (c.note ? `<small>${c.note}</small>` : '') +
+    (c.bar ? `<span class="k-mini"><span style="width:${c.bar.pct}%;background:${c.bar.color}"></span></span>` : '');
+  return c.drop
+    ? `<button class="${cls}" data-drop="${c.drop}" title="${c.tip}">${inner}</button>`
+    : `<span class="${cls}" title="${c.tip}">${inner}</span>`;
+}
+
+// +5, \u22123, 0
+function signed(n: number): string {
+  return n > 0 ? `+${n}` : n < 0 ? `\u2212${-n}` : '0';
+}
+
+function unitPlural(name: string, n: number): string {
+  if (n === 1) return name;
+  if (name.endsWith('man')) return `${name.slice(0, -3)}men`;
+  if (name.endsWith('s')) return `${name}es`;
+  return `${name}s`;
 }
 
 function el(className: string): HTMLDivElement {

@@ -84,6 +84,7 @@ export interface Unit {
   uses?: number; // builders on Normal/Hard: jobs left before they retire (undefined = unlimited)
   goal?: { col: number; row: number }; // multi-turn route target: moves itself at the start of each turn
   waited?: number; // turns in a row it was stuck behind one of your units
+  explore?: boolean; // scouts on auto-explore: walk toward the fog by themselves at the start of each turn
   cargo?: Unit[]; // transports: land units on board (they're off the map until unloaded)
 }
 
@@ -109,7 +110,7 @@ export const JOBS: { id: Job; label: string; key: string }[] = [
   { id: 'farm', label: 'Farm (food)', key: 'F' },
   { id: 'fishery', label: 'Fishery (food, on water)', key: 'G' },
   { id: 'pasture', label: 'Pasture (horses)', key: 'P' },
-  { id: 'forest', label: 'Plant forest (bows)', key: 'T' },
+  { id: 'forest', label: 'Plant forest (lumber)', key: 'T' },
   { id: 'mine', label: 'Mine', key: 'M' },
   { id: 'road', label: 'Road', key: 'R' },
   { id: 'palisade', label: `Palisade (${PALISADE_STONE} stone)`, key: 'E' },

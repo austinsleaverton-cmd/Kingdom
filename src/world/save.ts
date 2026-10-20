@@ -1,13 +1,17 @@
 // Save/load the game in the browser's localStorage. No Phaser imports.
-import { linkPlots, placeExisting, setupPlots } from './city';
+import { migratePlots } from './city';
+import { decodeDeco, decodeStash, encodeDeco } from './deco';
 import { DIFFICULTY, GameState, MAP_SIZES, seatsFor } from './game';
 import type { Difficulty, GameOptions } from './game';
-import { BUILDING_ORDER, LEVEL_POP, PLOT_COUNT, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
-import type { Building, PlayerId, PlotTerrain } from './tile';
+import { savedMapDimensions } from './mapSizes';
+import type { MapDimensions } from './mapSizes';
+import { BUILDING_ORDER, LEVEL_POP, cityMaxHp, levelFromPop, shieldMax, terrainFromHeight } from './tile';
+import type { Building, PlayerId } from './tile';
 import { UNIT_STATS } from './units';
 import type { Training, Unit } from './units';
 
-const KEY = 'kingdom-save-v3';
+// The test build at /dev/ shares browser storage with the live game, so it gets its own slot
+const KEY = import.meta.env.VITE_CHANNEL === 'dev' ? 'kingdom-save-v3-dev' : 'kingdom-save-v3';
 const CITY = 1;
 const CAPITAL = 2;
 const ROAD = 4;
@@ -17,13 +21,15 @@ const PASTURE = 32;
 const FOREST = 64;
 const FISHERY = 128;
 
-// City View plots: one letter per plot
-const PLOT_CODE: Record<PlotTerrain, string> = { water: 'w', sand: 's', grass: 'g', hills: 'h' };
-const PLOT_FROM: Record<string, PlotTerrain> = { w: 'water', s: 'sand', g: 'grass', h: 'hills' };
+// City View layout version: 2 = amenities and decorations on the city's own territory (docs/CITY_BUILDER.md).
+// Saves without it used six plots around the Keep and a square town; they're moved over on load.
+const LAYOUT = 2;
 
 interface SaveData {
   version: 3;
+  layout?: number; // City View layout (see LAYOUT). Missing = the old plots
   options: GameOptions;
+  mapDimensions?: MapDimensions; // absent in legacy saves: restore their original preset, never today's size
   turn: number;
   current: PlayerId;
   winner: PlayerId | null;
@@ -40,8 +46,17 @@ interface SaveData {
   peaceAsked?: Record<string, number>; // pair -> turn an AI refused peace
   explored?: string[]; // fog of war, per player: one '0'/'1' per tile
   palisades?: Record<number, number>; // tile index -> palisade HP
-  // City View, city tile index -> [plot terrain letters, amenity on each plot (BUILDING_ORDER index, -1 none), reserved plot (-1 none)]
+  // Layout 2: city tile index -> [BUILDING_ORDER index, map tile index of its hex (-1 waiting), ...] and the hex
+  // reserved for the amenity under construction (-1 none)
+  sites?: Record<number, number[]>;
+  projectSites?: Record<number, number>;
+  // Old layout only (read, never written): city tile index -> [plot terrain letters, amenity on each plot
+  // (BUILDING_ORDER index, -1 none), reserved plot (-1 none)]
   plots?: Record<number, [string, number[], number]>;
+  // City Builder decorations and paths, city tile index -> flat [x, y, kind, x, y, kind, ...] (kind = DECO_ORDER
+  // index), in ground cells from the Keep (same cells in both layouts). Older saves: none
+  deco?: Record<number, number[]>;
+  decoStash?: Record<number, number[]>; // city tile index -> stored decoration kinds (no room right now)
   // per tile: [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, buildings (bits), project (-1 none), projectTurns]
   // (everything after flags only for cities)
   tiles: [number, PlayerId | null, number, ...number[]][];
@@ -57,9 +72,12 @@ export interface SaveSummary {
 }
 
 export function saveGame(state: GameState): void {
+  const cityTiles = state.map.tiles.flatMap((t, i) => (t.city ? [[t, i] as const] : []));
   const data: SaveData = {
     version: 3,
+    layout: LAYOUT,
     options: state.options,
+    mapDimensions: { width: state.map.width, height: state.map.height },
     turn: state.turn,
     current: state.current,
     winner: state.winner,
@@ -76,13 +94,12 @@ export function saveGame(state: GameState): void {
     peaceAsked: state.peaceAsked,
     explored: state.explored.map((a) => Array.from(a).join('')),
     palisades: Object.fromEntries(state.map.tiles.flatMap((t, i) => (t.palisade ? [[i, t.palisade]] : []))),
-    plots: Object.fromEntries(
-      state.map.tiles.flatMap((t, i) =>
-        t.city && t.plots.length === PLOT_COUNT
-          ? [[i, [t.plots.map((p) => PLOT_CODE[p]).join(''), t.placed.map((b) => (b ? BUILDING_ORDER.indexOf(b) : -1)), t.projectPlot ?? -1]]]
-          : [],
-      ),
+    sites: Object.fromEntries(
+      cityTiles.map(([t, i]) => [i, BUILDING_ORDER.flatMap((b, k) => (t.sites[b] !== undefined ? [k, t.sites[b]!] : []))]),
     ),
+    projectSites: Object.fromEntries(cityTiles.flatMap(([t, i]) => (t.project && t.projectSite !== null ? [[i, t.projectSite]] : []))),
+    deco: Object.fromEntries(cityTiles.flatMap(([t, i]) => (t.deco?.length ? [[i, encodeDeco(t)]] : []))),
+    decoStash: Object.fromEntries(cityTiles.flatMap(([t, i]) => (t.decoStash?.length ? [[i, t.decoStash.slice()]] : []))),
     tiles: state.map.tiles.map((t) => {
       const flags =
         (t.city ? CITY : 0) |
@@ -111,7 +128,8 @@ function readSave(): SaveData | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as SaveData;
-    if (data.version !== 3 || !MAP_SIZES[data.options.size]) return null;
+    if (data.version !== 3 || !Object.prototype.hasOwnProperty.call(MAP_SIZES, data.options.size)) return null;
+    if (!Array.isArray(data.tiles) || !savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions)) return null;
     return data;
   } catch {
     return null;
@@ -121,9 +139,10 @@ function readSave(): SaveData | null {
 export function saveSummary(): SaveSummary | null {
   const data = readSave();
   if (!data) return null;
+  const dims = savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions)!;
   return {
     turn: data.turn,
-    sizeLabel: MAP_SIZES[data.options.size].label,
+    sizeLabel: `${MAP_SIZES[data.options.size].label} (${dims.width}x${dims.height})`,
     opponents: data.options.opponents,
     difficulty: DIFFICULTY[data.options.difficulty] ? data.options.difficulty : 'normal',
     finished: data.winner !== null,
@@ -131,12 +150,21 @@ export function saveSummary(): SaveSummary | null {
   };
 }
 
+// A saved map tile index, or -1 (waiting) when it isn't one
+function tileIndexOr(v: unknown, tiles: number, none: number): number {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n < tiles ? n : none;
+}
+
 export function loadGame(): GameState | null {
   const data = readSave();
   if (!data) return null;
   try {
-    const state = new GameState(data.options);
+    const dims = savedMapDimensions(data.options.size, data.tiles.length, data.mapDimensions);
+    if (!dims) return null;
+    const state = new GameState(data.options, dims);
     if (data.tiles.length !== state.map.tiles.length) return null;
+    const count = state.map.tiles.length;
     state.map.tiles.forEach((t, i) => {
       const [height, owner, flags, hp, walls, shield, level, growth, wallTurns, pop, culture, borders, bits, project, projectTurns] = data.tiles[i];
       t.height = height;
@@ -162,24 +190,10 @@ export function loadGame(): GameState | null {
       t.shield = t.city ? (shield ?? shieldMax(t)) : 0;
       t.home = data.homes && data.homes.length === data.tiles.length ? data.homes[i] : null;
       t.palisade = data.palisades?.[i] ?? 0;
-      t.plots = [];
-      t.placed = [];
-      t.projectPlot = null;
-    });
-    // City View plots (second pass: the land around each city has to be loaded first)
-    state.map.tiles.forEach((t, i) => {
-      if (!t.city) return;
-      const saved = data.plots?.[i];
-      if (saved && saved[0].length === PLOT_COUNT && saved[1].length === PLOT_COUNT) {
-        t.plots = saved[0].split('').map((c) => PLOT_FROM[c] ?? 'grass');
-        t.placed = saved[1].map((k): Building | null => (k >= 0 && k < BUILDING_ORDER.length ? BUILDING_ORDER[k] : null));
-        t.projectPlot = t.project && saved[2] >= 0 && saved[2] < PLOT_COUNT ? saved[2] : null;
-      } else {
-        // Older saves: plots from the land around the city, built amenities placed for you
-        setupPlots(state.map, t);
-      }
-      linkPlots(state.map, t); // which map hex each plot faces (for facing bonuses)
-      placeExisting(t); // anything built but not on a plot yet gets one
+      t.sites = {};
+      t.projectSite = null;
+      t.deco = [];
+      t.decoStash = [];
     });
     state.players.forEach((p, i) => {
       const saved = data.players[i];
@@ -207,9 +221,36 @@ export function loadGame(): GameState | null {
     state.assignMissingHomes();
     state.cityNames = { ...(data.names ?? {}) };
     state.nameMissingCities();
-    // A half-built amenity from an older save: reserve the plot it will go on
+    // City View (second pass: every city's land has to be loaded first, its layout comes from it)
+    const fresh = data.layout === LAYOUT;
     for (const c of state.cities()) {
-      if (c.project && c.projectPlot === null && c.owner !== null) c.projectPlot = state.autoPlot(c, c.project, c.owner);
+      const i = state.tileIndex(c);
+      if (fresh) {
+        const flat = data.sites?.[i] ?? [];
+        for (let k = 0; k + 1 < flat.length; k += 2) {
+          const b: Building | undefined = BUILDING_ORDER[Number(flat[k])];
+          if (b && c.buildings.includes(b)) c.sites[b] = tileIndexOr(flat[k + 1], count, -1);
+        }
+        const ps = data.projectSites?.[i];
+        c.projectSite = c.project && ps !== undefined ? tileIndexOr(ps, count, -1) : null;
+        if (c.projectSite === -1) c.projectSite = null;
+      } else {
+        // Old plots: plot i faced the map hex in direction i, so its amenity moves onto that hex (city.ts)
+        const saved = data.plots?.[i];
+        const placed = saved && Array.isArray(saved[1])
+          ? saved[1].map((k): Building | null => (k >= 0 && k < BUILDING_ORDER.length ? BUILDING_ORDER[k] : null))
+          : [];
+        migratePlots(state, c, placed, saved && saved[2] >= 0 ? saved[2] : null);
+      }
+      // Decorations keep their cells (both layouts measure from the Keep); settleCity moves anything that's off
+      // the city's land now, or stores it when there's no room. Nothing is dropped.
+      c.deco = decodeDeco(data.deco?.[i]);
+      c.decoStash = decodeStash(data.decoStash?.[i]);
+      state.settleCity(c, true);
+    }
+    // A half-built amenity from an older save: reserve the hex it will go on
+    for (const c of state.cities()) {
+      if (c.project && c.projectSite === null && c.owner !== null) c.projectSite = state.autoSite(c, c.project, c.owner);
     }
     // Fog of war: what each kingdom has seen (older saves start with what's in sight now)
     const n = state.map.tiles.length;

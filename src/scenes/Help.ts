@@ -1,13 +1,15 @@
 // The "?" button (top-right, always visible: start screen and in game) and the rules guide it opens.
 // Numbers come straight from src/world so the guide stays right when the rules change.
-import { ADJACENCY, FACING_BONUS, TERRAIN_BONUS, bonusAmount } from '../world/city';
+import { WAR_RULES } from '../world/ai';
+import { ADJACENCY, BEAUTY_MAX, BEAUTY_STEP, TERRAIN_BONUS, WORK_BONUS, bonusAmount } from '../world/city';
+import { DECOS, DECO_PRICE } from '../world/deco';
 import {
   ANGRY_AT, ARCHERS_PER_FOREST, BIG_CLAIM_RADIUS, CAPITAL_FOOD, CAPITAL_INCOME, CITY_FOOD, CITY_INCOME, CITY_SIGHT, CITY_SPACING, CLAIM_RADIUS,
   DIFFICULTY, EASY_HAPPY, FARM_FOOD, FISHERY_FOOD, HAPPY_AT, HAPPY_BASE, HARBOR_FISH, HOME_HEAL, KNIGHTS_PER_PASTURE, MAX_POP, MINE_STONE,
   MIN_WAR_TURNS, MOOD_FACE, PEACE_RETRY, PILLAGE_GOLD, START_SIGHT, TRUCE_TURNS, UNHAPPY_AT, UNIT_SIGHT, WIN_SHARE, troopUpkeep,
 } from '../world/game';
 import type { Difficulty } from '../world/game';
-import { BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_WALLS, PLOTS_BY_LEVEL, PLOT_COUNT, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
+import { AMENITY_SLOTS, BUILDINGS, BUILDING_ORDER, CLAIM_COST, LEVEL_NAMES, LEVEL_POP, MAX_AMENITIES, MAX_WALLS, WALL_SHIELD, WALL_STONE, WALL_TURNS, YIELD } from '../world/tile';
 import { JOB_COST, PALISADE_COVER, PALISADE_HP, PALISADE_RANGE, PALISADE_REGEN, PALISADE_STONE, UNIT_STATS } from '../world/units';
 
 const CSS = `
@@ -37,6 +39,17 @@ const CSS = `
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const DIFFS = Object.keys(DIFFICULTY) as Difficulty[];
 
+// "20% chance a turn, only with an army 25% stronger than its target, keeps the peace 15 turns after a treaty"
+function warHabit(d: Difficulty): string {
+  if (DIFFICULTY[d].smart) return 'as soon as it can';
+  const w = WAR_RULES[d];
+  const parts = [`${pct(w.chance)} chance a turn`];
+  if (w.edge > 0) parts.push(`only with an army ${pct(w.edge - 1)} stronger than its target`);
+  if (w.peace > TRUCE_TURNS) parts.push(`keeps the peace ${w.peace} turns after a treaty`);
+  if (w.rest > 0) parts.push(`rests ${w.rest} turns after any war`);
+  return parts.join(', ');
+}
+
 function difficultyTable(): string {
   const row = (label: string, f: (d: Difficulty) => string) =>
     `<tr><td>${label}</td>${DIFFS.map((d) => `<td>${f(d)}</td>`).join('')}</tr>`;
@@ -46,12 +59,14 @@ function difficultyTable(): string {
     row('AI gold', (d) => pct(c(d).income)) +
     row('AI army size', (d) => `up to ${c(d).maxArmy}`) +
     row('AI may start wars from', (d) => `turn ${c(d).attackTurn}`) +
+    row('AI starts a war', warHabit) +
     row('AI walls', (d) => `up to ${c(d).maxWalls}`) +
     row('AI tactics', (d) => (c(d).smart ? 'counters your troops, picks off wounded units, retreats to heal' : 'simple')) +
     row('AI goes after', (d) => (c(d).focusHuman ? 'people first' : 'whoever is closest')) +
     row(`AI can win by holding ${pct(WIN_SHARE)} land`, (d) => (c(d).landWin ? 'yes' : 'no')) +
     row('AI pillages your land', (d) => (c(d).pillage ? 'yes' : 'no')) +
     row('Your builder jobs', (d) => (c(d).builderUses ? `${c(d).builderUses}, then it retires` : 'unlimited')) +
+    row('Decorations', (d) => (d === 'easy' ? 'free, just for looks' : `${DECO_PRICE[d].small}g each, count toward happiness`)) +
     `</table>`
   );
 }
@@ -63,9 +78,9 @@ function bonusList(): string {
   return [...TERRAIN_BONUS, ...ADJACENCY].map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${amount(r)}</li>`).join('');
 }
 
-// "Workshop facing a mine: +1 stone"
-function facingList(): string {
-  return FACING_BONUS.map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${bonusAmount(r)}</li>`).join('');
+// "Workshop next to a mine: +1 stone"
+function workList(): string {
+  return WORK_BONUS.map((r) => `<li>${BUILDINGS[r.b].icon} ${BUILDINGS[r.b].name} ${r.note}: ${bonusAmount(r)}</li>`).join('');
 }
 
 function guideHtml(): string {
@@ -91,9 +106,10 @@ function guideHtml(): string {
       'Gold, food, stone',
       `<ul><li><b>Gold</b> each turn: <b>worked improvements only</b> pay terrain gold (grass/sand ${YIELD.grass}, hills ${YIELD.hills}, mountains ${YIELD.mountain}, water ${YIELD.water}). Bare land and idle improvements pay nothing; roads and palisades alone do not produce gold. Cities separately pay ${CITY_INCOME} each (${CAPITAL_INCOME} for the capital) + 1 per city level above 1, + Markets and Harbors, +1 per happy city.</li>` +
         `<li><b>Troops get paid</b> every turn: ${troopUpkeep('swordsman')} gold for a Swordsman or Archer, ${troopUpkeep('knight')} for a Knight, ${troopUpkeep('trireme')} for a Trireme, ${troopUpkeep('galleass')} for a Galleass. Builders, settlers and transports are free.</li>` +
+        `<li><b>Taxes</b> in the top bar is the gold you get each turn after paying your troops. Tap Gold or Taxes for where it comes from.</li>` +
         `<li><b>Food</b> is a limit, not a pile: capital ${CAPITAL_FOOD}, each city ${CITY_FOOD}, each worked farm ${FARM_FOOD}, each worked fishery ${FISHERY_FOOD} (+${HARBOR_FISH} with a Harbor), +1 per city level, Granaries +2, Mills +1 per worked farm. Every unit uses some (below), and every 2 people eat 1. Spare food makes cities grow; if you run short, cities shrink.</li>` +
         `<li><b>Stone</b>: each worked mine makes ${MINE_STONE} a turn, each Workshop 1. Used for city walls, palisades and catapults.</li>` +
-        `<li><b>Horses</b>: each worked pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Bows</b>: each worked forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
+        `<li><b>Horses</b>: each worked pasture supports ${KNIGHTS_PER_PASTURE} Knights. <b>Lumber</b>: each worked forest supports ${ARCHERS_PER_FOREST} Archers.</li></ul>`,
     ),
     sec(
       'Cities and land',
@@ -101,6 +117,7 @@ function guideHtml(): string {
         `<li>Each city owns land around it. <b>Claim land</b> (city panel) buys more within ${CLAIM_RADIUS} hexes (${BIG_CLAIM_RADIUS} once it's a ${LEVEL_NAMES[2]}). ` +
         `Grass ${CLAIM_COST.grass}g, sand ${CLAIM_COST.sand}g, hills ${CLAIM_COST.hills}g, mountains ${CLAIM_COST.mountain}g, water ${CLAIM_COST.water}g, a little more each time. Water counts as yours but not toward the land-share win.</li>` +
         `<li><b>Borders grow by themselves</b>: each city makes culture (1 + 1 per 3 people + Temples, Parks, Arenas). When the bar fills it grabs the best free tile next to its land, a bit slower each time.</li>` +
+        `<li>Every hex a city owns is also room inside it: more land means more places for amenities and more ground to decorate (see City View).</li>` +
         `<li><b>One thing at a time</b>: a city trains one unit, builds walls or builds one amenity, never two at once. Builders show up right away, so you can still make those.</li>` +
         `<li><b>Walls</b> (city panel): up to ${MAX_WALLS} levels for ${JOB_COST.walls}g + ${WALL_STONE.join('/')} stone, paid up front. They take ${WALL_TURNS.join('/')} turns to build. Each level adds a ${WALL_SHIELD} point shield that soaks damage first. Losing the city loses half-built walls.</li>` +
         `<li>Cities heal every turn unless enemy troops are within 2 hexes (a siege), and don't grow under siege.</li></ul>`,
@@ -109,12 +126,13 @@ function guideHtml(): string {
       'People',
       `<ul><li>Spare food fills a city's growth bar; a full bar is one more person (up to ${MAX_POP}). Happy cities grow 50% faster.</li>` +
         `<li><b>People are workers</b>: each person works one farm, fishery, mine, pasture or forest on the city's land (the city takes turns between the kinds). Only those worked improvements earn terrain gold. Extra ones sit idle and make nothing until the city grows.</li>` +
-        `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food, health and one more building plot; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
+        `<li>City size comes from people: ${LEVEL_NAMES.map((n, i) => `${n} ${LEVEL_POP[i]}+`).join(', ')}. Each level adds gold, food, health and room for one more amenity; a ${LEVEL_NAMES[2]} claims land 4 hexes out and a ${LEVEL_NAMES[4]} trains troops a turn faster.</li>` +
         `<li>The number on a city's name tag is its people; the face is its mood. The little icons above a city are its latest amenities.</li></ul>`,
     ),
     sec(
       'Happiness',
       `<ul><li>Every city starts at +${HAPPY_BASE} (capital +1 more, your cities +${EASY_HAPPY} more on Easy). Every 2 people take 1 away (crowding), every 2 of your troops on enemy land take 1 away (up to 3), and a siege takes 2.</li>` +
+        `<li><b>Beautiful streets</b> (Normal and Hard): every ${BEAUTY_STEP} beauty from decorations is +1 happy, up to +${BEAUTY_MAX}. See Decorating.</li>` +
         `<li>${MOOD_FACE.happy} Happy (+${HAPPY_AT} or more): grows 50% faster and pays +1 gold. ${MOOD_FACE.content} Content: normal. ${MOOD_FACE.unhappy} Unhappy (${UNHAPPY_AT} or less): stops growing. ${MOOD_FACE.angry} Angry (${ANGRY_AT} or less): people leave.</li></ul>`,
     ),
     sec(
@@ -122,20 +140,34 @@ function guideHtml(): string {
       `<table><tr><th>Amenity</th><th>Gold</th><th>Turns</th><th>Needs</th><th>Does</th></tr>` +
         BUILDING_ORDER.map((b) => {
           const i = BUILDINGS[b];
-          return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people${i.plot ? `, a ${i.plot} plot` : ''}</td><td>${i.note}</td></tr>`;
+          return `<tr><td>${i.icon} ${i.name}</td><td>${i.cost}</td><td>${i.turns}</td><td>${i.minPop} people${i.plot ? `, a ${i.plot} hex` : ''}</td><td>${i.note}</td></tr>`;
         }).join('') +
         `</table><ul><li>Built from the city panel or the City View. While a city builds one it can't train troops or build walls (builders still work).</li>` +
-        `<li>Losing the city loses a half-built amenity; finished ones stay, on the same plots.</li></ul>`,
+        `<li>Losing the city loses a half-built amenity; finished ones stay, on the same hexes.</li></ul>`,
     ),
     sec(
-      'City View (building plots)',
-      `<ul><li>Every amenity stands on a <b>plot</b> around the city's Keep. There are ${PLOT_COUNT} plots; a ${LEVEL_NAMES[0]} can use ${PLOTS_BY_LEVEL[0]}, and each bigger size opens one more (${LEVEL_NAMES.map((n, k) => `${n} ${PLOTS_BY_LEVEL[k]}`).join(', ')}).</li>` +
-        `<li>Each plot takes the terrain of the map hex in that direction: water next to the city gives a water plot (for a Harbor), hills give a hills plot (for a Workshop). Mountains count as hills.</li>` +
-        `<li><b>Open the city</b>: double-tap your city, press <kbd>O</kbd>, or use Open city in the city panel. Tap a plot to see what fits there and what each building would earn on that exact spot. \u2605 marks the best spot.</li>` +
-        `<li>A quick double-tap opens the city. Tap once, then again a moment later, to pick the unit standing in it.</li>` +
-        `<li>The build buttons in the city panel <b>place it for you</b> on the best open plot, and tell you where it went.</li>` +
-        `<li><b>Placement bonuses</b> (neighbors are the plots on either side):<ul>${bonusList()}</ul></li>` +
-        `<li><b>Facing bonuses</b>: each plot faces the map hex in its direction (the small hexes around the edge of the City View). An improvement or road there, on your land, helps the building on that plot. It's live: if it gets pillaged, the bonus stops until it's rebuilt.<ul>${facingList()}</ul></li></ul>`,
+      'City View (building on your land)',
+      `<ul><li><b>Open the city</b>: double-tap your city, press <kbd>O</kbd>, use Open city in the city panel, or keep zooming in on it. You see the city's real land: every hex it owns, shaped like it is on the map, with its coast, sand and hills. Your border is drawn in your color; neighbouring land, other cities and rival kingdoms show dimmed around it.</li>` +
+        `<li>Every amenity stands in the middle of one <b>hex of the city's land</b>, one per hex. The Keep has its own hex. A Harbor needs a water hex, a Workshop hills (mountains count as hills), a Mill grass; everything else goes on any land hex.</li>` +
+        `<li>A city can have ${AMENITY_SLOTS[0]} amenities as a ${LEVEL_NAMES[0]}, and room for one more at each bigger size (${LEVEL_NAMES.map((n, k) => `${n} ${AMENITY_SLOTS[k]}`).join(', ')}, never more than ${MAX_AMENITIES}). More land gives them more places to go.</li>` +
+        `<li>Building on a hex never touches what's worked there: a farm, mine, road or fishery keeps working under the amenity. The little icon in a hex's corner shows what's worked on it.</li>` +
+        `<li>Tap a hex to see what fits there and what each building would earn on that exact spot. \u2605 marks the best spot. Tap a built amenity to see dotted lines to the hexes paying its bonuses.</li>` +
+        `<li>A quick double-tap on the map opens the city. Tap once, then again a moment later, to pick the unit standing in it.</li>` +
+        `<li>The build buttons in the city panel <b>place it for you</b> on the best free hex, and tell you where it went.</li>` +
+        `<li><b>Placement bonuses</b> (next to = a hex touching it on the map):<ul>${bonusList()}</ul></li>` +
+        `<li><b>Work bonuses</b>: an improvement or road on the amenity's hex or next to it, on your land, helps it. Counts once, however many there are. It's live: if it gets pillaged, the bonus stops until it's rebuilt.<ul>${workList()}</ul></li>` +
+        `<li>If a hex leaves the city (you found a new city on it), its amenity moves to the best free hex. With no free hex it waits and keeps working until there's room. You can't found a city on top of an amenity.</li></ul>`,
+    ),
+    sec(
+      'Decorating',
+      `<ul><li>In the City View, tap <b>Decorate</b>: pick something from the tray and tap open ground on your land to place it. Drag a decoration to move it (free), use the Eraser to remove it, and Undo takes back your last change.</li>` +
+        `<li><b>Paths</b>: pick Dirt or Stone path and drag to paint a road. They join up by themselves and are always free. Benches, banners and the like can stand on a path.</li>` +
+        `<li><b>Cost</b>: free on Easy and Free Play. Normal ${DECO_PRICE.normal.small}g each (Statue ${DECO_PRICE.normal.statue}g, Fountain ${DECO_PRICE.normal.fountain}g), Hard ${DECO_PRICE.hard.small}g each (Statue ${DECO_PRICE.hard.statue}g, Fountain ${DECO_PRICE.hard.fountain}g). Removing doesn't give gold back.</li>` +
+        `<li><b>Beauty</b> (Normal and Hard): most decorations are ${DECOS.tree.beauty} beauty, a Statue ${DECOS.statue.beauty}, a Fountain ${DECOS.fountain.beauty}; paths count 0. Every ${BEAUTY_STEP} beauty in a city is +1 happy ("Beautiful streets"), up to +${BEAUTY_MAX}. The meter at the top of the tray shows how close you are. On Easy and Free Play decorations are just for looks.</li>` +
+        `<li><b>The whole city is yours to decorate</b>: every hex it owns. The town grows with its borders: each hex it claims or grabs with culture is new ground.</li>` +
+        `<li>Nothing goes on the water, the Keep or an amenity, and the middle of each hex (and the spot to its right) is kept clear for an amenity: paths only there.</li>` +
+        `<li>If the city's land changes under a decoration, it moves to the nearest open ground; with no room it's stored and comes back by itself later. Nothing is thrown away.</li>` +
+        `<li>Decorations belong to their city. If it's captured, the new owner keeps them (and their beauty). The computer never decorates.</li></ul>`,
     ),
     sec(
       'Builders',
@@ -143,7 +175,7 @@ function guideHtml(): string {
         `<li>Farm ${JOB_COST.farm}g (grass or sand), Pasture ${JOB_COST.pasture}g and Forest ${JOB_COST.forest}g (grass), Mine ${JOB_COST.mine}g (hills or mountains), Road ${JOB_COST.road}g, Raise/Lower land ${JOB_COST.raise}g.</li>` +
         `<li><b>Fishery</b> ${JOB_COST.fishery}g: builders can wade into <b>your own water</b> (1 move per hex) and set one up. A worked fishery gives ${FISHERY_FOOD} food, ${FISHERY_FOOD + HARBOR_FISH} if its city has a Harbor.</li>` +
         `<li>A new job replaces what was there. Roads (and cities) cut movement cost to half, but only for their owner: enemy roads don't help invaders.</li>` +
-        `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain.</li>` +
+        `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain. An amenity already standing on the hex stays.</li>` +
         `<li>Forests cost 2 moves to cross and give cover like hills.</li>` +
         `<li><b>Palisade</b> (<kbd>E</kbd>) ${JOB_COST.palisade}g + ${PALISADE_STONE} stone: on your land within ${PALISADE_RANGE} hexes of a city (farms and mines under it keep working). Enemies can't walk through it, they have to break it (${PALISADE_HP} HP, heals ${PALISADE_REGEN} a turn when no enemies are near). Your own units pass freely and take ${pct(1 - PALISADE_COVER)} less damage standing on one. Catapults and the Galleass break them fastest; Knights are bad at it.</li></ul>`,
     ),
@@ -152,9 +184,9 @@ function guideHtml(): string {
       `<table><tr><th>Unit</th><th>Gold</th><th>Food</th><th>Moves</th><th>HP</th><th>Attack</th><th>Notes</th></tr>` +
         `<tr><td>Builder</td><td>${u.builder.cost}</td><td>${u.builder.food}</td><td>${u.builder.moves}</td><td>${u.builder.hp}</td><td>-</td><td>builds, ready at once</td></tr>` +
         `<tr><td>Settler</td><td>grows</td><td>${u.settler.food}</td><td>${u.settler.moves}</td><td>${u.settler.hp}</td><td>-</td><td>founds a city, ${u.settler.train} turns, needs a ${LEVEL_NAMES[(u.settler.minLevel ?? 1) - 1]}</td></tr>` +
-        `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders</td></tr>` +
+        `<tr><td>Scout</td><td>${u.scout.cost}</td><td>${u.scout.food}</td><td>${u.scout.moves}</td><td>${u.scout.hp}</td><td>-</td><td>sees ${UNIT_SIGHT.scout} hexes, hills/mountains/forests cost 1 less, crosses closed borders, can <b>Explore</b> by itself (<kbd>A</kbd>)</td></tr>` +
         `<tr><td>Swordsman</td><td>${u.swordsman.cost}</td><td>${u.swordsman.food}</td><td>${u.swordsman.moves}</td><td>${u.swordsman.hp}</td><td>${u.swordsman.atk}</td><td>beats Archers, can capture cities</td></tr>` +
-        `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs bows</td></tr>` +
+        `<tr><td>Archer</td><td>${u.archer.cost}</td><td>${u.archer.food}</td><td>${u.archer.moves}</td><td>${u.archer.hp}</td><td>${u.archer.atk}</td><td>shoots 2 hexes, beats Knights, needs lumber</td></tr>` +
         `<tr><td>Knight</td><td>${u.knight.cost}</td><td>${u.knight.food}</td><td>${u.knight.moves}</td><td>${u.knight.hp}</td><td>${u.knight.atk}</td><td>fast, beats Swordsmen, captures, needs horses and a ${LEVEL_NAMES[(u.knight.minLevel ?? 1) - 1]}, weak vs walls</td></tr>` +
         `<tr><td>Catapult</td><td>${u.catapult.cost} + ${u.catapult.stone} stone</td><td>${u.catapult.food}</td><td>${u.catapult.moves}</td><td>${u.catapult.hp}</td><td>${u.catapult.atk}</td><td>shoots 2 hexes, x${u.catapult.vsPalisade} vs palisades, x${u.catapult.vsCity} vs cities, can't fire after moving, needs a ${LEVEL_NAMES[(u.catapult.minLevel ?? 1) - 1]} with a Workshop</td></tr></table>` +
         `<ul><li>Troops also cost gold every turn (same as their food).</li>` +
@@ -167,7 +199,7 @@ function guideHtml(): string {
     ),
     sec(
       'Boats',
-      `<ul><li>Only a coastal city with a <b>Harbor</b> can build boats. Boats sail on water and can dock in your own cities.</li></ul>` +
+      `<ul><li>Only a city with water (next to it, or a water hex in its land) and a <b>Harbor</b> can build boats. Boats sail on water and can dock in your own cities. A city whose only water is out in its land launches boats from its Harbor.</li></ul>` +
         `<table><tr><th>Boat</th><th>Gold</th><th>Food</th><th>Moves</th><th>HP</th><th>Attack</th><th>Notes</th></tr>` +
         `<tr><td>Trireme</td><td>${u.trireme.cost}</td><td>${u.trireme.food}</td><td>${u.trireme.moves}</td><td>${u.trireme.hp}</td><td>${u.trireme.atk}</td><td>rams boats only, beats the Galleass up close</td></tr>` +
         `<tr><td>Galleass</td><td>${u.galleass.cost}</td><td>${u.galleass.food}</td><td>${u.galleass.moves}</td><td>${u.galleass.hp}</td><td>${u.galleass.atk}</td><td>shoots 2 hexes: boats, units on the shore, cities and palisades (x${u.galleass.vsPalisade}). Needs a ${lvl(u.galleass.minLevel)}</td></tr>` +
@@ -184,13 +216,14 @@ function guideHtml(): string {
         `<li>Computer kingdoms decide by how the war is going: who's stronger, whose cities are hurting, how long it has dragged on and unrest at home. If they say no, you can ask again in ${PEACE_RETRY} turns.</li>` +
         `<li><b>Closed borders</b>: at peace, nobody can enter another kingdom's land or water except <b>Scouts</b>. When peace is made, troops inside the other side's land step back to the closest free hex outside it.</li>` +
         `<li>Peace comes with a ${TRUCE_TURNS}-turn treaty: neither side can declare war again until it runs out.</li>` +
-        `<li>The computer won't start wars before a certain turn (see Difficulty) and only fights one war at a time.</li></ul>`,
+        `<li>The computer won't start wars before a certain turn and only fights one war at a time. On ${DIFFICULTY.normal.label} it also waits until its army is clearly stronger than yours and keeps the peace ${WAR_RULES.normal.peace} turns after a treaty, so a strong army keeps it away (see Difficulty).</li></ul>`,
     ),
     sec(
       'Fog of war',
       `<ul><li>With rivals in the game, you only see what your land, cities and units can see. Unexplored land is dark.</li>` +
         `<li>Land you've explored stays on the map, slightly dimmed; enemy units there are hidden until you look again.</li>` +
         `<li>Sight: builders and settlers ${UNIT_SIGHT.builder}, scouts ${UNIT_SIGHT.scout}, swordsmen and archers ${UNIT_SIGHT.swordsman}, knights ${UNIT_SIGHT.knight}, boats ${UNIT_SIGHT.trireme}, cities ${CITY_SIGHT} (+1 for a ${LEVEL_NAMES[2]}). You start knowing everything within ${START_SIGHT} hexes of your capital.</li>` +
+        `<li><b>Explore</b> (<kbd>A</kbd>, scouts only): the scout heads for the nearest edge of the dark by itself, right away and again at the start of every turn. It keeps clear of enemy troops, stops if they come within 2 hexes, and stops once there's nothing left it can reach (it can't cross water). A cyan eye on the scout means it's exploring; it's skipped by the end-of-turn check. Any order (a move, a route, Hold or <kbd>X</kbd>) stops it.</li>` +
         `<li>No fog in a sandbox game.</li></ul>`,
     ),
     sec(
@@ -198,7 +231,8 @@ function guideHtml(): string {
       `<ul><li>With a unit selected, tap a far hex: you see the path, a numbered dot where it stops each turn, and how many turns it takes.</li>` +
         `<li>Tap the same hex again to send it. It walks by itself at the start of each turn.</li>` +
         `<li>It waits if your own unit is in the way (then goes around), stops if enemy troops come within 2 hexes, and never attacks by itself.</li>` +
-        `<li><kbd>X</kbd> or any manual move cancels a route.</li></ul>`,
+        `<li><kbd>X</kbd> or any manual move cancels a route.</li>` +
+        `<li>Scouts can also <b>Explore</b> (<kbd>A</kbd>) instead: they pick their own route into the fog every turn (see Fog of war).</li></ul>`,
     ),
     sec(
       'Playing together (hot-seat)',
@@ -210,9 +244,10 @@ function guideHtml(): string {
     sec(
       'Controls',
       `<ul><li>Drag to move the map, pinch or scroll to zoom.</li>` +
-        `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route, <kbd>Esc</kbd> deselect / menu.</li>` +
-        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land, <kbd>O</kbd> open the City View (or double-tap the city). Troops: <kbd>L</kbd> pillage.</li>` +
-        `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>E</kbd> palisade, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li></ul>`,
+        `<li><kbd>Space</kbd> end turn, <kbd>N</kbd>/<kbd>Tab</kbd> next unit, <kbd>H</kbd> hold, <kbd>X</kbd> cancel route or exploring, <kbd>Esc</kbd> deselect / menu.</li>` +
+        `<li>City: <kbd>B</kbd> builder, <kbd>S</kbd> settler, <kbd>W</kbd> walls, <kbd>K</kbd> claim land, <kbd>O</kbd> open the City View (or double-tap the city). Troops: <kbd>L</kbd> pillage. Scout: <kbd>A</kbd> explore.</li>` +
+        `<li>Builder: <kbd>F</kbd> farm, <kbd>G</kbd> fishery, <kbd>P</kbd> pasture, <kbd>T</kbd> forest, <kbd>M</kbd> mine, <kbd>R</kbd> road, <kbd>E</kbd> palisade, <kbd>U</kbd>/<kbd>D</kbd> raise/lower. Settler: <kbd>C</kbd> found city.</li>` +
+        `<li>City View: <kbd>Esc</kbd> back to the map, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> undo while decorating.</li></ul>`,
     ),
   ].join('');
 }

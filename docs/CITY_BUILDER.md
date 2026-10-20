@@ -1,215 +1,198 @@
-# City Builder: Spec (v1)
+# City Builder: Territory Layout (v2)
 
-Run the kingdom on the map, then zoom into a city and build it out like a real town. Extends `docs/CITY_VIEW.md`: the rules there (6 plots, terrain, neighbors, facing, auto-place, scoring) stay exactly as they are. This adds a ground grid around them, free-placed decorations, real art and a zoom transition.
+Run the kingdom on the map, then zoom into a city and build on the territory that city actually owns. This replaces the fixed 7x7/9x9/11x11 ground grid and the six directional plots described in v1 and `docs/CITY_VIEW.md`. Those older plot and facing rules are historical, not the current implementation.
 
-**Status:** spec approved. Building starts with task 3 (city screen).
+**Status:** territory rework implemented for dev review. Headless territory regressions, save migration, capture and AI soak games pass. Full Phaser/Vite build and desktop/phone playtests still need to be verified in an environment with the project's dependencies installed. Leave the implementation task open until Austin reviews it.
 
-## Goals
+## Source of truth: the city's owned hexes
 
-- The city looks like a town, not a diagram.
-- Buildings stay snapped to plots, so placement, neighbor and facing bonuses keep working with zero rule changes.
-- Decorations are the creative part: put them anywhere open.
-- Never forced: a player who never opens a city loses nothing on Easy / Free Play, and only a small beauty bonus on Normal+.
+- `GameState.cityLand(city)` supplies the territory: map hexes whose `home` points to this city and whose owner matches it. The Keep's hex is included.
+- City View shows those hexes in the same relative directions and shape as the world map. The terrain comes from the world map, not a generated town template. Mountains count as hills for amenity placement and detailed ground.
+- Claims and culture growth add an entire patch of ground. Population growth unlocks amenity capacity, not a larger square grid.
+- Other cities remain separate, even when they belong to the same kingdom. A dimmed ring outside the border shows neighboring territory, open land and sea. Unexplored neighboring hexes stay dark.
+- The city's outline uses its owner's color. Faint interior dividers identify the world hexes; selecting one outlines the whole patch.
 
-## Ground grid
+## Ground coordinates
 
-Square tile grid (Kenney packs are square 16px tiles), Keep dead center. Odd sizes so the Keep is always the exact middle. Grows with the city.
+`src/world/grid.ts` is pure layout logic, with no Phaser imports.
 
-| City level | Grid | New ground |
-| --- | --- | --- |
-| 1 Village | 7x7 | start |
-| 2 Town | 9x9 | +1 ring (32 tiles) |
-| 3+ City, Large City, Metropolis | 11x11 | +1 ring (40 tiles), cap |
+- Each map hex becomes a patch of **56 small ground cells**. Hex centers are spaced 8 cells horizontally and 7 cells vertically, with a half-width offset between rows (`HEX_W = 8`, `HEX_H = 7`). The patches are nearest-center regions, not rectangular 8x7 boxes.
+- The world map uses odd-r hex coordinates. Convert to axial coordinates, subtract the city's axial coordinate, then place hex `(q, r)` at ground-cell center `(8*q + 4*r, 7*r)`.
+- Ground cells are integer `(x, y)` offsets from the Keep. Every cell belongs to the nearest hex center, with deterministic tie-breaking. Patches tile without overlaps or gaps.
+- The rendering scale stays one ground cell = 3x3 Kenney art tiles (48 world pixels). Saved decoration offsets retain their meaning.
+- `cityLayout` builds the owned hexes, cell lookup maps, an outside ring and bounds. Layouts are cached per game and cleared by `GameState.invalidate()` when land, cities or terrain change.
 
-- Grid size comes from the **highest level the city has ever reached** (`city.gridLevel`), not the current level. Capture drops a level, but the grid never shrinks, so decorations are never stranded or deleted.
-- New rings arrive as open ground (grass, see Art). Log/toast: `Riverton grew: more room to build (9x9)`.
-- Simple mode: same growth as everyone else (plots are already all open there; the grid is just space).
-- 11x11 is the cap for v1. The extra space is for decorations only (no ring-2 plots yet).
+## Amenities on owned hexes
 
-### Coordinates
+One amenity per non-Keep hex. The amenity stands in the center ground cell; the cell immediately to its right is its props yard. Its world hex is stored as a map tile index, not a plot number.
 
-- Tiles are addressed as offsets from the Keep: `(dx, dy)`, each from `-r` to `r` where `r = (size - 1) / 2` (3, 4, 5).
-- Because everything is stored relative to the Keep, growing the grid needs no remapping.
-
-### Where the Keep and the 6 plots sit
-
-The Keep is the center tile. Each building is **one tile** (one plot = one tile, keep it simple). Plots are laid out to match their world direction so the city still "faces" the map like City View does today:
-
-| Plot | Direction | Tile (dx, dy) |
-| --- | --- | --- |
-| 0 | E | (2, 0) |
-| 1 | NE | (1, -2) |
-| 2 | NW | (-1, -2) |
-| 3 | W | (-2, 0) |
-| 4 | SW | (-1, 2) |
-| 5 | SE | (1, 2) |
-
-- Plot tiles, the Keep tile and a 1-tile road from the Keep to each plot are **reserved**: no decorations there. Everything else is open ground.
-- Plot neighbors stay index-based (`plotNeighbors(i)`: ring neighbors + Keep). The grid is visual; `src/world/city.ts` scoring does not change.
-- Plot terrain shows as the plot tile's ground (water plot = water tile, hills = dirt/rock, sand, grass).
-- **Facing hexes:** the map hex each plot faces is drawn as a small marker on the grid edge in that direction (same info and green "paying" outline as City View today).
-- Locked plots: lock icon on the tile + the level name, like now.
-
-## Decorations
-
-### Placing
-
-- Bottom tray of decorations (scrolls sideways). Tap one, then tap an open ground tile to place it. The tray item stays selected so you can place several in a row; tap it again or Esc to stop.
-- **Drag** a placed decoration to move it. Drop on a blocked tile = it snaps back.
-- **Remove:** tap a placed decoration, then the trash button (or drag it onto the trash). Removing never refunds gold (keeps it from being a gold bank).
-- One decoration per tile. Moving is always free.
-- Instant: decorations don't use the city's project slot and don't take turns.
-- Only in your own cities, on your turn (hot-seat safe: acts as `state.current`).
-
-### Starter set (v1)
-
-Starting list, judged once it's on screen (add/cut freely in task 5).
-
-| Decoration | Kind | Notes |
-| --- | --- | --- |
-| Tree | nature | 2-3 variants |
-| Bush | nature | |
-| Flower bed | nature | |
-| Rock | nature | |
-| Path tile | path | paints ground, counts as a decoration |
-| Fence | build | auto-joins to neighbor fences |
-| Well | build | |
-| Lamp post | build | |
-| Bench | build | |
-| Statue | build | Town+ |
-| Fountain | build | City+ |
-| Banner | build | in the player's color |
-
-### Cost (by difficulty)
-
-| Mode | Cost |
+| Amenity | Required hex |
 | --- | --- |
-| Easy | free |
-| Free Play (`isFree`) | free |
-| Normal | 2g each (Statue 6g, Fountain 10g) |
-| Hard | 3g each (Statue 8g, Fountain 12g) |
+| Harbor | Water |
+| Workshop | Hills (mountains count as hills) |
+| Mill | Grass |
+| Temple, Market, Granary, Park, Arena, Barracks | Any land |
 
-Tray shows the price on each item. Not enough gold = item dimmed with the reason.
+The city's normal population, cost and one-project-at-a-time requirements still apply. Starting construction reserves the hex. The hex is selected **before** setting the project, so the project does not consume the final capacity slot before auto-placement runs.
 
-### Beauty (happiness)
+A farm, mine, pasture, forest, fishery or road on the same hex is not removed by an amenity. Existing improvement and worker production rules continue independently. The city screen shows an improvement/road badge on the patch.
 
-- **Normal and up only.** On Easy and Free Play decorations are just for looks: no bonus, and the beauty line is hidden.
-- `beauty = number of decorations in the city` (Statue counts 2, Fountain 3).
-- Bonus: **+1 happy per 8 beauty, max +2.** Shows in `happinessParts` as `Beautiful streets`.
-- Why 8, not 6 (paper check): a Temple gives +2 happy but costs 30-40g, takes turns and uses the project slot. At 1 per 6, +2 happy cost 24g on Normal, instant, no slot: too cheap next to a Temple. At 1 per 8 it's 32g on Normal / 48g on Hard (small decos), about Temple price with no slot, which feels like a fair trade for the clicking. Path tiles count, so to stop path spam from being the cheapest route, a city's paths count at most 4 beauty.
-- Small on purpose: nice to have, never the reason you win.
-- One function in `src/world/city.ts`: `beautyBonus(city, difficulty, free): number`. Retune after real playtests and the AI test games.
+### Capacity is deliberately unchanged
 
-### Scope
+| City size | Amenities |
+| --- | --- |
+| Village | 2 |
+| Town | 3 |
+| City | 4 |
+| Large City | 5 |
+| Metropolis | 6 |
 
-- **Per city.** Decorations belong to the city they're in and can't move between cities.
-- Captured city: decorations stay with the city (the new owner gets them and their beauty).
+`AMENITY_SLOTS` and `MAX_AMENITIES` live in `tile.ts`. The Easy rules checkbox (`isSimple`) unlocks all six for human players. Difficulty Easy by itself is not the Easy rules checkbox. More territory gives more candidate locations, not unlimited amenities.
 
-### AI
+### Manual and automatic placement
 
-- **Easy / Normal AI:** no decorations.
-- **Hard AI decorates**, so it has a real gold sink:
-  - Only with spare gold after its normal build/train decision for the turn (never instead of troops, walls or buildings).
-  - Not while at war or with enemy troops within 2 hexes of the city.
-  - Keeps a reserve (doesn't drop below 40g) so it can still react.
-  - Stops at the cap (16 beauty, where the bonus maxes out). Paths count at most 4 like for players.
-  - Places on random open tiles, skipping the Keep's roads, using `GameState.placeDeco` (same rules as people).
-- Check in the AI test games that Hard doesn't get noticeably weaker from it.
+- Open city, select a hex, then choose an amenity. The panel explains its terrain, nearby improvements, cost and placement bonuses. A star marks the best site.
+- The map city panel's build buttons auto-place on the best available hex and explain where the amenity is going.
+- `bestSite` scores the amenity's own bonus, bonuses it adds to neighbors, a small penalty for using specialized terrain, and distance from the Keep. Ties prefer nearer hexes.
+- No terrain that can support an amenity means no candidate for that amenity. A city needs owned water to place a new Harbor, not merely unowned water beside the Keep.
 
-## Saved data
+## Placement bonuses
 
-On the city tile (`Tile`, city only):
+`src/world/city.ts` owns terrain, work and adjacency rules. The economy and HUD both call `cityBonus(state, city)`.
+
+### Terrain
+
+A Granary on grass gets +1 food.
+
+### Real hex neighbors
+
+Neighbor means the map hexes touch, not adjacent cells within one detailed patch.
+
+| Amenity | Neighbor | Bonus |
+| --- | --- | --- |
+| Market | Harbor | +1 gold |
+| Mill | Granary | +1 food |
+| Park | Temple | +1 culture |
+| Arena | Market | +1 gold |
+
+### Work bonuses replace directional facing bonuses
+
+An improvement or road on the amenity's hex **or any touching hex**, owned by the city owner, qualifies. It can belong to another of that owner's cities. Each rule counts once, regardless of the number of matching improvements. Existing rules check the improvement's presence, not whether a worker is assigned to it.
+
+| Amenity | Improvement or road | Bonus |
+| --- | --- | --- |
+| Workshop | Mine | +1 stone |
+| Mill | Farm | +1 food |
+| Barracks | Pasture | +1 horse capacity |
+| Harbor | Fishery | +1 food |
+| Park | Forest | +1 culture |
+| Market | Road | +1 gold |
+
+Bonuses are live: pillaging/removing the improvement removes that bonus. Selecting an amenity draws dotted links to contributing neighboring hexes.
+
+## Coasts and boats
+
+Owned water is drawn as actual sea/lake patches in the same places as the map. Shore tiles appear along land edges; water continues into the outside ring where appropriate. Sand and rocky ground also follow each world hex.
+
+`isCoastal` includes water next to the Keep or anywhere in the city's territory. A city whose only water is farther out launches boats at its Harbor water hex (or a free neighboring water hex). Ordinary coastal launch behavior remains unchanged. Water ownership still does not count toward the land-share win.
+
+## Decorating the whole territory
+
+Decorations and painted ground remain per city. Every owned land cell is eligible, except reserved building footprints.
+
+- Keep footprint: `KEEP_TILES` stays clear.
+- Every non-Keep hex's central amenity cell and right-hand yard stay clear of objects. Paths/grass are allowed there while the center is empty; an occupied amenity center stays clear of painted ground too.
+- No decorations or paths on water or outside the city's territory.
+- Two layers per cell: painted ground (dirt path, stone path or grass) plus one object. A bench can stand over a path; removing it leaves the path.
+- Dirt paths auto-join neighboring paths and built footprints. Fences join neighboring fences. Joins are computed, never saved.
+- Paths and grass are always free, with zero beauty. Objects are free on Easy difficulty and Free Play. Normal small objects cost 2g, Statues 6g, Fountains 10g; Hard prices are 3g, 8g and 12g.
+- Place by tapping, move objects by dragging, paint paths/grass or erase by dragging. Two fingers pan/zoom; right-drag pans on desktop.
+- Removing does not refund gold. Undo restores the previous placement and exactly the amount spent on that action. Clear all asks for a second tap and clears placed items only.
+- Decorations replace seeded wild scenery on their cells. Forest improvements produce denser wild woods; farm patches stay mostly open; sand is sparse.
+- AI never decorates. Captured decorations remain with the city.
+
+The existing `DECO_ORDER` palette and `cityArt.ts` art tables are retained. Append new kinds only; never reorder saved kinds.
+
+### Beauty
+
+Normal and Hard only, unless Free Play is enabled for the player: most objects give 1 beauty, a Statue 2, a Fountain 3. Every 8 beauty gives +1 happiness, capped at +2. Paths and grass give none. Only placed objects count; stored items do not. The tray meter and `Beautiful streets` happiness line remain.
+
+## Land changes: preserve the town
+
+`settleCity` reconciles sites and decorations on load, when opening a city and at the start of the owner's turn. Founding on existing owned land reconciles the previous home city immediately.
+
+### Amenities
+
+- Valid existing sites stay where they are, including after terrain changes; terrain requirements apply to new placement.
+- If an amenity loses its hex, use the best free compatible hex, then any free non-Keep hex as a grandfathered fallback.
+- If there is no free hex, store site `-1`: the amenity waits and keeps its base effects, but has no placement bonus. It moves in when room becomes available.
+- Construction also reserves/reacquires a valid hex. Finished amenities are never silently deleted for lack of territory.
+- Settlers cannot found a city on a finished or reserved amenity hex.
+- Capture transfers the territory, finished sites and decorations together. Existing rules still cancel a half-built amenity, half-built walls and lost-city training.
+
+### Decorations and storage
+
+- Keep valid cells unchanged.
+- Move displaced objects to the nearest eligible unoccupied cell, with deterministic tie-breaking.
+- If no cell is available, preserve their kinds in `decoStash`. Stored objects restore automatically when room is found during reconciliation.
+- Do not scatter displaced paths around the town: their location is their design. Store their kinds instead. The tray reports them and offers a separate explicit Discard stored paths button. Stored paths do not auto-restore.
+- Unknown decoration kinds are ignored as invalid data; known items are not silently dropped because the layout changed.
+
+## Saved layout v2 and old saves
+
+The browser save remains `version: 3` under the existing channel-specific key (`kingdom-save-v3-dev` for dev, `kingdom-save-v3` otherwise). `layout: 2` distinguishes the territory layout from legacy plots.
+
+City state:
 
 ```ts
-gridLevel: number;            // highest city level ever reached (1-5), drives grid size
-deco: [number, number, number][]; // [dx, dy, kind] relative to the Keep, kind = index into DECO_ORDER
+sites: Partial<Record<Building, number>>; // map tile index, or -1 waiting
+projectSite: number | null;              // reserved hex, null when none
+// [x, y, DECO_ORDER index], relative to the Keep
+deco?: [number, number, number][];
+decoStash?: number[];                    // preserved kinds waiting for room
 ```
 
-- `DECO_ORDER` in `src/world/city.ts`: new decorations only ever go on the end, so old saves keep their meaning (same rule as `BUILDING_ORDER`).
-- Save: new optional `deco` field next to `plots` in `save.ts` (tile index -> `gridLevel`, flat deco list). Same key, `kingdom-save-v3`.
-- **Old saves:** `gridLevel = cityLevel(city)`, `deco = []`. Nothing else to migrate: plots and buildings are untouched.
-- On load, any decoration on a reserved or out-of-grid tile is dropped (safety net, shouldn't happen).
+Save payload maps are keyed by the city tile's index:
 
-## Art (Kenney packs, already in `public/assets/`)
+- `sites`: flat `[BUILDING_ORDER index, map tile index, ...]`.
+- `projectSites`: reserved map tile index.
+- `deco`: flat `[x, y, kind, ...]`.
+- `decoStash`: stored kinds.
 
-Main pack: **Tiny Town** (16px, top-down, matches the town look). Fill gaps from **Roguelike RPG** (16px, 1px spacing on its sheet).
+### Legacy migration
 
-| Thing | Pack | What to use |
-| --- | --- | --- |
-| Open ground | Tiny Town | grass (+ 1-2 grass variants scattered by a seeded hash so it doesn't look tiled) |
-| Road / path | Tiny Town | dirt path tiles |
-| Water plot | Tiny Town / RPG | water tile with edge pieces |
-| Hills plot | RPG | dirt/rock ground |
-| Sand plot | RPG | sand ground |
-| Keep | Tiny Town | castle/stone wall pieces, wall level shown with extra wall segments |
-| Temple, Market, Granary, Mill, Barracks, Workshop | Tiny Town | house/roof pieces, each a different roof color + a sign icon |
-| Harbor | Tiny Town / RPG | dock planks on the water plot |
-| Park | Tiny Town | trees + flowers on grass |
-| Arena | RPG | fenced sand ring |
-| Trees, bushes, flowers, rocks, fences, well, lamp, bench | Tiny Town | direct tiles |
-| Statue, fountain, banner | RPG | direct tiles (banner tinted to player color) |
-| Construction | Tiny Town | scaffold/fence + existing pixel builders from `citySprites.ts` |
+All map terrain, owners, homes, city building bits and projects load first. Homes are repaired before city layouts are built. For saves without `layout: 2`, old plot `i` moves its amenity to the owned neighboring map hex in direction `i` (E, NE, NW, W, SW, SE). If that hex is unavailable, normal site reconciliation finds a fallback or preserves it waiting. The same applies to construction reservations.
 
-- Exact tile indices live in one table, `CITY_ART` in `src/scenes/cityArt.ts`, picked in task 4 by checking the sheets. Swapping art = editing that table.
-- Pixel people from `citySprites.ts` stay (they already match the 8-bit look).
-- Licenses are CC0, nothing to credit, but keep the `License.txt` files.
+Decorations keep their Keep-relative cell coordinates where legal, then reconcile onto owned ground or into storage. The old square-grid level no longer drives geometry. The next save writes layout 2; old `plots` is read only for migration.
 
-## Zoom transition
+Map dimensions remain explicitly saved and restored using the existing map-size compatibility rules. This work does not regenerate an old map or change its dimensions.
 
-- **In:** pinch / scroll zoom on the map past the max map zoom while centered on your own city, or the existing **Open city** button / double-tap / O key. Short (~350ms) zoom + fade: the map camera zooms toward the city hex, then the city fades in at the same screen spot and settles.
-- **Out:** pinch out past the city's min zoom, the Back button, or Esc. Reverse animation, map returns exactly where you were (camera position and zoom saved before going in).
-- Enemy / unexplored cities: zooming in just stops at max map zoom, like now.
-- Inside the city: pan and pinch zoom within the grid bounds (clamped so you can't lose the town).
-- `prefers-reduced-motion`: skip the animation, plain cut.
+## Scene and camera integration
 
-### Scene setup
+- `CityScene.ts`: Phaser draws actual hex patches, terrain, coast, outside territory, buildings, people, decoration layers, selection and bonus links. Bounds and camera fit come from the current territory, not city level.
+- `CityView.ts`: DOM header, site selection/building panel, tray, beauty meter, stored-item explanation and controls.
+- `MapScene.ts`: map city panel, best-site previews, auto-placement announcements, hover amenity names and entry/return transitions.
+- `Hud.ts`: city gold breakdown uses the state-aware bonus calculation.
+- `Help.ts`: guide describes owned-hex placement, real neighbors, decorating the full territory and migration behavior.
 
-- New Phaser scene `src/scenes/CityScene.ts` draws the grid, buildings, decorations and people (Phaser handles sprite sheets, drag and pinch far better than the current SVG).
-- `MapScene` sleeps while the city is open, wakes on the way out (same plan `CITY_VIEW.md` already had).
-- The **side panel stays DOM**: the build list, plot info and bonuses from `CityView.ts` are reused as a panel; the SVG drawing is retired.
-- World logic stays in `src/world` (`placeDeco`, `moveDeco`, `removeDeco` on `GameState`, all validated there).
+Entry remains double-tap, O, Open city, or zoom beyond the map limit over your own city. The map sleeps while the city is open. Return by Back, Esc/O or zoom beyond the city's minimum. Reduced motion skips the animations. The map returns centered on that city and eases to the recorded prior zoom (capped by `BACK_ZOOM`), not an unrelated square-grid position.
 
-## Phones
+Existing Kenney Tiny Town/Roguelike RPG sheets and pixel actors remain. Missing art still uses drawn/emoji fallbacks. No new art dependency.
 
-- Max 11x11 = 121 ground tiles + up to ~100 decorations + 7 buildings: tiny for Phaser.
-- Ground drawn once into a static layer (Phaser `TilemapLayer` or a cached render texture); only redrawn when the grid grows or a path tile changes.
-- Decorations and buildings are plain sprites from one texture atlas per pack (2 textures total, preloaded in `BootScene`).
-- Pixel art: `pixelArt: true` / nearest-neighbor scaling, integer zoom steps for crisp tiles.
-- Tap targets at least 40px: default zoom fits the grid to the screen width, so a 7x7 tile is big and an 11x11 tile is still ~32px with zoom-in available.
-- Drag starts after a short hold (150ms) or 8px of movement so panning and dragging don't fight.
-- MapScene sleeps (not just hidden) so it isn't rendering underneath.
-- Saves only on change (place/move/remove), not every frame.
+## Verification
 
-## Build order (matches the ClickUp City Builder list)
+Run with dependencies installed:
 
-3. **City screen** (task 3): new `CityScene` with the ground grid, `gridLevel` (grows 7/9/11, never shrinks, old-save migration), roads, Keep, 6 one-tile plots with buildings, facing markers, pan/pinch zoom. Side panel and pixel people kept. Opens/closes the same ways (double-tap, O, Open city, Esc). Uses the current drawn art. Replaces the SVG drawing.
-4. **Kenney art** (task 4): load the sheets in `BootScene`, `CITY_ART` table for buildings, plot terrain, roads and the decoration palette, nearest-neighbor scaling, fallback if a sprite is missing, preview image.
-5. **Decorate mode** (task 5): `deco`, `DECO_ORDER`, `placeDeco` / `moveDeco` / `removeDeco`, costs by difficulty, save + old-save migration, tray UI (tap to place, drag to move, remove). Cosmetic only at this point.
-6. **Zoom transition** (task 6): pinch/scroll in and out between map and city, animation, camera restore, reduced motion.
-7. **Beauty bonus + Hard AI** (task 7): `beautyBonus` (1 per 8, max +2, Normal+, paths max 4), `Beautiful streets` line, Hard AI decorating, AI test games with Hard decorating on and off, help section in `Help.ts`, grid-growth toast, tune from your playtest.
+```sh
+npm run build
+node scripts/test-city-territory.mjs
+node scripts/test-map-sizes.mjs
+```
 
-Each step should pass `npx vite build` and the AI test games before moving on.
+The territory test checks patch tiling, city ownership/layout, terrain requirements, preserved improvements, capacity, auto-placement, work bonuses, two-layer decorations, claimed-ground growth, founding protection/reconciliation, capture, save round-trip and old plot migration. It also runs eight games of up to 80 rounds with three AI opponents across Easy/Normal/Hard, checks site/decoration invariants and reloads each game.
 
-## Decided
+Headless tests do not prove rendering, touch behavior or frame rate. Playtest desktop and phone: open/close repeatedly, pan/pinch and wheel entry, decorate at borders and coasts, grow/claim territory, place each terrain-specific amenity, capture a decorated city and load an existing save. Watch large-territory rendering costs: a patch is 56 cells, each potentially nine art tiles, so performance assumptions from the old 121-cell maximum no longer apply.
 
-- Grid grows with city level: 7x7, 9x9, 11x11 (cap). Never shrinks.
-- 1-tile buildings, one per plot.
-- 11x11 extra space is decorations only for v1.
-- Beauty: +1 happy per 8 beauty, max +2, on Normal+ only. Off on Easy / Free Play.
-- Cost: free on Easy / Free Play, a little gold on Normal+.
-- Decorations are per city.
-- Hard AI decorates with spare gold; Easy / Normal AI don't.
+## Not included
 
-## Still open (answer when you can see it)
-
-1. **Starter set:** add/cut once the decorations are on screen (task 5).
-2. **Beauty numbers:** confirm or retune after your playtest (task 7).
-
-## v2 (not now)
-
-- Ring-2 plots on the bigger grid (from `CITY_VIEW.md` v2).
-- Bigger 2x2 buildings.
-- Decoration themes per terrain (snowy, desert).
-- Seasonal/animated decorations (smoking chimneys, swaying trees).
-- Read-only peek at other kingdoms' cities with their decorations.
-- Copy a layout from one city to another (doesn't break "per city": it's a template, not a move).
+No additional amenity capacity, 2x2 buildings, rotation/flip, cross-city decoration transfer, rival-city inspection or AI decorating. Those are separate scope, not prerequisites for territory-based cities.
