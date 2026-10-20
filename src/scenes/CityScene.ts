@@ -823,7 +823,8 @@ export class CityScene extends Phaser.Scene {
     this.crowd(keepPeople(c.walls), 0, 0, 3);
 
     // Every other hex: its amenity in the middle, the one going up, or an open spot with a + to build.
-    // Names only show on the selected hex (the panel has the rest). A badge in the corner shows what's worked there.
+    // Names only show on the selected hex (the panel has the rest). A hex with a road gets a small road badge in
+    // its corner (farms, woods, mines, paddocks and nets are drawn on the ground, so they need no badge).
     const room = freeSlots(c, s.isSimple(link.me)) > 0;
     const harbor = !c.buildings.includes('harbor') && c.project !== 'harbor' && s.isCoastal(c) && hasSiteFor(s, c, 'harbor');
     for (const h of lay.hexes) {
@@ -858,10 +859,7 @@ export class CityScene extends Phaser.Scene {
         if (usable && (room || picked)) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : picked ? 0.95 : 0.6 });
         if (picked) this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });
       }
-      const works: Outside[] = [];
-      if (h.tile.improvement) works.push(h.tile.improvement);
-      if (h.tile.road) works.push('road');
-      if (works.length) this.txt((cx - 2) * T, (cy - 2) * T, works.map((w) => WORK_ICON[w]).join(''), 13, { alpha: ui ? 0.45 : 0.9 });
+      if (h.tile.road) this.txt((cx - 2) * T, (cy - 2) * T, WORK_ICON.road, 13, { alpha: ui ? 0.45 : 0.9 });
     }
 
     // The border in your color, and faint lines between the hexes (not while decorating)
@@ -1257,7 +1255,7 @@ export class CityScene extends Phaser.Scene {
       const nearKeep = (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy);
       // The paddock fence runs all the way round the hex, even past the amenity spot (it hugs the hex's edge)
       if (imp === 'pasture' && !nearKeep && !lotAt(lay, dx, dy)) {
-        // The hex's work badge (the horse emoji) sits up and left of its middle: no hay under it
+        // A road hex's badge sits up and left of its middle: no hay under it
         const badge = dx === h.center[0] - 2 && dy === h.center[1] - 2;
         const hay = roll < 0.12 && !badge && !nearLot(dx, dy) && !yardOf(lay, dx, dy);
         if (hay) this.hay.add(key); // the horses keep off it, so none end up standing in the bale
