@@ -13,7 +13,7 @@
 // piece falls back to the old drawn look (colored shapes and emoji), so the screen always works.
 // Matches the world map (task 10): hills are green with low pixel mounds, and each hex shows what's worked on it
 // on the map (crop fields, thick woods, a mine, a fenced paddock, fishing nets). Life: horses, farmers,
-// woodcutters, miners and townsfolk wander around their own patch of the city.
+// woodcutters, miners and townsfolk wander around their own patch of the city (never onto a hay bale).
 // Rendering and input only: the DOM side panel (CityView.ts) owns the selection and does all the building and
 // decorating, so a drag or a pinch can never build anything by accident.
 import Phaser from 'phaser';
@@ -189,6 +189,7 @@ export class CityScene extends Phaser.Scene {
   private nPeople = 0;
   private wanderers = new Map<string, Wanderer>(); // the city's walking life, by a stable id
   private wanderCity: Tile | null = null; // which city they belong to
+  private hay = new Set<string>(); // cells with a hay bale in a paddock this redraw (nobody stands on those)
   private bigLabels = true;
   private minZoom = 0.3;
   private maxZoom = 3;
@@ -930,11 +931,11 @@ export class CityScene extends Phaser.Scene {
       this.wanderCity = c;
     }
     const lay = town.lay;
-    // Open ground per hex: not water, the Keep, an amenity spot or a placed decoration
+    // Open ground per hex: not water, the Keep, an amenity spot, a placed decoration or a paddock's hay bale
     const open = new Map<number, XY[]>();
     const strolls: XY[] = []; // plain land (no farm, woods, mine or paddock) for the townsfolk
     for (const [key, h] of lay.cells) {
-      if (h.terrain === 'water' || town.objs.has(key)) continue;
+      if (h.terrain === 'water' || town.objs.has(key) || this.hay.has(key)) continue;
       const [dx, dy] = parseKey(key);
       if ((Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy) || lotAt(lay, dx, dy)) continue;
       const list = open.get(h.index);
@@ -1226,6 +1227,7 @@ export class CityScene extends Phaser.Scene {
   private drawTown(c: Tile, town: Town, seed: number): void {
     const g = this.scenery;
     const lay = town.lay;
+    this.hay.clear();
     const art = canDraw(this, [
       { s: 't', f: SCENERY.tallTop, x: 0, y: 0 }, { s: 't', f: SCENERY.tallBottom, x: 0, y: 0 },
       { s: 't', f: SCENERY.small, x: 0, y: 0 }, { s: 't', f: SCENERY.bush, x: 0, y: 0 },
@@ -1255,7 +1257,9 @@ export class CityScene extends Phaser.Scene {
       const nearKeep = (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy);
       // The paddock fence runs all the way round the hex, even past the amenity spot (it hugs the hex's edge)
       if (imp === 'pasture' && !nearKeep && !lotAt(lay, dx, dy)) {
-        this.paddock(g, lay, h, dx, dy, roll < 0.12 && !nearLot(dx, dy) && !yardOf(lay, dx, dy));
+        const hay = roll < 0.12 && !nearLot(dx, dy) && !yardOf(lay, dx, dy);
+        if (hay) this.hay.add(key); // the horses keep off it, so none end up standing in the bale
+        this.paddock(g, lay, h, dx, dy, hay);
         continue;
       }
       if (nearKeep || nearLot(dx, dy) || yardOf(lay, dx, dy)) continue;
