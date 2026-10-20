@@ -14,6 +14,7 @@ import { CityView, placementNotes, shortNotes, showToast, siteName, siteShort } 
 import { ART, KEEP_ART, TINY, canDraw, crispCityArt, loadCityArt } from './cityArt';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
+import { HexArt, NO_ART, loadMapArt } from './mapArt';
 import { Menu } from './Menu';
 import { UNIT_SPRITE, WORKER_SPRITE, makeSprites } from './sprites';
 import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
@@ -30,7 +31,9 @@ const BACK_ZOOM = 2; // coming back out of a city eases out to your old zoom, at
 const FADE: [number, number, number] = [20, 26, 38]; // same dark blue as the city screen's background
 const REDUCED = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
-const HEIGHT_COLOR = [0x1f5f9e, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
+// Flat colors by height. Under the Kenney tiles they only fill hairline gaps; water (no tile in the pack) and
+// the no-art fallback use them as the whole look.
+const HEIGHT_COLOR = [0x2f7fc4, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
 const TERRAIN_NAME: Record<Terrain, string> = {
   water: 'Water',
   sand: 'Sand',
@@ -72,10 +75,12 @@ export class MapScene extends Phaser.Scene {
   private visible: Set<Tile> | null = null; // fog of war: what you can see right now (null = no fog)
   private smallZoom = false;
 
-  private terrainGfx!: Phaser.GameObjects.Graphics;
+  private terrainGfx!: Phaser.GameObjects.Graphics; // flat colors under the Kenney tiles, water, unexplored hexes
+  private hexArt!: HexArt; // Kenney Hexagon Pack: terrain tiles, props, castles (task 10)
+  private roadGfx!: Phaser.GameObjects.Graphics; // above the tiles: grid lines, roads, drawn improvements
   private ownerGfx!: Phaser.GameObjects.Graphics;
   private castleGfx!: Phaser.GameObjects.Graphics; // flags and crowns on the castles (or the drawn fallback city)
-  private castles: Phaser.GameObjects.Blitter | null = null; // Kenney castle tiles, one per city (null = art missing)
+  private castles: Phaser.GameObjects.Blitter | null = null; // Tiny Town castle, fallback if the hex pack is missing
   private fogGfx!: Phaser.GameObjects.Graphics;
   private overlayGfx!: Phaser.GameObjects.Graphics;
   private unitGfx!: Phaser.GameObjects.Graphics;
@@ -110,9 +115,10 @@ export class MapScene extends Phaser.Scene {
     super('map');
   }
 
-  // Kenney tilesheets (castle for cities here, the whole town in the city screen). A failed download just
-  // leaves the sheet out and cities fall back to the drawn house.
+  // Kenney art: the Hexagon Pack for the map (terrain, props, castles) and the Tiny Town sheets for the city
+  // screen. A failed download just leaves a sheet out and the map falls back to flat colors and drawn cities.
   preload(): void {
+    loadMapArt(this);
     loadCityArt(this);
   }
 
@@ -120,6 +126,8 @@ export class MapScene extends Phaser.Scene {
     makeSprites(this);
     crispCityArt(this);
     this.terrainGfx = this.add.graphics().setDepth(0);
+    this.hexArt = new HexArt(this, SIZE, { tiles: 0.05, props: 0.08, keeps: 1.1 });
+    this.roadGfx = this.add.graphics().setDepth(0.06);
     this.ownerGfx = this.add.graphics().setDepth(1);
     if (this.textures.exists(TINY)) this.castles = this.add.blitter(0, 0, TINY).setDepth(1.1);
     this.castleGfx = this.add.graphics().setDepth(1.15);
@@ -1623,9 +1631,14 @@ export class MapScene extends Phaser.Scene {
     saveGame(state);
   }
 
+  // Terrain: flat color underneath, then the Kenney hex tile and its props (task 10). Whatever the art can't
+  // show (water, fisheries, a missing frame) is drawn like before. Grid lines and roads go on top of the tiles.
   private drawTerrain(state: GameState): void {
     const g = this.terrainGfx;
+    const r = this.roadGfx;
     g.clear();
+    r.clear();
+    this.hexArt.clearGround();
     const map = state.map;
     for (const t of map.tiles) {
       const { x, y } = tileCenter(t);
@@ -1640,60 +1653,63 @@ export class MapScene extends Phaser.Scene {
       }
       g.fillStyle(HEIGHT_COLOR[t.height], 1);
       g.fillPoints(pts, true);
-      g.lineStyle(1, 0x000000, 0.25);
-      g.strokePoints(pts, true);
-      if (t.terrain === 'mountain') {
+      r.lineStyle(1, 0x000000, 0.18);
+      r.strokePoints(pts, true);
+      const art = this.hexArt.drawTile(t, x, y) ?? NO_ART;
+      if (t.terrain === 'water') this.drawWaves(g, t, x, y);
+      else if (!art.ground && t.terrain === 'mountain') {
         g.fillStyle(0x6b6b6b, 1);
         g.fillTriangle(x - 12, y + 8, x, y - 11, x + 12, y + 8);
         g.fillStyle(0xf2f2f2, 1);
         g.fillTriangle(x - 4, y - 5, x, y - 11, x + 4, y - 5);
-      } else if (t.terrain === 'hills') {
+      } else if (!art.ground && t.terrain === 'hills') {
         g.fillStyle(0x6f6038, 1);
         g.fillEllipse(x - 6, y + 4, 14, 8);
         g.fillEllipse(x + 6, y + 6, 12, 7);
       }
+      if (art.improvement) continue;
       if (t.improvement === 'farm') {
-        g.lineStyle(2, 0xf0d264, 1);
-        for (let i = -1; i <= 1; i++) g.lineBetween(x - 11, y + i * 6, x + 11, y + i * 6);
+        r.lineStyle(2, 0xf0d264, 1);
+        for (let i = -1; i <= 1; i++) r.lineBetween(x - 11, y + i * 6, x + 11, y + i * 6);
       } else if (t.improvement === 'mine') {
-        g.fillStyle(0x2b2b2b, 1);
-        g.fillRect(x - 7, y + 1, 14, 9);
-        g.fillStyle(0xd4a017, 1);
-        g.fillCircle(x, y + 5, 2.5);
+        r.fillStyle(0x2b2b2b, 1);
+        r.fillRect(x - 7, y + 1, 14, 9);
+        r.fillStyle(0xd4a017, 1);
+        r.fillCircle(x, y + 5, 2.5);
       } else if (t.improvement === 'pasture') {
         // wooden fence with a horseshoe
-        g.lineStyle(2, 0x8b5a2b, 1);
-        g.lineBetween(x - 12, y + 2, x + 12, y + 2);
-        g.lineBetween(x - 12, y + 8, x + 12, y + 8);
-        for (const px of [-11, -4, 4, 11]) g.lineBetween(x + px, y - 1, x + px, y + 11);
-        g.lineStyle(2.5, 0xe5e7eb, 1);
-        g.beginPath();
-        g.arc(x, y - 8, 4, Phaser.Math.DegToRad(200), Phaser.Math.DegToRad(340), true);
-        g.strokePath();
+        r.lineStyle(2, 0x8b5a2b, 1);
+        r.lineBetween(x - 12, y + 2, x + 12, y + 2);
+        r.lineBetween(x - 12, y + 8, x + 12, y + 8);
+        for (const px of [-11, -4, 4, 11]) r.lineBetween(x + px, y - 1, x + px, y + 11);
+        r.lineStyle(2.5, 0xe5e7eb, 1);
+        r.beginPath();
+        r.arc(x, y - 8, 4, Phaser.Math.DegToRad(200), Phaser.Math.DegToRad(340), true);
+        r.strokePath();
       } else if (t.improvement === 'fishery') {
         // net floats and a little jumping fish
-        g.lineStyle(1.5, 0xe5e7eb, 0.8);
-        g.strokeCircle(x - 4, y + 4, 7);
-        g.lineBetween(x - 11, y + 4, x + 3, y + 4);
-        g.lineBetween(x - 4, y - 3, x - 4, y + 11);
-        g.fillStyle(0xf97316, 1);
-        for (const [dx, dy] of [[-11, 4], [3, 4], [-4, -3], [-4, 11]] as const) g.fillCircle(x + dx, y + dy, 2);
-        g.fillStyle(0x7dd3fc, 1);
-        g.fillEllipse(x + 8, y - 6, 8, 4);
-        g.fillTriangle(x + 12, y - 6, x + 15, y - 9, x + 15, y - 3);
+        r.lineStyle(1.5, 0xe5e7eb, 0.8);
+        r.strokeCircle(x - 4, y + 4, 7);
+        r.lineBetween(x - 11, y + 4, x + 3, y + 4);
+        r.lineBetween(x - 4, y - 3, x - 4, y + 11);
+        r.fillStyle(0xf97316, 1);
+        for (const [dx, dy] of [[-11, 4], [3, 4], [-4, -3], [-4, 11]] as const) r.fillCircle(x + dx, y + dy, 2);
+        r.fillStyle(0x7dd3fc, 1);
+        r.fillEllipse(x + 8, y - 6, 8, 4);
+        r.fillTriangle(x + 12, y - 6, x + 15, y - 9, x + 15, y - 3);
       } else if (t.improvement === 'forest') {
         // three pine trees
         for (const [dx, dy, s] of [[-8, 4, 1], [8, 4, 1], [0, -3, 1.2]] as const) {
-          g.fillStyle(0x5b3a1e, 1);
-          g.fillRect(x + dx - 1, y + dy + 4 * s, 2, 4);
-          g.fillStyle(0x1f5e2e, 1);
-          g.fillTriangle(x + dx - 6 * s, y + dy + 5 * s, x + dx, y + dy - 8 * s, x + dx + 6 * s, y + dy + 5 * s);
+          r.fillStyle(0x5b3a1e, 1);
+          r.fillRect(x + dx - 1, y + dy + 4 * s, 2, 4);
+          r.fillStyle(0x1f5e2e, 1);
+          r.fillTriangle(x + dx - 6 * s, y + dy + 5 * s, x + dx, y + dy - 8 * s, x + dx + 6 * s, y + dy + 5 * s);
         }
       }
     }
     // Roads: connect road/city tiles to neighbors that also have roads
     const hasRoad = (t: Tile) => (t.road || t.city) && this.seen(t);
-    g.lineStyle(4, 0x7a5a32, 0.95);
+    r.lineStyle(4, 0x7a5a32, 0.95);
     for (const t of map.tiles) {
       if (!hasRoad(t)) continue;
       const a = tileCenter(t);
@@ -1704,13 +1720,30 @@ export class MapScene extends Phaser.Scene {
         linked = true;
         if (dir === 0 || dir === 4 || dir === 5) {
           const b = tileCenter(n);
-          g.lineBetween(a.x, a.y, b.x, b.y);
+          r.lineBetween(a.x, a.y, b.x, b.y);
         }
       }
       if (t.road && !linked) {
-        g.fillStyle(0x7a5a32, 1);
-        g.fillCircle(a.x, a.y, 4);
+        r.fillStyle(0x7a5a32, 1);
+        r.fillCircle(a.x, a.y, 4);
       }
+    }
+  }
+
+  // Water has no tile in the hex pack: a lighter middle and two little wave marks (placed by the hex, so they
+  // don't line up into stripes across the sea)
+  private drawWaves(g: Phaser.GameObjects.Graphics, t: Tile, x: number, y: number): void {
+    g.fillStyle(0xffffff, 0.06);
+    g.fillPoints(hexCorners(x, y, SIZE - 6), true);
+    const flip = (t.col + t.row) & 1 ? -1 : 1;
+    g.lineStyle(1.5, 0xffffff, 0.22);
+    for (const [dx, dy] of [[-7 * flip, -5], [6 * flip, 7]] as const) {
+      g.beginPath();
+      g.arc(x + dx - 3, y + dy, 3, Math.PI * 1.1, Math.PI * 1.9);
+      g.strokePath();
+      g.beginPath();
+      g.arc(x + dx + 3, y + dy, 3, Math.PI * 1.1, Math.PI * 1.9);
+      g.strokePath();
     }
   }
 
@@ -1718,6 +1751,7 @@ export class MapScene extends Phaser.Scene {
     const g = this.ownerGfx;
     g.clear();
     this.castles?.clear();
+    this.hexArt.clearCastles();
     this.castleGfx.clear();
     const map = state.map;
     let names = 0;
@@ -1767,21 +1801,28 @@ export class MapScene extends Phaser.Scene {
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
   }
 
-  // A city on the map: the Kenney castle (the same one as the Keep inside the city) with a flag in the owner's
-  // color on top. Capitals get a gold crown on the flagpole. Falls back to the drawn house if the art is missing.
+  // A city on the map: the Hexagon Pack castle (the large one on capitals) with a flag in the owner's color on
+  // top, and a gold crown on capitals. Falls back to the Tiny Town castle, then the drawn house, if art is missing.
   private drawCastle(x: number, y: number, color: number, capital: boolean): void {
-    const b = this.castles;
     const g = this.castleGfx;
+    const top = this.hexArt.castle(x, y, capital);
+    if (top !== null) {
+      this.drawFlag(g, Math.round(x), Math.round(top) + 2, color, capital);
+      return;
+    }
+    const b = this.castles;
     if (!b || !canDraw(this, KEEP_ART.cells)) {
       this.drawCity(g, x, y, color, capital);
       return;
     }
     const left = Math.round(x - (KEEP_ART.w * ART) / 2);
-    const top = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
-    for (const c of KEEP_ART.cells) b.create(left + c.x * ART, top + c.y * ART, c.f);
-    // Flag on the battlements
-    const px = Math.round(x);
-    const py = top + 1;
+    const tinyTop = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
+    for (const c of KEEP_ART.cells) b.create(left + c.x * ART, tinyTop + c.y * ART, c.f);
+    this.drawFlag(g, Math.round(x), tinyTop + 1, color, capital);
+  }
+
+  // Kingdom flag on a pole standing at (px, py), with a gold crown above it on capitals
+  private drawFlag(g: Phaser.GameObjects.Graphics, px: number, py: number, color: number, capital: boolean): void {
     const h = 8;
     g.lineStyle(1.5, 0x2a1d14, 1);
     g.lineBetween(px, py, px, py - h);
