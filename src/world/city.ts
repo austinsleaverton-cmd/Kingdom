@@ -300,6 +300,8 @@ function fallbackSite(state: GameState, city: Tile, b: Building): number | null 
 // Make sure every finished amenity stands on its own hex of the city's land (and the one under construction has a
 // reserved hex). Anything whose hex left the city, or that was waiting, gets the best free hex; with no free hex
 // it keeps waiting (-1) and still works. Never removes an amenity. Returns the ones that had to move.
+// An amenity standing on the wrong kind of hex (a Harbor on land: an old save, a builder raised its water, or it
+// was grandfathered onto any free hex) moves to a hex it fits as soon as one is free. Until then it stays put.
 export function settleSites(state: GameState, city: Tile): Building[] {
   if (!city.city) return [];
   const lay = cityLayout(state, city);
@@ -328,26 +330,38 @@ export function settleSites(state: GameState, city: Tile): Building[] {
     if (p.was !== undefined && p.was >= 0 && to !== p.was) moved.push(p.b);
   }
   if (city.project && city.projectSite === null) city.projectSite = fallbackSite(state, city, city.project);
+  for (const b of BUILDING_ORDER) {
+    const at = city.sites[b];
+    if (at === undefined || at < 0) continue;
+    const h = lay.byIndex.get(at);
+    if (!h || terrainFits(h.terrain, b)) continue;
+    delete city.sites[b]; // free its hex so the search can't count it as taken
+    const to = bestSite(state, city, b, true, true);
+    city.sites[b] = to ?? at;
+    if (to !== null && !moved.includes(b)) moved.push(b);
+  }
   return moved;
 }
 
 // Old saves (six plots around the Keep): plot i faced the map hex in direction i, so the amenity on it moves onto
-// that hex when the city owns it. Anything else gets the best free hex (settleSites). Nothing is dropped.
+// that hex when the city owns it and the amenity fits there (no Harbor on land). Anything else gets the best free
+// hex (settleSites). Nothing is dropped.
 export function migratePlots(state: GameState, city: Tile, placed: (Building | null)[], projectPlot: number | null): void {
   city.sites = {};
   city.projectSite = null;
-  const dirHex = (i: number): number | null => {
+  const dirHex = (i: number, b: Building): number | null => {
     const t = state.map.neighborAt(city, i);
     if (!t) return null;
     const at = state.tileIndex(t);
-    return siteHex(state, city, at) && !siteUsed(city, at) ? at : null;
+    const h = siteHex(state, city, at);
+    return h && !siteUsed(city, at) && terrainFits(h.terrain, b) ? at : null;
   };
   placed.forEach((b, i) => {
     if (!b || !city.buildings.includes(b) || city.sites[b] !== undefined) return;
-    const at = dirHex(i);
+    const at = dirHex(i, b);
     if (at !== null) city.sites[b] = at;
   });
-  if (city.project && projectPlot !== null && projectPlot >= 0) city.projectSite = dirHex(projectPlot);
+  if (city.project && projectPlot !== null && projectPlot >= 0) city.projectSite = dirHex(projectPlot, city.project);
   settleSites(state, city);
 }
 
