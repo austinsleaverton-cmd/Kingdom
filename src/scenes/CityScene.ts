@@ -1257,7 +1257,9 @@ export class CityScene extends Phaser.Scene {
       const nearKeep = (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) || keepTile(dx, dy);
       // The paddock fence runs all the way round the hex, even past the amenity spot (it hugs the hex's edge)
       if (imp === 'pasture' && !nearKeep && !lotAt(lay, dx, dy)) {
-        const hay = roll < 0.12 && !nearLot(dx, dy) && !yardOf(lay, dx, dy);
+        // The hex's work badge (the horse emoji) sits up and left of its middle: no hay under it
+        const badge = dx === h.center[0] - 2 && dy === h.center[1] - 2;
+        const hay = roll < 0.12 && !badge && !nearLot(dx, dy) && !yardOf(lay, dx, dy);
         if (hay) this.hay.add(key); // the horses keep off it, so none end up standing in the bale
         this.paddock(g, lay, h, dx, dy, hay);
         continue;
