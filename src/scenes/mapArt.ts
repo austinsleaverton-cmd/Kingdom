@@ -1,6 +1,8 @@
 // Kenney Hexagon Pack art for the world map (task 10). CC0, from public/assets/hexagon-pack.
 // Smooth vector style on purpose: the map reads like a board game, the city screen keeps Tiny Town pixel art,
 // and the zoom transition (task 6) covers the switch between the two.
+// The 2D pack has no real mountains and its farm field is a blob at map size, so peaks, hills and crop fields
+// are drawn here in the same flat, lit-from-the-left style.
 // Every lookup can fail (a sheet didn't load, a frame is missing). Then the caller gets NO_ART / null back and
 // draws the old flat colors instead, so the game always runs.
 import Phaser from 'phaser';
@@ -32,37 +34,42 @@ export const NO_ART: ArtDrawn = { ground: false, improvement: false };
 
 type Ground = 'grass' | 'dirt' | 'sand' | 'stone';
 const GROUNDS: Ground[] = ['grass', 'dirt', 'sand', 'stone'];
-// Water has no tile in the pack: it stays drawn. Hills sit on dirt, mountains on stone.
-const GROUND_OF: Record<Terrain, Ground | null> = { water: null, sand: 'sand', grass: 'grass', hills: 'dirt', mountain: 'stone' };
+// Water has no tile in the pack: it stays drawn. Hills and mountains stand on grass, with the drawn
+// mounds and peaks on top.
+const GROUND_OF: Record<Terrain, Ground | null> = { water: null, sand: 'sand', grass: 'grass', hills: 'grass', mountain: 'grass' };
 
 // A prop: [frame, x, y] in the pack's own pixels from the hex center, (x, y) = the prop's bottom middle.
 // The hex is about 69 px from the center to a corner at that size.
 type Prop = [string, number, number];
 
-// A set of props and how big to draw them (1 = the pack's own size next to its tiles).
-// Kept small on purpose so units, borders and labels stay easy to read on top.
+// A set of props and how big to draw them (1 = the pack's own size next to its tiles)
 interface PropSet {
   props: Prop[];
   scale: number;
 }
 
-const TERRAIN_PROPS: Partial<Record<Terrain, PropSet>> = {
-  // Rolling ground: two small rocks
-  hills: { props: [['rockGrey_medium3.png', -14, 18], ['rockBrown_large.png', 18, 26]], scale: 0.6 },
-  // A peak: one crag with a pebble beside it
-  mountain: { props: [['rockGrey_large.png', 0, 30], ['rockGrey_small6.png', 34, 34]], scale: 0.65 },
-};
-
-// Improvements that replace the whole tile (none right now: the full farmhouse tile was too busy)
-const IMPROVEMENT_TILE: Partial<Record<Improvement, string>> = {};
-
-// Improvements drawn as props on the terrain tile. Fisheries stay drawn (they're on water).
+// Improvements drawn as props on the terrain tile. Farms are drawn (see field), fisheries too (on water).
 const IMPROVEMENT_PROPS: Partial<Record<Improvement, PropSet>> = {
   forest: { props: [['treePine_large.png', 0, -4], ['treePine_large.png', -26, 18], ['treePine_large.png', 24, 20], ['treePine_small.png', -2, 38]], scale: 1 },
-  farm: { props: [['farmland.png', -4, 30]], scale: 0.75 },
-  mine: { props: [['mine.png', -4, 26], ['rockGrey_small1.png', 30, 34]], scale: 0.8 },
+  mine: { props: [['mine.png', 14, 34]], scale: 0.8 },
   pasture: { props: [['fence.png', -38, 6], ['fence.png', -18, 10], ['hay.png', 30, 6], ['horseTrough.png', 2, 32]], scale: 0.8 },
 };
+
+// Drawn terrain colors: lit (left) side, shaded (right) side
+const ROCK_LIT = 0xa3a7ad;
+const ROCK_SHADE = 0x787d85;
+const ROCK_BACK_LIT = 0x8e939a;
+const ROCK_BACK_SHADE = 0x6a6f77;
+const SNOW = 0xf4f6f8;
+const SNOW_SHADE = 0xd3d9e0;
+const HILL_LIT = 0x7cc04f;
+const HILL_SHADE = 0x5c9a3a;
+const HILL_BACK = 0x6aae45;
+const WHEAT = 0xe2bd4f;
+const WHEAT_ROW = 0xc49a2f;
+const CROP = 0x8fc456;
+const CROP_ROW = 0x6e9f3c;
+const FIELD_EDGE = 0x8b6a35;
 
 const hash = (col: number, row: number): number => ((col * 73856093) ^ (row * 19349663)) >>> 0;
 
@@ -162,11 +169,80 @@ class Pool {
   }
 }
 
-// Draws the map's terrain tiles, props and castles: tiles at the bottom, props over the roads, castles over the
-// kingdom colors.
+// ---------- drawn terrain (world px around the hex center; the hex is 28 px to a corner) ----------
+
+// One peak: lit left face, shaded right face, snowcap with a shaded side
+function peak(g: Phaser.GameObjects.Graphics, cx: number, base: number, w: number, h: number, lit: number, shade: number, snow: boolean): void {
+  const top = base - h;
+  g.fillStyle(lit, 1);
+  g.fillTriangle(cx - w / 2, base, cx, top, cx + w / 2, base);
+  g.fillStyle(shade, 1);
+  g.fillTriangle(cx, top, cx + w / 2, base, cx + w * 0.08, base);
+  if (!snow) return;
+  const sy = top + h * 0.34;
+  const sw = (w / 2) * 0.34;
+  g.fillStyle(SNOW, 1);
+  g.fillTriangle(cx - sw, sy, cx, top, cx + sw * 0.25, sy + 1.5);
+  g.fillStyle(SNOW_SHADE, 1);
+  g.fillTriangle(cx, top, cx + sw, sy, cx + sw * 0.25, sy + 1.5);
+}
+
+// Mountain: two smaller peaks behind a big one
+function drawMountain(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+  g.fillStyle(0x000000, 0.14);
+  g.fillEllipse(x + 1, y + 12, 38, 7);
+  peak(g, x - 9, y + 9, 20, 18, ROCK_BACK_LIT, ROCK_BACK_SHADE, true);
+  peak(g, x + 10, y + 10, 19, 15, ROCK_BACK_LIT, ROCK_BACK_SHADE, false);
+  peak(g, x + 1, y + 12, 28, 27, ROCK_LIT, ROCK_SHADE, true);
+}
+
+// One rounded mound: lit dome with a shaded right half
+function mound(g: Phaser.GameObjects.Graphics, cx: number, base: number, r: number, lit: number, shade: number): void {
+  g.fillStyle(lit, 1);
+  g.beginPath();
+  g.slice(cx, base, r, Math.PI, Math.PI * 2, false);
+  g.closePath();
+  g.fillPath();
+  g.fillStyle(shade, 1);
+  g.beginPath();
+  g.slice(cx, base, r, Math.PI * 1.5, Math.PI * 2, false);
+  g.closePath();
+  g.fillPath();
+}
+
+// Hills: a back mound and two front ones, low and soft so units on top stay readable
+function drawHills(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+  g.fillStyle(0x000000, 0.1);
+  g.fillEllipse(x, y + 10, 36, 6);
+  mound(g, x + 3, y + 2, 10, HILL_BACK, HILL_SHADE);
+  mound(g, x - 8, y + 10, 10, HILL_LIT, HILL_SHADE);
+  mound(g, x + 10, y + 11, 8, HILL_LIT, HILL_SHADE);
+}
+
+// Farm: a wheat field and a green crop field side by side, rows running across, with a dirt edge
+function drawField(g: Phaser.GameObjects.Graphics, x: number, y: number, flip: boolean): void {
+  const w = 15;
+  const h = 26;
+  const top = y - h / 2;
+  const fields: [number, number, number][] = flip
+    ? [[x - w - 0.5, CROP, CROP_ROW], [x + 0.5, WHEAT, WHEAT_ROW]]
+    : [[x - w - 0.5, WHEAT, WHEAT_ROW], [x + 0.5, CROP, CROP_ROW]];
+  for (const [left, fill, rowColor] of fields) {
+    g.fillStyle(FIELD_EDGE, 1);
+    g.fillRoundedRect(left - 1, top - 1, w + 2, h + 2, 3);
+    g.fillStyle(fill, 1);
+    g.fillRoundedRect(left, top, w, h, 2.5);
+    g.lineStyle(1.5, rowColor, 1);
+    for (let ry = top + 4; ry < top + h - 1; ry += 4) g.lineBetween(left + 2, ry, left + w - 2, ry);
+  }
+}
+
+// Draws the map's terrain tiles, props and castles: tiles at the bottom, drawn peaks / hills / fields and the
+// props over the roads, castles over the kingdom colors.
 export class HexArt {
   private scene: Phaser.Scene;
   private tiles: Pool | null = null;
+  private gfx: Phaser.GameObjects.Graphics | null = null;
   private props: Pool | null = null;
   private keeps: Pool | null = null;
   private base: Partial<Record<Ground, string[]>> = {};
@@ -184,7 +260,11 @@ export class HexArt {
       const tex = scene.textures.get(HEX_TILES);
       tex.setFilter(Phaser.Textures.FilterMode.LINEAR);
       this.base = pickGround(tex);
-      if (Object.keys(this.base).length) this.tiles = new Pool(scene, HEX_TILES, depth.tiles);
+      if (Object.keys(this.base).length) {
+        this.tiles = new Pool(scene, HEX_TILES, depth.tiles);
+        // Between the roads and the props
+        this.gfx = scene.add.graphics().setDepth((depth.tiles + depth.props) / 2 + 0.005);
+      }
     }
     if (scene.textures.exists(HEX_OBJECTS)) {
       scene.textures.get(HEX_OBJECTS).setFilter(Phaser.Textures.FilterMode.LINEAR);
@@ -195,6 +275,7 @@ export class HexArt {
 
   clearGround(): void {
     this.tiles?.reset();
+    this.gfx?.clear();
     this.props?.reset();
   }
 
@@ -202,22 +283,22 @@ export class HexArt {
     this.keeps?.reset();
   }
 
-  // The terrain tile for one explored hex at world (x, y), plus its rocks / trees / improvement
+  // The terrain tile for one explored hex at world (x, y), plus its peaks / hills / field / props
   drawTile(t: Tile, x: number, y: number): ArtDrawn {
     const ground = GROUND_OF[t.terrain];
     const choices = ground ? this.base[ground] : undefined;
-    if (!this.tiles || !choices || !choices.length) return NO_ART;
-    const special = t.improvement ? IMPROVEMENT_TILE[t.improvement] : undefined;
-    const tex = this.scene.textures.get(HEX_TILES);
-    const whole = special !== undefined && tex.has(special);
-    const frame = whole && special ? special : choices[hash(t.col, t.row) % choices.length];
-    this.tiles.put(frame, x, y, this.tileScale, 0.5, 0.5);
-    if (t.city) return { ground: true, improvement: whole }; // the castle stands here
+    const g = this.gfx;
+    if (!this.tiles || !g || !choices || !choices.length) return NO_ART;
+    this.tiles.put(choices[hash(t.col, t.row) % choices.length], x, y, this.tileScale, 0.5, 0.5);
+    if (t.city) return { ground: true, improvement: false }; // the castle stands here
+    if (t.terrain === 'mountain') drawMountain(g, x, y);
+    else if (t.terrain === 'hills') drawHills(g, x, y);
+    if (t.improvement === 'farm') {
+      drawField(g, x, y, (hash(t.col, t.row) & 1) === 1);
+      return { ground: true, improvement: true };
+    }
     const imp = t.improvement ? IMPROVEMENT_PROPS[t.improvement] : undefined;
-    if (imp) return { ground: true, improvement: this.place(imp, x, y) };
-    const deco = TERRAIN_PROPS[t.terrain];
-    if (!whole && deco) this.place(deco, x, y);
-    return { ground: true, improvement: whole };
+    return { ground: true, improvement: imp ? this.place(imp, x, y) : false };
   }
 
   // A city's castle (the large one on capitals). Returns the world y of its top, or null if the art is missing.
