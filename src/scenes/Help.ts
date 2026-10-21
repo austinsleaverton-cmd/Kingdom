@@ -150,13 +150,14 @@ function guideHtml(): string {
       `<ul><li><b>Open the city</b>: double-tap your city, press <kbd>O</kbd>, use Open city in the city panel, or keep zooming in on it. You see the city's real land: every hex it owns, shaped like it is on the map, with its coast, sand and hills. Your border is drawn in your color; neighbouring land, other cities and rival kingdoms show dimmed around it.</li>` +
         `<li>Every amenity stands in the middle of one <b>hex of the city's land</b>, one per hex. The Keep has its own hex. A Harbor needs a water hex, a Workshop hills (mountains count as hills), a Mill grass; everything else goes on any land hex.</li>` +
         `<li>A city can have ${AMENITY_SLOTS[0]} amenities as a ${LEVEL_NAMES[0]}, and room for one more at each bigger size (${LEVEL_NAMES.map((n, k) => `${n} ${AMENITY_SLOTS[k]}`).join(', ')}, never more than ${MAX_AMENITIES}). More land gives them more places to go.</li>` +
-        `<li>Building on a hex never touches what's worked there: a farm, mine, road or fishery keeps working under the amenity. The little icon in a hex's corner shows what's worked on it.</li>` +
+        `<li>Building on a hex never touches what's worked there: a farm, mine, road or fishery keeps working under the amenity. What's worked shows on the ground (crop fields, woods, a mine, a fenced paddock, fishing nets), and a road gets a little icon in the hex's corner.</li>` +
         `<li>Tap a hex to see what fits there and what each building would earn on that exact spot. \u2605 marks the best spot. Tap a built amenity to see dotted lines to the hexes paying its bonuses.</li>` +
         `<li>A quick double-tap on the map opens the city. Tap once, then again a moment later, to pick the unit standing in it.</li>` +
         `<li>The build buttons in the city panel <b>place it for you</b> on the best free hex, and tell you where it went.</li>` +
         `<li><b>Placement bonuses</b> (next to = a hex touching it on the map):<ul>${bonusList()}</ul></li>` +
         `<li><b>Work bonuses</b>: an improvement or road on the amenity's hex or next to it, on your land, helps it. Counts once, however many there are. It's live: if it gets pillaged, the bonus stops until it's rebuilt.<ul>${workList()}</ul></li>` +
-        `<li>If a hex leaves the city (you found a new city on it), its amenity moves to the best free hex. With no free hex it waits and keeps working until there's room. You can't found a city on top of an amenity.</li></ul>`,
+        `<li>If a hex leaves the city (you found a new city on it), its amenity moves to the best free hex. With no free hex it waits and keeps working until there's room. You can't found a city on top of an amenity.</li>` +
+        `<li>An amenity on the wrong kind of hex (a Harbor whose water was raised into land, say) keeps working and moves to a hex it fits as soon as one is free.</li></ul>`,
     ),
     sec(
       'Decorating',
@@ -175,7 +176,7 @@ function guideHtml(): string {
         `<li>Farm ${JOB_COST.farm}g (grass or sand), Pasture ${JOB_COST.pasture}g and Forest ${JOB_COST.forest}g (grass), Mine ${JOB_COST.mine}g (hills or mountains), Road ${JOB_COST.road}g, Raise/Lower land ${JOB_COST.raise}g.</li>` +
         `<li><b>Fishery</b> ${JOB_COST.fishery}g: builders can wade into <b>your own water</b> (1 move per hex) and set one up. A worked fishery gives ${FISHERY_FOOD} food, ${FISHERY_FOOD + HARBOR_FISH} if its city has a Harbor.</li>` +
         `<li>A new job replaces what was there. Roads (and cities) cut movement cost to half, but only for their owner: enemy roads don't help invaders.</li>` +
-        `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain. An amenity already standing on the hex stays.</li>` +
+        `<li>Raising and lowering land changes the terrain: water, sand, grass, hills, mountain. An amenity standing on the hex keeps working; if the new terrain doesn't suit it (a Harbor on dry land), it moves to a hex it fits once one is free.</li>` +
         `<li>Forests cost 2 moves to cross and give cover like hills.</li>` +
         `<li><b>Palisade</b> (<kbd>E</kbd>) ${JOB_COST.palisade}g + ${PALISADE_STONE} stone: on your land within ${PALISADE_RANGE} hexes of a city (farms and mines under it keep working). Enemies can't walk through it, they have to break it (${PALISADE_HP} HP, heals ${PALISADE_REGEN} a turn when no enemies are near). Your own units pass freely and take ${pct(1 - PALISADE_COVER)} less damage standing on one. Catapults and the Galleass break them fastest; Knights are bad at it.</li></ul>`,
     ),
