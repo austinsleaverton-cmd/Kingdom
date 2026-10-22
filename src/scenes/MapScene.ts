@@ -14,73 +14,51 @@ import { CityView, placementNotes, shortNotes, showToast, siteName, siteShort } 
 import { ART, KEEP_ART, TINY, canDraw, crispCityArt, loadCityArt } from './cityArt';
 import { Hud } from './Hud';
 import type { BarMode, DialogButton, PanelBar, PanelButton, PanelModel, PanelSection } from './Hud';
-import { HexArt, NO_ART, loadMapArt } from './mapArt';
+import { HexArt, loadMapArt } from './mapArt';
+import { viewBounds } from './mapCache';
 import { Menu } from './Menu';
 import { UNIT_SPRITE, WORKER_SPRITE, makeSprites } from './sprites';
 import { PinchPush, TRACKPAD_PINCH, ZoomPush, pushHint } from './zoomPush';
 
-const SIZE = 28; // hex radius in px
+const SIZE = 28;
 const SQRT3 = Math.sqrt(3);
 const DRAG_THRESHOLD = 6;
-const DOUBLE_TAP_MS = 320; // two taps on your own city this close together open the City View
-
-// Camera zoom range. At max zoom, keep zooming in on your own city to open it (task 6, zoomPush.ts).
+const DOUBLE_TAP_MS = 320;
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3;
-const BACK_ZOOM = 2; // coming back out of a city eases out to your old zoom, at most this close
-const FADE: [number, number, number] = [20, 26, 38]; // same dark blue as the city screen's background
+const BACK_ZOOM = 2;
+const FADE: [number, number, number] = [20, 26, 38];
 const REDUCED = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-
-// Flat colors by height. Under the Kenney tiles they only fill hairline gaps; water (no tile in the pack) and
-// the no-art fallback use them as the whole look.
-const HEIGHT_COLOR = [0x2f7fc4, 0xd9c38a, 0x6bb352, 0x4f9443, 0x8c7a4c, 0x9a9a9a];
-const TERRAIN_NAME: Record<Terrain, string> = {
-  water: 'Water',
-  sand: 'Sand',
-  grass: 'Grass',
-  hills: 'Hills',
-  mountain: 'Mountain',
-};
-// Hex edge i (between corner i and i+1) faces this neighbor direction.
+const TERRAIN_NAME: Record<Terrain, string> = { water: 'Water', sand: 'Sand', grass: 'Grass', hills: 'Hills', mountain: 'Mountain' };
 const EDGE_TO_DIR = [0, 5, 4, 3, 2, 1];
-
-// Fog of war colors: unexplored land is near-black, explored-but-out-of-sight is dimmed
-const FOG_COLOR = 0x0d1320;
-const FOG_DIM = 0.22; // light veil: explored land stays easy to read, only enemy troops are hidden
-
-// Pixel sprites: little workers on worked tiles (hidden when zoomed far out) and people on unit tokens
+const FOG_DIM = 0.22;
 const WORKER_SCALE = 1.6;
 const UNIT_SCALE = 1.7;
-const WORKER_ZOOM = 0.55; // below this zoom the workers are too small to matter
+const WORKER_ZOOM = 0.55;
 const WORKER_OFFSET: Record<Improvement, [number, number]> = { farm: [10, -4], pasture: [1, -7], mine: [12, -3], forest: [13, 7], fishery: [10, -6] };
-
-// select: click to select/move. claim: click to buy land. raise/lower: builder picks a target.
 type Mode = BarMode | 'raise' | 'lower';
 
 export class MapScene extends Phaser.Scene {
   private state: GameState | null = null;
   private hud!: Hud;
   private menu!: Menu;
-  private cityView!: CityView; // full-screen look inside a city (its own land, hex by hex)
-  private pendingToasts: string[] = []; // hot-seat: news held back until the next person starts their turn
+  private cityView!: CityView;
+  private pendingToasts: string[] = [];
   private mode: Mode = 'select';
   private hovered: Tile | null = null;
   private selected: Tile | null = null;
   private selectedUnitId: number | null = null;
   private reach = new Map<Tile, number>();
-  private unloadAt = new Set<Tile>(); // land hexes the selected transport can drop a unit on
+  private unloadAt = new Set<Tile>();
   private targets = new Map<Tile, AttackPreview>();
-  private claimCity: Tile | null = null; // city buying land in claim mode
+  private claimCity: Tile | null = null;
   private lastPointer = { x: 0, y: 0 };
-  private visible: Set<Tile> | null = null; // fog of war: what you can see right now (null = no fog)
+  private visible: Set<Tile> | null = null;
   private smallZoom = false;
-
-  private terrainGfx!: Phaser.GameObjects.Graphics; // flat colors under the Kenney tiles, water, unexplored hexes
-  private hexArt!: HexArt; // Kenney Hexagon Pack: terrain tiles, props, castles (task 10)
-  private roadGfx!: Phaser.GameObjects.Graphics; // above the tiles: grid lines, roads, drawn improvements
+  private hexArt!: HexArt;
   private ownerGfx!: Phaser.GameObjects.Graphics;
-  private castleGfx!: Phaser.GameObjects.Graphics; // flags and crowns on the castles (or the drawn fallback city)
-  private castles: Phaser.GameObjects.Blitter | null = null; // Tiny Town castle, fallback if the hex pack is missing
+  private castleGfx!: Phaser.GameObjects.Graphics;
+  private castles: Phaser.GameObjects.Blitter | null = null;
   private fogGfx!: Phaser.GameObjects.Graphics;
   private overlayGfx!: Phaser.GameObjects.Graphics;
   private unitGfx!: Phaser.GameObjects.Graphics;
@@ -89,45 +67,35 @@ export class MapScene extends Phaser.Scene {
   private selGfx!: Phaser.GameObjects.Graphics;
   private workerSprites: Phaser.GameObjects.Sprite[] = [];
   private unitSprites: Phaser.GameObjects.Sprite[] = [];
-  private priceLabels: Phaser.GameObjects.Text[] = []; // claim prices shown on green hexes
-  private cityLabels: Phaser.GameObjects.Text[] = []; // name tags under cities
-  private lastTap: { tile: Tile; at: number } | null = null; // for double-tap on a city
-  private routeLabels: Phaser.GameObjects.Text[] = []; // turn numbers along a route
-  private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null; // tapped once, tap again to go
-  private hoverPlan: { unitId: number; tile: Tile; plan: RoutePlan } | null = null; // cached for the tooltip
-
+  private priceLabels: Phaser.GameObjects.Text[] = [];
+  private cityLabels: Phaser.GameObjects.Text[] = [];
+  private lastTap: { tile: Tile; at: number } | null = null;
+  private routeLabels: Phaser.GameObjects.Text[] = [];
+  private routePreview: { unitId: number; dest: Tile; plan: RoutePlan } | null = null;
+  private hoverPlan: { unitId: number; tile: Tile; plan: RoutePlan } | null = null;
   private pressed = false;
   private dragging = false;
   private downX = 0;
   private downY = 0;
-  private pinchDist = 0; // distance between two fingers last frame (0 = not pinching)
-  private pinching = false; // a pinch happened during this touch: don't treat release as a click
+  private pinchDist = 0;
+  private pinching = false;
+  private push = new ZoomPush();
+  private pushCity: Tile | null = null;
+  private pinchPush = new PinchPush();
+  private pinchCity: Tile | null = null;
+  private transitioning = false;
+  private zoomBack = 1.2;
+  private lastView = '';
+  private ownerStamp = '';
+  private fogStamp = '';
+  private worked: Tile[] = [];
 
-  // Zoom transition into cities (task 6)
-  private push = new ZoomPush(); // wheel past max zoom over your own city
-  private pushCity: Tile | null = null; // the city that wheel push is piling up on
-  private pinchPush = new PinchPush(); // pinch past max zoom over your own city
-  private pinchCity: Tile | null = null; // your city under the fingers while pinching past max
-  private transitioning = false; // easing onto a city: input waits
-  private zoomBack = 1.2; // zoom to ease back out to when you leave the city
-
-  constructor() {
-    super('map');
-  }
-
-  // Kenney art: the Hexagon Pack for the map (terrain, props, castles) and the Tiny Town sheets for the city
-  // screen. A failed download just leaves a sheet out and the map falls back to flat colors and drawn cities.
-  preload(): void {
-    loadMapArt(this);
-    loadCityArt(this);
-  }
-
+  constructor() { super('map'); }
+  preload(): void { loadMapArt(this); loadCityArt(this); }
   create(): void {
     makeSprites(this);
     crispCityArt(this);
-    this.terrainGfx = this.add.graphics().setDepth(0);
     this.hexArt = new HexArt(this, SIZE, { tiles: 0.05, props: 0.08, keeps: 1.1 });
-    this.roadGfx = this.add.graphics().setDepth(0.06);
     this.ownerGfx = this.add.graphics().setDepth(1);
     if (this.textures.exists(TINY)) this.castles = this.add.blitter(0, 0, TINY).setDepth(1.1);
     this.castleGfx = this.add.graphics().setDepth(1.15);
@@ -137,34 +105,40 @@ export class MapScene extends Phaser.Scene {
     this.badgeGfx = this.add.graphics().setDepth(3.4);
     this.selGfx = this.add.graphics().setDepth(4.5);
     this.hoverGfx = this.add.graphics().setDepth(5);
-    // Gentle pulse so the current selection is easy to spot
     this.tweens.add({ targets: this.selGfx, alpha: 0.45, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-
-    this.hud = new Hud({
-      onMode: (m) => this.setMode(m),
-      onEndTurn: () => this.endTurn(),
-      onMenu: () => this.openMenu(),
-    });
-    this.menu = new Menu(
-      (opts) => this.newGame(opts),
-      () => this.continueGame(),
-    );
+    this.hud = new Hud({ onMode: (m) => this.setMode(m), onEndTurn: () => this.endTurn(), onMenu: () => this.openMenu() });
+    this.menu = new Menu((opts) => this.newGame(opts), () => this.continueGame());
     this.cityView = new CityView();
-
     this.setupInput();
     this.openMenu();
   }
 
-  // Workers hide when zoomed far out (keeps huge maps readable and smooth)
+  // Camera movement never re-runs game rules or repaints unchanged terrain.
   update(): void {
-    const small = this.cameras.main.zoom < WORKER_ZOOM;
-    if (small === this.smallZoom) return;
-    this.smallZoom = small;
-    if (this.state) this.drawWorkers(this.state);
+    if (!this.state) return;
+    const cam = this.cameras.main;
+    const active = !this.menu.visible && !this.cityView.visible && !this.hud.passVisible;
+    this.hexArt.updateView(active);
+    const stamp = `${active}/${cam.scrollX}/${cam.scrollY}/${cam.zoom}/${cam.width}/${cam.height}`;
+    if (stamp === this.lastView) return;
+    this.lastView = stamp;
+    this.smallZoom = cam.zoom < WORKER_ZOOM;
+    this.drawWorkers(this.state, active);
+    this.cullUnitSprites(active);
   }
-
-  // ---------- flow ----------
-
+  private onScreen(x: number, y: number, pad = 50): boolean {
+    const cam = this.cameras.main;
+    const b = viewBounds(cam.scrollX, cam.scrollY, cam.width, cam.height, cam.zoom);
+    return x >= b.x - pad && x <= b.x + b.width + pad && y >= b.y - pad && y <= b.y + b.height + pad;
+  }
+  private cullUnitSprites(active = true): void {
+    for (const s of this.unitSprites) {
+      // Active marks pool membership. Visibility alone cannot distinguish offscreen from unused.
+      const show = active && s.active && this.onScreen(s.x, s.y);
+      s.setVisible(show);
+      if (show) s.anims.resume(); else s.anims.pause();
+    }
+  }
   private openMenu(): void {
     if (this.cityView.visible) this.cityView.close();
     if (this.state) saveGame(this.state);
@@ -175,20 +149,21 @@ export class MapScene extends Phaser.Scene {
     this.hud.setVisible(false);
     this.menu.show(saveSummary());
   }
-
   private continueGame(): void {
     const saved = this.state ?? loadGame();
     if (saved) this.startGame(saved);
   }
-
   private newGame(opts: GameOptions): void {
     const save = saveSummary();
     if (save && !save.finished && !window.confirm('Start a new kingdom? Your saved game will be replaced.')) return;
     this.startGame(new GameState(opts));
   }
-
   private startGame(state: GameState): void {
-    if (state !== this.state) this.clearSelection();
+    if (state !== this.state) {
+      this.clearSelection();
+      this.ownerStamp = '';
+      this.fogStamp = '';
+    }
     this.state = state;
     this.hovered = null;
     this.menu.hide();
@@ -198,23 +173,16 @@ export class MapScene extends Phaser.Scene {
     this.centerOnHome();
     if (this.needsPass) this.handOff();
   }
-
   private centerOnHome(): void {
     const state = this.state;
     if (!state) return;
     const cap = state.map.tiles.find((t) => t.capital && t.owner === this.me) ?? state.map.tiles.find((t) => t.owner === this.me);
-    if (cap) {
-      const { x, y } = tileCenter(cap);
-      this.cameras.main.centerOn(x, y);
-    }
+    if (cap) { const { x, y } = tileCenter(cap); this.cameras.main.centerOn(x, y); }
   }
-
-  // Hot-seat: show the "pass the device" screen whenever it's a different person's turn
   private get needsPass(): boolean {
     const state = this.state;
     return !!state && state.hotseat && state.winner === null && state.humansAlive().length > 1;
   }
-
   private handOff(): void {
     const state = this.state;
     if (!state) return;
@@ -227,70 +195,43 @@ export class MapScene extends Phaser.Scene {
     const cities = state.cityCount(p.id);
     const note = `${cities} ${cities === 1 ? 'city' : 'cities'} \u00b7 ${p.gold} gold`;
     this.hud.showPass(p.name, p.color, state.turn, note, () => {
-      this.centerOnHome();
-      this.redraw();
-      this.autoAdvance(null);
-      this.showAlerts();
+      this.centerOnHome(); this.redraw(); this.autoAdvance(null); this.showAlerts();
       for (const msg of this.pendingToasts) showToast(msg);
       this.pendingToasts = [];
     });
   }
-
   private get playing(): boolean {
     return this.state !== null && !this.menu.visible && !this.hud.passVisible && !this.hud.dialogVisible && !this.cityView.visible && !this.transitioning;
   }
-
-  // Whose turn it is: with hot-seat play this is whichever person is holding the device
-  private get me(): number {
-    return this.state?.current ?? 0;
-  }
-
+  private get me(): number { return this.state?.current ?? 0; }
   private get selectedUnit(): Unit | null {
     if (!this.state || this.selectedUnitId === null) return null;
     return this.state.unitById(this.selectedUnitId) ?? null;
   }
-
   private setMode(m: Mode): void {
-    // Pressing Select (1) while already selecting clears the selection
     if (m === 'select' && this.mode === 'select') this.clearSelection();
     this.mode = m;
     if (m !== 'claim') this.claimCity = null;
     this.redraw();
   }
-
-  // Claim land is a city action: toggle claim mode for the selected city.
   private toggleClaim(): void {
     const city = this.selected;
     if (!this.state || !city || !city.city || city.owner !== this.me) return;
-    if (this.mode === 'claim' && this.claimCity === city) {
-      this.setMode('select');
-      return;
-    }
-    this.selectedUnitId = null;
-    this.claimCity = city;
-    this.mode = 'claim';
-    this.redraw();
+    if (this.mode === 'claim' && this.claimCity === city) { this.setMode('select'); return; }
+    this.selectedUnitId = null; this.claimCity = city; this.mode = 'claim'; this.redraw();
   }
-
   private clearSelection(): void {
-    this.selected = null;
-    this.selectedUnitId = null;
-    this.reach = new Map();
-    this.unloadAt = new Set();
-    this.targets = new Map();
-    this.claimCity = null;
-    this.routePreview = null;
+    this.selected = null; this.selectedUnitId = null;
+    this.reach = new Map(); this.unloadAt = new Set(); this.targets = new Map();
+    this.claimCity = null; this.routePreview = null;
     if (this.mode === 'claim') this.mode = 'select';
   }
-
-  // Before ending the turn, catch units that were forgotten (unless they're set to hold).
   private endTurn(force = false): void {
     const state = this.state;
     if (!state || !this.playing || state.winner !== null) return;
-    if (this.hud.idleVisible) force = true; // second press of End turn / Space
+    if (this.hud.idleVisible) force = true;
     const idle = state.idleUnits(this.me);
     if (!force && idle.length > 0) {
-      // Jump to the nearest waiting unit, then ask (Space again ends the turn anyway)
       const cur = this.selectedUnit;
       if (!cur || !idle.includes(cur)) {
         const from = this.selected ?? state.tileOf(idle[0]);
@@ -302,32 +243,21 @@ export class MapScene extends Phaser.Scene {
       const names = [...counts].map(([n, c]) => (c > 1 ? `${c} ${n}s` : n)).join(', ');
       this.hud.showIdle(idle.length, names, {
         onShow: () => this.focusUnit(idle[0]),
-        onHoldAll: () => {
-          for (const u of idle) state.setHold(u, true);
-          this.redraw();
-        },
+        onHoldAll: () => { for (const u of idle) state.setHold(u, true); this.redraw(); },
         onEndAnyway: () => this.endTurn(true),
       });
       return;
     }
     this.hud.hideIdle();
-    // Remember where every amenity stands, so finished ones can be announced after the turn
     const before = state.cities().map((c) => [c, { ...c.sites }] as const);
     state.endTurn();
     const news = this.finishedNews(state, before);
     if (this.mode === 'raise' || this.mode === 'lower') this.mode = 'select';
-    if (this.needsPass) {
-      this.pendingToasts = news;
-      return this.handOff();
-    }
+    if (this.needsPass) { this.pendingToasts = news; return this.handOff(); }
     this.redraw();
     for (const msg of news) showToast(msg);
-    // New turn: start on the unit nearest to where you left off
-    this.autoAdvance(this.selected);
-    this.showAlerts();
+    this.autoAdvance(this.selected); this.showAlerts();
   }
-
-  // Amenities that finished for whoever's turn it is now, with where they went and why
   private finishedNews(state: GameState, before: (readonly [Tile, Sites])[]): string[] {
     const out: string[] = [];
     for (const [c, old] of before) {
@@ -341,44 +271,27 @@ export class MapScene extends Phaser.Scene {
     }
     return out;
   }
-
-  // Big news since your last turn (someone declared war on you)
   private showAlerts(): void {
     const state = this.state;
     if (!state) return;
     const news = state.takeAlerts(this.me);
     if (!news.length) return;
-    this.hud.showDialog({
-      title: 'War!',
-      color: 0xef4444,
-      lines: news,
-      buttons: [{ label: 'OK', kind: 'main', onClick: () => this.hud.hideDialog() }],
-    });
+    this.hud.showDialog({ title: 'War!', color: 0xef4444, lines: news, buttons: [{ label: 'OK', kind: 'main', onClick: () => this.hud.hideDialog() }] });
   }
-
   private focusUnit(unit: Unit): void {
     const state = this.state;
     if (!state) return;
-    this.mode = 'select';
-    this.selectedUnitId = unit.id;
-    this.selected = state.tileOf(unit);
+    this.mode = 'select'; this.selectedUnitId = unit.id; this.selected = state.tileOf(unit);
     const { x, y } = tileCenter(this.selected);
-    this.cameras.main.pan(x, y, 300, 'Sine.easeInOut');
-    this.redraw();
+    this.cameras.main.pan(x, y, 300, 'Sine.easeInOut'); this.redraw();
   }
-
   private toggleHold(): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit || unit.owner !== this.me) return;
-    state.setHold(unit, !unit.hold);
-    this.redraw();
+    state.setHold(unit, !unit.hold); this.redraw();
   }
-
-  // Scouts: A turns auto-explore on (it walks right away, then again every turn) or off
   private toggleExplore(): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit || unit.owner !== this.me || unit.type !== 'scout') return;
     this.routePreview = null;
     const on = !unit.explore;
@@ -386,18 +299,12 @@ export class MapScene extends Phaser.Scene {
     this.redraw();
     if (on) this.autoAdvance(state.tileOf(unit));
   }
-
-  // Does this unit of yours still have a real move (or an attack) left this turn?
-  // Road moves cost half, so a unit can be left with 0.5: that counts as done here.
-  // Out of moves = done, even if a builder could still work its tile (click it again to do that).
   private hasWork(state: GameState, u: Unit): boolean {
     if (u.owner !== this.me || u.hold || u.goal || u.explore || state.players[state.current].isAI) return false;
     if (u.moves >= 1 && state.reachableFor(u).size > 0) return true;
     if (state.unloadTiles(u).size > 0) return true;
     return UNIT_STATS[u.type].military && this.findTargets(state, u).size > 0;
   }
-
-  // After a unit finishes (no moves, nothing left to do), jump to the nearest unit that can still act.
   private autoAdvance(from: Tile | null): void {
     const state = this.state;
     if (!state || state.winner !== null || this.mode !== 'select') return;
@@ -405,20 +312,14 @@ export class MapScene extends Phaser.Scene {
     if (!from) return;
     const cur = this.selectedUnit;
     if (cur && this.hasWork(state, cur)) return;
-    let best: Unit | null = null;
-    let bestD = Infinity;
+    let best: Unit | null = null, bestD = Infinity;
     for (const u of state.unitsOf(this.me)) {
       if (u === cur || !this.hasWork(state, u)) continue;
       const d = hexDistance(state.tileOf(u), from);
-      if (d < bestD) {
-        bestD = d;
-        best = u;
-      }
+      if (d < bestD) { bestD = d; best = u; }
     }
     if (best) this.focusUnit(best);
   }
-
-  // N: cycle to the next unit that can still act (by id, wrapping around).
   private nextUnit(): void {
     const state = this.state;
     if (!state) return;
@@ -427,117 +328,64 @@ export class MapScene extends Phaser.Scene {
     const cur = this.selectedUnitId ?? -1;
     this.focusUnit(ready.find((u) => u.id > cur) ?? ready[0]);
   }
-
-  private fail(): void {
-    this.cameras.main.shake(80, 0.002);
-  }
-
+  private fail(): void { this.cameras.main.shake(80, 0.002); }
   private clickTile(tile: Tile): void {
     const state = this.state;
     if (!state) return;
-    let acted = false; // a unit used moves or its action: maybe jump to the next one
+    let acted = false;
     switch (this.mode) {
       case 'claim':
         if (state.perform('claim', tile, this.me, this.claimCity).ok) break;
-        // Clicked another of your cities: claim for that one instead
-        if (tile.city && tile.owner === this.me && tile !== this.claimCity) {
-          this.claimCity = tile;
-          this.selected = tile;
-          break;
-        }
-        // Your own unit: just select it.
+        if (tile.city && tile.owner === this.me && tile !== this.claimCity) { this.claimCity = tile; this.selected = tile; break; }
         if (this.selectOwn(state, tile)) break;
         return this.fail();
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
-        if (!unit) {
-          this.mode = 'select';
-          break;
-        }
+        if (!unit) { this.mode = 'select'; break; }
         if (!state.doJob(unit, this.mode, tile).ok) return this.fail();
-        this.mode = 'select';
-        acted = true;
-        break;
+        this.mode = 'select'; acted = true; break;
       }
       case 'select': {
-        // Quick double-tap on your own city: open it (a slower second tap still picks the unit standing there)
-        const now = Date.now();
-        const tap = this.lastTap;
+        const now = Date.now(), tap = this.lastTap;
         this.lastTap = { tile, at: now };
         if (tile.city && tile.owner === this.me && tap && tap.tile === tile && now - tap.at < DOUBLE_TAP_MS) {
-          this.lastTap = null;
-          this.routePreview = null;
-          this.selectedUnitId = null;
-          this.selected = tile;
-          this.redraw();
-          this.openCity(tile);
-          return;
+          this.lastTap = null; this.routePreview = null; this.selectedUnitId = null; this.selected = tile;
+          this.redraw(); this.openCity(tile); return;
         }
-        const unit = this.selectedUnit;
-        const rival = this.rivalCapital(state, tile);
-        if (unit && state.tileOf(unit) === tile) {
-          // Clicking the selected unit again deselects it
-          this.clearSelection();
-        } else if (unit && this.targets.has(tile)) {
-          this.routePreview = null;
-          state.attack(unit, tile);
-          this.cameras.main.shake(60, 0.003);
-          acted = true;
+        const unit = this.selectedUnit, rival = this.rivalCapital(state, tile);
+        if (unit && state.tileOf(unit) === tile) this.clearSelection();
+        else if (unit && this.targets.has(tile)) {
+          this.routePreview = null; state.attack(unit, tile); this.cameras.main.shake(60, 0.003); acted = true;
         } else if (unit && this.unloadAt.has(tile)) {
-          // Transport: drop the next unit on board onto this hex
-          this.routePreview = null;
-          state.unload(unit, tile);
-          acted = true;
+          this.routePreview = null; state.unload(unit, tile); acted = true;
         } else if (unit && this.reach.has(tile)) {
-          this.routePreview = null;
-          state.moveUnit(unit, tile);
-          this.selected = tile;
-          acted = true;
+          this.routePreview = null; state.moveUnit(unit, tile); this.selected = tile; acted = true;
         } else if (rival !== null) {
-          // Another kingdom's capital: diplomacy (declare war / make peace)
-          this.routePreview = null;
-          this.selectTile(state, tile);
-          this.openDiplomacy(rival);
+          this.routePreview = null; this.selectTile(state, tile); this.openDiplomacy(rival);
         } else if (unit && this.canRoute(state, unit, tile)) {
-          // Far hex: first tap previews the route, second tap on the same hex sends the unit
           const pv = this.routePreview;
-          if (pv && pv.unitId === unit.id && pv.dest === tile) {
-            this.routePreview = null;
-            state.setRoute(unit, tile);
-            acted = true;
-          } else {
+          if (pv && pv.unitId === unit.id && pv.dest === tile) { this.routePreview = null; state.setRoute(unit, tile); acted = true; }
+          else {
             const plan = state.planRoute(unit, tile);
             if (plan.ok) this.routePreview = { unitId: unit.id, dest: tile, plan };
-            else {
-              this.routePreview = null;
-              this.selectTile(state, tile);
-            }
+            else { this.routePreview = null; this.selectTile(state, tile); }
           }
-        } else {
-          this.routePreview = null;
-          this.selectTile(state, tile);
-        }
+        } else { this.routePreview = null; this.selectTile(state, tile); }
         break;
       }
     }
     this.redraw();
     if (acted) this.autoAdvance(tile);
   }
-
-  // The kingdom whose (explored) capital this is, if it isn't yours
   private rivalCapital(state: GameState, tile: Tile): number | null {
     if (state.sandbox || !tile.capital || tile.owner === null || tile.owner === this.me || !this.seen(tile)) return null;
     return state.players[tile.owner].alive ? tile.owner : null;
   }
-
-  // ---------- war and peace ----------
-
   private openDiplomacy(q: number): void {
     const state = this.state;
     if (!state || state.sandbox || q === this.me) return;
-    const me = this.me;
-    const them = state.players[q];
+    const me = this.me, them = state.players[q];
     if (!them || !them.alive) return;
     const cities = state.cityCount(q);
     const troops = state.unitsOf(q).filter((u) => UNIT_STATS[u.type].military).length;
@@ -548,61 +396,36 @@ export class MapScene extends Phaser.Scene {
       const t = state.warTurns(me, q);
       lines.push(t === 0 ? 'At war (declared this turn).' : `At war for ${t} turn${t === 1 ? '' : 's'}.`);
       const pc = state.peaceCheck(me, q);
-      lines.push(
-        pc.ok
-          ? them.isAI
-            ? `${them.name} may say yes or no, depending on how the war is going for them.`
-            : 'Between people, peace is agreed right away.'
-          : pc.reason,
-      );
-      buttons.push({
-        label: 'Offer peace',
-        kind: 'main',
-        enabled: pc.ok,
-        hint: pc.ok ? `then no war for ${TRUCE_TURNS} turns` : '',
-        onClick: () => this.offerPeace(q),
-      });
+      lines.push(pc.ok ? them.isAI ? `${them.name} may say yes or no, depending on how the war is going for them.` : 'Between people, peace is agreed right away.' : pc.reason);
+      buttons.push({ label: 'Offer peace', kind: 'main', enabled: pc.ok, hint: pc.ok ? `then no war for ${TRUCE_TURNS} turns` : '', onClick: () => this.offerPeace(q) });
     } else {
       const wc = state.warCheck(me, q);
       lines.push("At peace: neither side's troops can attack the other.");
-      lines.push(
-        wc.ok
-          ? `Declaring war lets both sides attack units and cities. A war lasts at least ${MIN_WAR_TURNS} turns before you can make peace.`
-          : wc.reason,
-      );
+      lines.push(wc.ok ? `Declaring war lets both sides attack units and cities. A war lasts at least ${MIN_WAR_TURNS} turns before you can make peace.` : wc.reason);
       buttons.push({ label: `Declare war on ${them.name}`, kind: 'danger', enabled: wc.ok, onClick: () => this.declareWar(q) });
     }
     buttons.push({ label: 'Close', onClick: () => this.hud.hideDialog() });
     this.hud.showDialog({ title: them.name, color: them.color, lines, buttons });
   }
-
   private declareWar(q: number): void {
     const state = this.state;
     if (!state) return;
     const c = state.declareWar(this.me, q);
     this.hud.hideDialog();
     if (!c.ok) return this.fail();
-    this.cameras.main.shake(150, 0.004);
-    this.redraw();
+    this.cameras.main.shake(150, 0.004); this.redraw();
   }
-
   private offerPeace(q: number): void {
     const state = this.state;
     if (!state) return;
-    const r = state.offerPeace(this.me, q);
-    const them = state.players[q];
+    const r = state.offerPeace(this.me, q), them = state.players[q];
     this.redraw();
     this.hud.showDialog({
-      title: r.ok ? `Peace with ${them.name}` : 'Peace refused',
-      color: them.color,
-      lines: r.ok
-        ? [r.reason || `You made peace with ${them.name}.`, `Neither side can declare war again for ${TRUCE_TURNS} turns.`]
-        : [r.reason, `You can ask again in ${PEACE_RETRY} turns.`],
+      title: r.ok ? `Peace with ${them.name}` : 'Peace refused', color: them.color,
+      lines: r.ok ? [r.reason || `You made peace with ${them.name}.`, `Neither side can declare war again for ${TRUCE_TURNS} turns.`] : [r.reason, `You can ask again in ${PEACE_RETRY} turns.`],
       buttons: [{ label: 'OK', kind: 'main', onClick: () => this.hud.hideDialog() }],
     });
   }
-
-  // Tapping a far hex with your unit selected plans a route, unless it's your own unit or city (that selects it).
   private canRoute(state: GameState, unit: Unit, tile: Tile): boolean {
     if (unit.owner !== this.me || state.players[state.current].isAI || state.winner !== null) return false;
     const here = state.unitAt(tile);
@@ -610,7 +433,6 @@ export class MapScene extends Phaser.Scene {
     if (tile.city && tile.owner === this.me) return false;
     return true;
   }
-
   private planFor(state: GameState, unit: Unit, tile: Tile): RoutePlan {
     const pv = this.routePreview;
     if (pv && pv.unitId === unit.id && pv.dest === tile) return pv.plan;
@@ -620,107 +442,67 @@ export class MapScene extends Phaser.Scene {
     this.hoverPlan = { unitId: unit.id, tile, plan };
     return plan;
   }
-
-  // X: cancels a route preview, a route, or exploring
   private cancelRoute(): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     this.routePreview = null;
     if (state && unit && unit.owner === this.me) state.clearRoute(unit);
     this.redraw();
   }
-
-  // City first (it's the main thing on a tile); click the same city again to get the unit on it.
   private selectTile(state: GameState, tile: Tile): void {
-    const here = state.unitAt(tile);
-    const mine = here && here.owner === this.me ? here : null;
+    const here = state.unitAt(tile), mine = here && here.owner === this.me ? here : null;
     const ownCity = tile.city && tile.owner === this.me;
     if (ownCity && mine) {
       const cityAlreadySelected = this.selected === tile && this.selectedUnitId === null;
       this.selectedUnitId = cityAlreadySelected ? mine.id : null;
-    } else {
-      this.selectedUnitId = mine ? mine.id : null;
-    }
+    } else this.selectedUnitId = mine ? mine.id : null;
     this.selected = tile;
   }
-
   private selectOwn(state: GameState, tile: Tile): boolean {
-    const here = state.unitAt(tile);
-    const ownCity = tile.city && tile.owner === this.me;
+    const here = state.unitAt(tile), ownCity = tile.city && tile.owner === this.me;
     if (!ownCity && !(here && here.owner === this.me)) return false;
-    this.mode = 'select';
-    this.claimCity = null;
-    this.selected = null;
-    this.selectedUnitId = null;
-    this.selectTile(state, tile);
-    return true;
+    this.mode = 'select'; this.claimCity = null; this.selected = null; this.selectedUnitId = null;
+    this.selectTile(state, tile); return true;
   }
-
   private doJob(job: Job): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit) return;
-    if (job === 'raise' || job === 'lower') {
-      this.mode = this.mode === job ? 'select' : job;
-      this.redraw();
-      return;
-    }
+    if (job === 'raise' || job === 'lower') { this.mode = this.mode === job ? 'select' : job; this.redraw(); return; }
     const here = state.tileOf(unit);
     if (!state.doJob(unit, job, here).ok) return this.fail();
-    this.redraw();
-    this.autoAdvance(here);
+    this.redraw(); this.autoAdvance(here);
   }
-
   private recruit(type: UnitType): void {
     const state = this.state;
     if (!state || !this.selected) return;
     const res = state.recruit(type, this.selected);
     if (!res) return this.fail();
-    if (res !== 'queued') {
-      this.mode = 'select';
-      this.claimCity = null;
-      this.selectedUnitId = res.id;
-      this.selected = state.tileOf(res);
-    }
+    if (res !== 'queued') { this.mode = 'select'; this.claimCity = null; this.selectedUnitId = res.id; this.selected = state.tileOf(res); }
     this.redraw();
   }
-
   private buildWalls(city: Tile): void {
     const state = this.state;
     if (!state) return;
     if (!state.buildWalls(city, this.me).ok) return this.fail();
     this.redraw();
   }
-
-  // Auto-place: the amenity goes to the best free hex of the city's land. Say where, so the player learns the bonuses.
   private build(city: Tile, b: Building): void {
     const state = this.state;
     if (!state) return;
     if (!state.startBuilding(city, b, this.me).ok) return this.fail();
-    const info = BUILDINGS[b];
-    const at = city.projectSite;
+    const info = BUILDINGS[b], at = city.projectSite;
     if (at !== null) {
       const notes = placementNotes(state, city, at, b);
       showToast(`${info.icon} ${info.name} going up on ${siteName(state, city, at)}${notes.length ? ` (${notes.join('; ')})` : ''}, ready in ${info.turns} turns`);
     }
     this.redraw();
   }
-
-  // The City View: the city's own land, pick a hex and build.
-  // Every way in (double-tap, O, Open city, zooming in) eases the camera onto the city and fades into the city
-  // screen, so it feels like zooming from the kingdom down into the town. Reduced motion: straight in.
   private openCity(city: Tile): void {
     const state = this.state;
     if (!state || !city.city || city.owner !== this.me || state.players[this.me].isAI || this.transitioning) return;
-    this.hud.hideTip();
-    this.hud.hideIdle();
-    pushHint(null);
+    this.hud.hideTip(); this.hud.hideIdle(); pushHint(null);
     const cam = this.cameras.main;
     this.zoomBack = Math.min(cam.zoom, BACK_ZOOM);
-    if (REDUCED || this.cityView.visible) {
-      this.showCity(state, city, false);
-      return;
-    }
+    if (REDUCED || this.cityView.visible) { this.showCity(state, city, false); return; }
     this.transitioning = true;
     const { x, y } = tileCenter(city);
     cam.pan(x, y, 260, 'Sine.easeInOut', true);
@@ -729,227 +511,116 @@ export class MapScene extends Phaser.Scene {
     cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
       this.transitioning = false;
       if (this.state === state && city.city && city.owner === this.me) this.showCity(state, city, true);
-      cam.resetFX();
-      cam.setZoom(MAX_ZOOM);
+      cam.resetFX(); cam.setZoom(MAX_ZOOM);
     });
   }
-
   private showCity(state: GameState, city: Tile, zoomIn: boolean): void {
-    this.cityView.open(
-      state,
-      city,
-      this.me,
-      {
-        onChange: () => this.redraw(),
-        onClose: (user) => {
-          this.arrive(city, user);
-          this.redraw();
-        },
-      },
-      { zoomIn },
-    );
+    this.cityView.open(state, city, this.me, { onChange: () => this.redraw(), onClose: (user) => { this.arrive(city, user); this.redraw(); } }, { zoomIn });
   }
-
-  // Back from a city you chose to leave: fade in on that city and ease out to your old zoom.
-  // Forced closes (menu, next player's turn) leave the camera alone.
   private arrive(city: Tile, user: boolean): void {
     if (!user) return;
-    const cam = this.cameras.main;
-    const { x, y } = tileCenter(city);
-    this.push.cool(performance.now()); // leftover zoom from the city can't bounce you straight back in
-    this.pushCity = null;
-    if (REDUCED) {
-      cam.setZoom(this.zoomBack);
-      cam.centerOn(x, y);
-      return;
-    }
-    cam.resetFX();
-    cam.setZoom(MAX_ZOOM);
-    cam.centerOn(x, y);
-    cam.fadeIn(200, FADE[0], FADE[1], FADE[2]);
-    cam.zoomTo(this.zoomBack, 380, 'Sine.easeOut', true);
+    const cam = this.cameras.main, { x, y } = tileCenter(city);
+    this.push.cool(performance.now()); this.pushCity = null;
+    if (REDUCED) { cam.setZoom(this.zoomBack); cam.centerOn(x, y); return; }
+    cam.resetFX(); cam.setZoom(MAX_ZOOM); cam.centerOn(x, y);
+    cam.fadeIn(200, FADE[0], FADE[1], FADE[2]); cam.zoomTo(this.zoomBack, 380, 'Sine.easeOut', true);
   }
-
-  // Your own city under a screen point (only in select mode: claim, raise and lower never open a city)
   private ownCityAt(sx: number, sy: number): Tile | null {
     const state = this.state;
     if (!state || this.mode !== 'select' || state.players[this.me].isAI) return null;
     const t = this.tileAtScreen(sx, sy);
     return t && t.city && t.owner === this.me ? t : null;
   }
-
   private pillage(): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit) return;
     if (!state.pillage(unit).ok) return this.fail();
     this.redraw();
   }
-
   private foundCity(): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit || unit.type !== 'settler') return;
     const tile = state.tileOf(unit);
     if (!state.foundCity(unit).ok) return this.fail();
-    this.selectedUnitId = null;
-    this.selected = tile;
-    this.redraw();
+    this.selectedUnitId = null; this.selected = tile; this.redraw();
   }
-
-  // ---------- input ----------
-
-  // Two-finger pinch on phones/tablets: zoom around the point between the fingers.
-  // At max zoom over your own city, spreading further stretches the view a little; let go once it says
-  // "Release to enter" and the city opens. Not far enough (or fingers moved off the city): it springs back.
   private handlePinch(): boolean {
-    const a = this.input.pointer1;
-    const b = this.input.pointer2;
-    if (!a?.isDown || !b?.isDown) {
-      this.pinchDist = 0;
-      return false;
-    }
-    this.pinching = true;
-    this.dragging = true;
-    this.hud.hideTip();
+    const a = this.input.pointer1, b = this.input.pointer2;
+    if (!a?.isDown || !b?.isDown) { this.pinchDist = 0; return false; }
+    this.pinching = true; this.dragging = true; this.hud.hideTip();
     const dist = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
-    const mx = (a.x + b.x) / 2;
-    const my = (a.y + b.y) / 2;
-    const cam = this.cameras.main;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, cam = this.cameras.main;
     if (this.pinchDist > 0 && dist > 0) {
-      const ratio = dist / this.pinchDist;
-      const before = cam.getWorldPoint(mx, my);
-      const city = this.ownCityAt(mx, my);
-      const pp = this.pinchPush;
+      const ratio = dist / this.pinchDist, before = cam.getWorldPoint(mx, my), city = this.ownCityAt(mx, my), pp = this.pinchPush;
       if (pp.active || (city && ratio > 1 && cam.zoom >= MAX_ZOOM - 0.001 && !this.push.cooling(performance.now()))) {
-        pp.stretch(ratio);
-        this.pinchCity = city;
-        cam.setZoom(MAX_ZOOM * pp.give);
+        pp.stretch(ratio); this.pinchCity = city; cam.setZoom(MAX_ZOOM * pp.give);
         pushHint(pp.armed && city ? `Release to enter ${this.state?.cityName(city) ?? 'the city'}` : null);
-      } else {
-        cam.setZoom(Phaser.Math.Clamp(cam.zoom * ratio, MIN_ZOOM, MAX_ZOOM));
-      }
-      cam.preRender(); // refresh the camera matrix so the next lookup uses the new zoom
+      } else cam.setZoom(Phaser.Math.Clamp(cam.zoom * ratio, MIN_ZOOM, MAX_ZOOM));
+      cam.preRender();
       const after = cam.getWorldPoint(mx, my);
-      cam.scrollX += before.x - after.x;
-      cam.scrollY += before.y - after.y;
+      cam.scrollX += before.x - after.x; cam.scrollY += before.y - after.y;
     }
-    this.pinchDist = dist;
-    return true;
+    this.pinchDist = dist; return true;
   }
-
-  // Both fingers are up after a pinch: open the city if the stretch was armed, otherwise spring back to max zoom
   private endPinchPush(): void {
     const pp = this.pinchPush;
     if (!pp.active) return;
     const city = pp.armed ? this.pinchCity : null;
-    pp.reset();
-    this.pinchCity = null;
-    pushHint(null);
-    if (city && this.playing) {
-      this.openCity(city);
-      return;
-    }
+    pp.reset(); this.pinchCity = null; pushHint(null);
+    if (city && this.playing) { this.openCity(city); return; }
     this.cameras.main.zoomTo(MAX_ZOOM, 160, 'Sine.easeOut', true);
   }
-
   private setupInput(): void {
-    this.input.mouse?.disableContextMenu();
-    this.input.addPointer(1); // allow a second finger for pinch zoom
-
+    this.input.mouse?.disableContextMenu(); this.input.addPointer(1);
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (this.input.pointer1?.isDown && this.input.pointer2?.isDown) this.pinching = true;
-      this.pressed = true;
-      this.dragging = false;
-      this.downX = p.x;
-      this.downY = p.y;
+      this.pressed = true; this.dragging = false; this.downX = p.x; this.downY = p.y;
     });
-
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       if (!this.playing) return;
       if (this.handlePinch()) return;
-      if (this.pinching) return; // one finger lifted mid-pinch: wait until both are up
+      if (this.pinching) return;
       if (this.pressed && p.isDown) {
-        if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_THRESHOLD) {
-          this.dragging = true;
-        }
+        if (!this.dragging && Math.hypot(p.x - this.downX, p.y - this.downY) > DRAG_THRESHOLD) this.dragging = true;
         if (this.dragging) {
           const cam = this.cameras.main;
           cam.scrollX -= (p.x - p.prevPosition.x) / cam.zoom;
           cam.scrollY -= (p.y - p.prevPosition.y) / cam.zoom;
-          this.hud.hideTip();
-          return;
+          this.hud.hideTip(); return;
         }
       }
       this.setHover(this.tileAtScreen(p.x, p.y), p.x, p.y);
     });
-
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (this.pinching) {
-        // Finish the pinch once every finger is up; never count it as a tap
         if (!this.input.pointer1?.isDown && !this.input.pointer2?.isDown) {
-          this.pinching = false;
-          this.pinchDist = 0;
-          this.pressed = false;
-          this.dragging = false;
-          this.endPinchPush();
+          this.pinching = false; this.pinchDist = 0; this.pressed = false; this.dragging = false; this.endPinchPush();
         }
         return;
       }
       const wasClick = this.pressed && !this.dragging;
-      this.pressed = false;
-      this.dragging = false;
+      this.pressed = false; this.dragging = false;
       if (!this.playing || !wasClick) return;
-      if (p.rightButtonReleased()) {
-        this.cancel();
-        return;
-      }
+      if (p.rightButtonReleased()) { this.cancel(); return; }
       if (!p.leftButtonReleased()) return;
       const tile = this.tileAtScreen(p.x, p.y);
       if (tile) this.clickTile(tile);
       this.setHover(this.tileAtScreen(p.x, p.y), p.x, p.y);
     });
-
-    this.input.on('gameout', () => {
-      if (this.playing) this.setHover(null, 0, 0);
-    });
-
-    // Smooth zoom: scale by how far the wheel/trackpad actually moved, so
-    // trackpads (many tiny events) and mouse wheels (few big ones) feel the same.
-    // At max zoom with the pointer on your own city, zooming in keeps piling up until the city opens.
+    this.input.on('gameout', () => { if (this.playing) this.setHover(null, 0, 0); });
     this.input.on('wheel', (p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
       if (!this.playing) return;
-      const ev = p.event as WheelEvent;
-      const pinch = ev.ctrlKey; // macOS trackpad pinch arrives as ctrl+wheel
-      const delta = Phaser.Math.Clamp(dy, -60, 60);
-      const cam = this.cameras.main;
-      const now = performance.now();
-      const city = delta < 0 ? this.ownCityAt(p.x, p.y) : null;
-      if (city !== this.pushCity) {
-        this.push.atLimit(false, now);
-        this.pushCity = city;
-      }
+      const ev = p.event as WheelEvent, pinch = ev.ctrlKey, delta = Phaser.Math.Clamp(dy, -60, 60), cam = this.cameras.main;
+      const now = performance.now(), city = delta < 0 ? this.ownCityAt(p.x, p.y) : null;
+      if (city !== this.pushCity) { this.push.atLimit(false, now); this.pushCity = city; }
       this.push.atLimit(!!city && cam.zoom >= MAX_ZOOM - 0.001, now);
-      if (city && this.push.feed(-delta * (pinch ? TRACKPAD_PINCH : 1), now)) {
-        this.pushCity = null;
-        this.openCity(city);
-        return;
-      }
+      if (city && this.push.feed(-delta * (pinch ? TRACKPAD_PINCH : 1), now)) { this.pushCity = null; this.openCity(city); return; }
       const factor = Math.exp(-delta * (pinch ? 0.01 : 0.0015));
       cam.setZoom(Phaser.Math.Clamp(cam.zoom * factor, MIN_ZOOM, MAX_ZOOM));
     });
-
     this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
-      // A popup is open: Esc or Enter closes it, everything else waits
-      if (this.hud.dialogVisible) {
-        if (e.key === 'Escape' || e.key === 'Enter') this.hud.hideDialog();
-        return;
-      }
-      // Inside a city: Esc (or O again) goes back to the map, other keys wait
-      if (this.cityView.visible) {
-        if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close(true);
-        return;
-      }
+      if (this.hud.dialogVisible) { if (e.key === 'Escape' || e.key === 'Enter') this.hud.hideDialog(); return; }
+      if (this.cityView.visible) { if (e.key === 'Escape' || e.key.toUpperCase() === 'O') this.cityView.close(true); return; }
       if (this.hud.passVisible && !this.menu.visible) {
         if (e.key === ' ' || e.key === 'Enter') this.hud.startPass();
         else if (e.key === 'Escape') this.openMenu();
@@ -957,42 +628,18 @@ export class MapScene extends Phaser.Scene {
       }
       if (e.key === 'Escape') {
         if (!this.playing) this.continueGame();
-        else if (this.selected || this.mode !== 'select') {
-          // First Esc clears the selection, second opens the menu
-          this.clearSelection();
-          this.mode = 'select';
-          this.redraw();
-        } else this.openMenu();
+        else if (this.selected || this.mode !== 'select') { this.clearSelection(); this.mode = 'select'; this.redraw(); }
+        else this.openMenu();
         return;
       }
       if (!this.playing) return;
-      const key = e.key.toUpperCase();
-      const unit = this.selectedUnit;
-      const job = JOBS.find((j) => j.key === key);
-      if (job && unit && unit.type === 'builder') {
-        this.doJob(job.id);
-        return;
-      }
-      if (key === 'H' && unit) {
-        this.toggleHold();
-        return;
-      }
-      if (key === 'X' && unit && (unit.goal || unit.explore || this.routePreview)) {
-        this.cancelRoute();
-        return;
-      }
-      if (key === 'A' && unit && unit.type === 'scout') {
-        this.toggleExplore();
-        return;
-      }
-      if (key === 'C' && unit && unit.type === 'settler') {
-        this.foundCity();
-        return;
-      }
-      if (key === 'L' && unit && UNIT_STATS[unit.type].military) {
-        this.pillage();
-        return;
-      }
+      const key = e.key.toUpperCase(), unit = this.selectedUnit, job = JOBS.find((j) => j.key === key);
+      if (job && unit && unit.type === 'builder') { this.doJob(job.id); return; }
+      if (key === 'H' && unit) { this.toggleHold(); return; }
+      if (key === 'X' && unit && (unit.goal || unit.explore || this.routePreview)) { this.cancelRoute(); return; }
+      if (key === 'A' && unit && unit.type === 'scout') { this.toggleExplore(); return; }
+      if (key === 'C' && unit && unit.type === 'settler') { this.foundCity(); return; }
+      if (key === 'L' && unit && UNIT_STATS[unit.type].military) { this.pillage(); return; }
       switch (key) {
         case '1': this.setMode('select'); break;
         case 'N':
@@ -1007,58 +654,30 @@ export class MapScene extends Phaser.Scene {
       }
     });
   }
-
   private cancel(): void {
-    if (this.mode !== 'select') {
-      this.mode = 'select';
-      this.claimCity = null;
-    } else this.clearSelection();
+    if (this.mode !== 'select') { this.mode = 'select'; this.claimCity = null; } else this.clearSelection();
     this.redraw();
   }
-
   private tileAtScreen(sx: number, sy: number): Tile | null {
     if (!this.state) return null;
     const w = this.cameras.main.getWorldPoint(sx, sy);
-    const q = ((SQRT3 / 3) * w.x - (1 / 3) * w.y) / SIZE;
-    const r = ((2 / 3) * w.y) / SIZE;
-    // cube rounding
-    const x = q;
-    const z = r;
-    const y = -x - z;
-    let rx = Math.round(x);
-    const ry = Math.round(y);
-    let rz = Math.round(z);
-    const dx = Math.abs(rx - x);
-    const dy = Math.abs(ry - y);
-    const dz = Math.abs(rz - z);
+    const q = ((SQRT3 / 3) * w.x - (1 / 3) * w.y) / SIZE, r = ((2 / 3) * w.y) / SIZE;
+    const x = q, z = r, y = -x - z;
+    let rx = Math.round(x), rz = Math.round(z);
+    const ry = Math.round(y), dx = Math.abs(rx - x), dy = Math.abs(ry - y), dz = Math.abs(rz - z);
     if (dx > dy && dx > dz) rx = -ry - rz;
     else if (!(dy > dz)) rz = -rx - ry;
-    const row = rz;
-    const col = rx + (row - (row & 1)) / 2;
+    const row = rz, col = rx + (row - (row & 1)) / 2;
     return this.state.map.get(col, row);
   }
-
   private setHover(tile: Tile | null, sx: number, sy: number): void {
-    this.hovered = tile;
-    this.lastPointer = { x: sx, y: sy };
-    this.refreshHover();
+    this.hovered = tile; this.lastPointer = { x: sx, y: sy }; this.refreshHover();
   }
-
-  // ---------- fog of war ----------
-
-  // Explored: seen at some point (terrain and borders show). Visible: in sight right now (units show).
-  private seen(t: Tile): boolean {
-    return !this.visible || !!this.state?.isExplored(this.me, t);
-  }
-
-  private sees(t: Tile): boolean {
-    return !this.visible || this.visible.has(t);
-  }
-
+  private seen(t: Tile): boolean { return !this.visible || !!this.state?.isExplored(this.me, t); }
+  private sees(t: Tile): boolean { return !this.visible || this.visible.has(t); }
   private hoverCheck(state: GameState, tile: Tile): { label: string; check: Check } | null {
     switch (this.mode) {
-      case 'claim':
-        return { label: 'Claim', check: state.check('claim', tile, this.me, this.claimCity) };
+      case 'claim': return { label: 'Claim', check: state.check('claim', tile, this.me, this.claimCity) };
       case 'raise':
       case 'lower': {
         const unit = this.selectedUnit;
@@ -1072,29 +691,21 @@ export class MapScene extends Phaser.Scene {
           return { label: 'Attack', check: { ok: true, cost: 0, reason: `deal ${pv.dmg}${kill}, take ${pv.counter}` } };
         }
         const sel = this.selectedUnit;
-        // In range of another kingdom's troops or city, but not at war with them
         if (sel && sel.owner === this.me && UNIT_STATS[sel.type].military && this.sees(tile)) {
           const a = state.attackPreview(sel, tile);
           if (!a.ok && a.reason.startsWith('At peace')) return { label: 'Attack', check: { ok: false, cost: 0, reason: a.reason } };
         }
-        if (this.rivalCapital(state, tile) !== null && !this.reach.has(tile)) {
-          return { label: 'Diplomacy', check: { ok: true, cost: 0, reason: 'click to declare war or make peace' } };
-        }
+        if (this.rivalCapital(state, tile) !== null && !this.reach.has(tile)) return { label: 'Diplomacy', check: { ok: true, cost: 0, reason: 'click to declare war or make peace' } };
         const sel2 = this.selectedUnit;
-        if (sel2 && this.unloadAt.has(tile) && sel2.cargo?.length) {
-          return { label: 'Unload', check: { ok: true, cost: 0, reason: `drop off the ${UNIT_STATS[sel2.cargo[0].type].name}` } };
-        }
+        if (sel2 && this.unloadAt.has(tile) && sel2.cargo?.length) return { label: 'Unload', check: { ok: true, cost: 0, reason: `drop off the ${UNIT_STATS[sel2.cargo[0].type].name}` } };
         const left = this.reach.get(tile);
-        if (left !== undefined && sel2 && !UNIT_STATS[sel2.type].naval && state.hasRoom(tile, this.me)) {
-          return { label: 'Board', check: { ok: true, cost: 0, reason: 'ride the Transport (uses all moves)' } };
-        }
+        if (left !== undefined && sel2 && !UNIT_STATS[sel2.type].naval && state.hasRoom(tile, this.me)) return { label: 'Board', check: { ok: true, cost: 0, reason: 'ride the Transport (uses all moves)' } };
         if (left === undefined) {
           const unit = this.selectedUnit;
           if (!unit || !this.canRoute(state, unit, tile) || state.tileOf(unit) === tile) return null;
           const plan = this.planFor(state, unit, tile);
           if (!plan.ok) return { label: 'Route', check: { ok: false, cost: 0, reason: plan.reason } };
-          const pv = this.routePreview;
-          const again = pv && pv.unitId === unit.id && pv.dest === tile;
+          const pv = this.routePreview, again = pv && pv.unitId === unit.id && pv.dest === tile;
           const t = `${plan.turns} turn${plan.turns === 1 ? '' : 's'}${plan.nextTo ? ', stops next to it' : ''}`;
           return { label: 'Route', check: { ok: true, cost: 0, reason: again ? `${t} \u00b7 click again to go` : `${t} \u00b7 click to see the path` } };
         }
@@ -1103,59 +714,35 @@ export class MapScene extends Phaser.Scene {
       }
     }
   }
-
   private refreshHover(): void {
     this.hoverGfx.clear();
-    const state = this.state;
-    const tile = this.hovered;
-    if (!state || !tile || state.winner !== null || this.hud.dialogVisible || this.cityView.visible) {
-      this.hud.hideTip();
-      return;
-    }
-    const hc = this.hoverCheck(state, tile);
-    const ok = hc ? hc.check.ok : true;
-    const { x, y } = tileCenter(tile);
+    const state = this.state, tile = this.hovered;
+    if (!state || !tile || state.winner !== null || this.hud.dialogVisible || this.cityView.visible) { this.hud.hideTip(); return; }
+    const hc = this.hoverCheck(state, tile), ok = hc ? hc.check.ok : true, { x, y } = tileCenter(tile);
     this.hoverGfx.lineStyle(3, ok ? 0xffffff : 0xff5555, 0.95);
     this.hoverGfx.strokePoints(hexCorners(x, y, SIZE - 1.5), true);
-
     let lines: string[];
-    if (!this.seen(tile)) {
-      lines = ['Unexplored', 'Send a unit to scout it'];
-    } else {
+    if (!this.seen(tile)) lines = ['Unexplored', 'Send a unit to scout it'];
+    else {
       const owner = tile.owner === null ? 'Unclaimed' : state.players[tile.owner].name;
-      const extras = [tile.capital ? 'Capital' : tile.city ? 'City' : '', tile.improvement ?? '', tile.road ? 'road' : '', tile.palisade ? `palisade ${tile.palisade} HP` : '']
-        .filter(Boolean)
-        .join(' · ');
+      const extras = [tile.capital ? 'Capital' : tile.city ? 'City' : '', tile.improvement ?? '', tile.road ? 'road' : '', tile.palisade ? `palisade ${tile.palisade} HP` : ''].filter(Boolean).join(' · ');
       const unit = state.unitAt(tile);
-      lines = [
-        `${TERRAIN_NAME[tile.terrain]} (height ${tile.height})`,
-        `${owner}${extras ? ` · ${extras}` : ''}`,
-        `Yield ${YIELD[tile.terrain]}g/turn`,
-      ];
+      lines = [`${TERRAIN_NAME[tile.terrain]} (height ${tile.height})`, `${owner}${extras ? ` · ${extras}` : ''}`, `Yield ${YIELD[tile.terrain]}g/turn`];
       const home = state.homeCity(tile);
       if (tile.city) lines.unshift(`${state.cityName(tile)} (${LEVEL_NAMES[cityLevel(tile) - 1]}, ${tile.pop} people ${MOOD_FACE[state.mood(tile)]})`);
       else if (home && tile.owner !== null) {
-        const ti = state.tileIndex(tile);
-        const b = BUILDING_ORDER.find((k) => home.sites[k] === ti);
+        const ti = state.tileIndex(tile), b = BUILDING_ORDER.find((k) => home.sites[k] === ti);
         lines.push(`Land of ${state.cityName(home)}${b ? ` · ${BUILDINGS[b].icon} ${BUILDINGS[b].name}` : ''}`);
       }
       if (tile.city) lines.push(`HP ${tile.hp}/${cityMaxHp(tile)}${tile.walls ? ` · walls ${tile.walls} (${tile.shield}/${shieldMax(tile)})` : ''}${tile.wallTurns ? ` · walls going up (${tile.wallTurns})` : ''}`);
-      if (tile.city && tile.owner !== null && tile.owner !== this.me && !state.sandbox) {
-        lines.push(state.atWar(this.me, tile.owner) ? `At war with ${state.players[tile.owner].name}` : `At peace with ${state.players[tile.owner].name}`);
-      }
+      if (tile.city && tile.owner !== null && tile.owner !== this.me && !state.sandbox) lines.push(state.atWar(this.me, tile.owner) ? `At war with ${state.players[tile.owner].name}` : `At peace with ${state.players[tile.owner].name}`);
       if (unit && (unit.owner === this.me || this.sees(tile))) lines.push(`${state.players[unit.owner].name} ${UNIT_STATS[unit.type].name} (${unit.hp}/${UNIT_STATS[unit.type].hp} HP)`);
       if (!this.sees(tile)) lines.push('Out of sight: troops here are hidden');
     }
     let status = '';
-    if (hc) {
-      if (this.mode === 'select') status = `${hc.label}: ${hc.check.reason}`;
-      else status = hc.check.ok ? `${hc.label}: ${hc.check.cost}g` : `${hc.label}: ${hc.check.reason}`;
-    }
+    if (hc) status = this.mode === 'select' ? `${hc.label}: ${hc.check.reason}` : hc.check.ok ? `${hc.label}: ${hc.check.cost}g` : `${hc.label}: ${hc.check.reason}`;
     this.hud.showTip(lines, status, ok, this.lastPointer.x, this.lastPointer.y);
   }
-
-  // ---------- selection panel ----------
-
   private renameCity(city: Tile): void {
     const state = this.state;
     if (!state || city.owner !== this.me) return;
@@ -1163,11 +750,7 @@ export class MapScene extends Phaser.Scene {
     if (name) state.renameCity(city, name);
     this.redraw();
   }
-
-  private hpColor(frac: number): string {
-    return frac > 0.5 ? '#22c55e' : frac > 0.25 ? '#eab308' : '#ef4444';
-  }
-
+  private hpColor(frac: number): string { return frac > 0.5 ? '#22c55e' : frac > 0.25 ? '#eab308' : '#ef4444'; }
   private buildPanel(state: GameState): PanelModel | null {
     const tile = this.selected;
     if (!tile) return null;
@@ -1176,18 +759,12 @@ export class MapScene extends Phaser.Scene {
     if (tile.city && tile.owner === this.me) return this.cityPanel(state, tile);
     return this.tilePanel(state, tile);
   }
-
   private unitPanel(state: GameState, unit: Unit): PanelModel {
-    const stats = UNIT_STATS[unit.type];
-    const here = state.tileOf(unit);
-    const sections: PanelSection[] = [];
-    const status: PanelSection = {
-      bars: [
-        { label: 'Health', value: unit.hp, max: stats.hp, color: this.hpColor(unit.hp / stats.hp) },
-        { label: 'Moves', value: unit.moves, max: stats.moves, color: '#60a5fa' },
-      ],
-      lines: [],
-    };
+    const stats = UNIT_STATS[unit.type], here = state.tileOf(unit), sections: PanelSection[] = [];
+    const status: PanelSection = { bars: [
+      { label: 'Health', value: unit.hp, max: stats.hp, color: this.hpColor(unit.hp / stats.hp) },
+      { label: 'Moves', value: unit.moves, max: stats.moves, color: '#60a5fa' },
+    ], lines: [] };
     if (stats.military) {
       status.lines!.push(`Attack ${stats.atk} · Range ${stats.range}${stats.strongVs ? ` · strong vs ${UNIT_STATS[stats.strongVs].name}s` : ''}`);
       if (stats.boatsOnly) status.lines!.push('Only fights other boats.');
@@ -1205,19 +782,12 @@ export class MapScene extends Phaser.Scene {
     } else if (stats.scout) {
       status.lines!.push("Crosses closed borders at peace to look around. Hills, mountains and forests cost 1 less. Can't fight.");
       if (unit.explore) status.lines!.push('Exploring: walks into the fog by itself every turn');
-    } else {
-      status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
-    }
+    } else status.lines!.push('Move 3+ hexes from any city, then found it. Uses up the settler.');
     if (unit.hold) status.lines!.push('Holding: skipped by the end-of-turn check');
     sections.push(status);
-
-    // Route: what's planned, or how to plan one
     if (unit.owner === this.me) {
-      const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview.plan : null;
-      const active = unit.goal ? state.routeLeft(unit) : null;
-      const lines: string[] = [];
-      const buttons: PanelButton[] = [];
-      const turns = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
+      const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview.plan : null, active = unit.goal ? state.routeLeft(unit) : null;
+      const lines: string[] = [], buttons: PanelButton[] = [], turns = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
       if (pv) {
         lines.push(`Preview: ${turns(pv.turns)} to get there${pv.nextTo ? ' (stops next to it)' : ''}. Tap the same hex again to go.`);
         lines.push('Dots show where it stops each turn.');
@@ -1228,303 +798,107 @@ export class MapScene extends Phaser.Scene {
       } else if (unit.explore) {
         lines.push('Exploring: picks its own way into the fog at the start of each turn.');
         lines.push('Stops when enemy troops show up or nothing is left. Tap a far hex to send it somewhere instead.');
-      } else {
-        lines.push('Tap a far hex to plan a multi-turn route.');
-      }
-      if (unit.goal || pv) {
-        buttons.push({ label: pv ? 'Cancel preview' : 'Cancel route', key: 'X', enabled: true, hint: pv ? 'clear the path' : 'stop here', onClick: () => this.cancelRoute() });
-      }
+      } else lines.push('Tap a far hex to plan a multi-turn route.');
+      if (unit.goal || pv) buttons.push({ label: pv ? 'Cancel preview' : 'Cancel route', key: 'X', enabled: true, hint: pv ? 'clear the path' : 'stop here', onClick: () => this.cancelRoute() });
       sections.push({ heading: 'Route', summary: pv ? `preview ${turns(pv.turns)}` : active ? turns(active.turns) : unit.explore ? 'exploring' : 'none', lines, buttons });
     }
-
     const actions: PanelButton[] = [];
     if (unit.type === 'settler') {
       const c = state.foundCheck(unit);
       actions.push({ label: 'Found city here', key: 'C', enabled: c.ok, hint: c.ok ? 'uses the settler' : c.reason, onClick: () => this.foundCity() });
     }
     if (unit.type === 'scout' && unit.owner === this.me) {
-      // Exploring already: the button just stops it. Otherwise check there's somewhere left to go.
       const c = unit.explore ? null : state.exploreCheck(unit);
-      actions.push({
-        label: unit.explore ? 'Stop exploring' : 'Explore',
-        key: 'A',
-        enabled: !c || c.ok,
-        hint: c ? (c.ok ? 'walks into the fog by itself' : c.reason) : 'exploring',
-        active: unit.explore === true,
-        onClick: () => this.toggleExplore(),
-      });
+      actions.push({ label: unit.explore ? 'Stop exploring' : 'Explore', key: 'A', enabled: !c || c.ok, hint: c ? (c.ok ? 'walks into the fog by itself' : c.reason) : 'exploring', active: unit.explore === true, onClick: () => this.toggleExplore() });
     }
     if (stats.military && unit.owner === this.me) {
-      const c = state.pillageCheck(unit);
-      const loot = state.pillageTarget(here);
-      // Only worth showing on enemy land
-      if (here.owner !== null && here.owner !== unit.owner && !here.city) {
-        actions.push({
-          label: loot ? `Pillage ${loot.name}` : 'Pillage',
-          key: 'L',
-          enabled: c.ok,
-          hint: c.ok && loot ? `+${loot.gold}g, uses its attack` : c.reason,
-          onClick: () => this.pillage(),
-        });
-      }
+      const c = state.pillageCheck(unit), loot = state.pillageTarget(here);
+      if (here.owner !== null && here.owner !== unit.owner && !here.city) actions.push({ label: loot ? `Pillage ${loot.name}` : 'Pillage', key: 'L', enabled: c.ok, hint: c.ok && loot ? `+${loot.gold}g, uses its attack` : c.reason, onClick: () => this.pillage() });
     }
-    if (unit.type === 'builder') {
-      for (const j of JOBS) {
-        const terraform = j.id === 'raise' || j.id === 'lower';
-        const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
-        actions.push({
-          label: j.label,
-          key: j.key,
-          enabled: c.ok,
-          hint: c.ok ? (terraform ? 'pick a hex' : `${c.cost}g`) : c.reason,
-          active: this.mode === j.id,
-          onClick: () => this.doJob(j.id),
-        });
-      }
+    if (unit.type === 'builder') for (const j of JOBS) {
+      const terraform = j.id === 'raise' || j.id === 'lower';
+      const c = terraform ? this.terraformPreview(state, unit, j.id) : state.jobCheck(unit, j.id, here);
+      actions.push({ label: j.label, key: j.key, enabled: c.ok, hint: c.ok ? (terraform ? 'pick a hex' : `${c.cost}g`) : c.reason, active: this.mode === j.id, onClick: () => this.doJob(j.id) });
     }
-    if (unit.owner === this.me) {
-      actions.push({
-        label: unit.hold ? 'Stop holding' : 'Hold position',
-        key: 'H',
-        enabled: true,
-        hint: unit.hold ? 'holding' : 'skip end-turn check',
-        active: unit.hold === true,
-        onClick: () => this.toggleHold(),
-      });
-    }
+    if (unit.owner === this.me) actions.push({ label: unit.hold ? 'Stop holding' : 'Hold position', key: 'H', enabled: true, hint: unit.hold ? 'holding' : 'skip end-turn check', active: unit.hold === true, onClick: () => this.toggleHold() });
     sections.push({ heading: 'Actions', buttons: actions });
     const where = here.city ? ` · in ${state.cityName(here)}` : '';
-    return {
-      title: stats.name,
-      subtitle: `${state.players[unit.owner].name}${where}`,
-      sections,
-      footer: 'Click it again or Esc to deselect \u00b7 N or Tab = next unit',
-    };
+    return { title: stats.name, subtitle: `${state.players[unit.owner].name}${where}`, sections, footer: 'Click it again or Esc to deselect \u00b7 N or Tab = next unit' };
   }
-
   private cityPanel(state: GameState, city: Tile): PanelModel {
-    const claiming = this.mode === 'claim' && this.claimCity === city;
-    const open = state.openClaims(city);
-    const sections: PanelSection[] = [];
+    const claiming = this.mode === 'claim' && this.claimCity === city, open = state.openClaims(city), sections: PanelSection[] = [];
     const bars: PanelBar[] = [{ label: 'Health', value: city.hp, max: cityMaxHp(city), color: this.hpColor(city.hp / cityMaxHp(city)) }];
     if (city.walls) bars.push({ label: `Walls ${city.walls}`, value: city.shield, max: shieldMax(city), color: '#60a5fa' });
     sections.push({ bars });
-
-    // People: spare food fills the growth bar, a full bar is one more person
-    const lvl = cityLevel(city);
-    const unlock = (n: number) =>
-      n === 3 ? 'claims land 4 hexes out' : n === MAX_LEVEL ? 'troops train 1 turn faster' : '+1 gold, +1 food, +10 HP';
-    const need = state.growthNeed(city);
-    const note = state.growthNote(city);
-    const rate = state.growthRate(city);
-    const growLines = [
-      `${city.pop} people \u00b7 eat ${Math.floor(city.pop / 2)} food \u00b7 ${need > 0 ? note || `+${rate.toFixed(1)} growth/turn` : 'full size'}`,
-    ];
+    const lvl = cityLevel(city), unlock = (n: number) => n === 3 ? 'claims land 4 hexes out' : n === MAX_LEVEL ? 'troops train 1 turn faster' : '+1 gold, +1 food, +10 HP';
+    const need = state.growthNeed(city), note = state.growthNote(city), rate = state.growthRate(city);
+    const growLines = [`${city.pop} people \u00b7 eat ${Math.floor(city.pop / 2)} food \u00b7 ${need > 0 ? note || `+${rate.toFixed(1)} growth/turn` : 'full size'}`];
     if (lvl < MAX_LEVEL) growLines.push(`Next: ${LEVEL_NAMES[lvl]} at ${LEVEL_POP[lvl]} people (${unlock(lvl + 1)}, room for 1 more amenity)`);
-    sections.push({
-      heading: 'People',
-      summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`,
-      bars: need > 0 ? [{ label: 'Growth', value: Math.floor(city.growth), max: need, color: '#a3e635' }] : [],
-      lines: growLines,
-    });
-
-    // Happiness: what's helping and hurting
-    const mood = state.mood(city);
-    const happy = state.happiness(city);
-    const moodText: Record<string, string> = {
-      happy: 'Happy: grows 50% faster, +1 gold',
-      content: 'Content',
-      unhappy: 'Unhappy: not growing. Build a Temple or Park',
-      angry: 'Angry: people are leaving! Build amenities or bring troops home',
-    };
-    sections.push({
-      heading: 'Happiness',
-      folded: true,
-      summary: `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy}`,
-      lines: [
-        `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy} \u00b7 ${moodText[mood]}`,
-        state.happinessParts(city).map(([k, n]) => `${k} ${n >= 0 ? '+' : ''}${n}`).join(', '),
-      ],
-    });
-
-    // Culture: the city grabs a free tile next to its land when the bar fills
-    const cNeed = state.cultureNeed(city);
-    const cRate = state.cultureRate(city);
-    const pick = state.borderPick(city);
-    const cTurns = Math.max(1, Math.ceil((cNeed - city.culture) / cRate));
-    sections.push({
-      heading: 'Borders',
-      folded: true,
-      summary: pick ? `+1 tile in ${cTurns}t` : 'no room',
-      bars: [{ label: 'Culture', value: city.culture, max: cNeed, color: '#c084fc' }],
-      lines: [
-        pick
-          ? `+${cRate} culture per turn \u00b7 grabs a free tile in about ${cTurns} turn${cTurns === 1 ? '' : 's'}`
-          : 'No open land in reach: grows again when land opens up',
-      ],
-    });
-
-    // Amenities: one project at a time, shared with training troops. Each one stands on a hex of the city's land:
-    // these buttons auto-place it on the best free hex, Open city picks the spot by hand.
-    const slots = amenitySlots(city, state.isSimple(this.me));
-    const used = amenitiesUsed(city);
-    const buildButtons: PanelButton[] = [
-      {
-        label: '\u{1F3F0} Open city',
-        key: 'O',
-        enabled: true,
-        hint: `${used}/${slots} amenities \u00b7 pick spots`,
-        onClick: () => this.openCity(city),
-      },
-    ];
+    sections.push({ heading: 'People', summary: `${city.pop} \u00b7 ${LEVEL_NAMES[lvl - 1]}`, bars: need > 0 ? [{ label: 'Growth', value: Math.floor(city.growth), max: need, color: '#a3e635' }] : [], lines: growLines });
+    const mood = state.mood(city), happy = state.happiness(city);
+    const moodText: Record<string, string> = { happy: 'Happy: grows 50% faster, +1 gold', content: 'Content', unhappy: 'Unhappy: not growing. Build a Temple or Park', angry: 'Angry: people are leaving! Build amenities or bring troops home' };
+    sections.push({ heading: 'Happiness', folded: true, summary: `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy}`, lines: [
+      `${MOOD_FACE[mood]} ${happy >= 0 ? '+' : ''}${happy} \u00b7 ${moodText[mood]}`,
+      state.happinessParts(city).map(([k, n]) => `${k} ${n >= 0 ? '+' : ''}${n}`).join(', '),
+    ] });
+    const cNeed = state.cultureNeed(city), cRate = state.cultureRate(city), pick = state.borderPick(city), cTurns = Math.max(1, Math.ceil((cNeed - city.culture) / cRate));
+    sections.push({ heading: 'Borders', folded: true, summary: pick ? `+1 tile in ${cTurns}t` : 'no room', bars: [{ label: 'Culture', value: city.culture, max: cNeed, color: '#c084fc' }], lines: [
+      pick ? `+${cRate} culture per turn \u00b7 grabs a free tile in about ${cTurns} turn${cTurns === 1 ? '' : 's'}` : 'No open land in reach: grows again when land opens up',
+    ] });
+    const slots = amenitySlots(city, state.isSimple(this.me)), used = amenitiesUsed(city);
+    const buildButtons: PanelButton[] = [{ label: '\u{1F3F0} Open city', key: 'O', enabled: true, hint: `${used}/${slots} amenities \u00b7 pick spots`, onClick: () => this.openCity(city) }];
     const built = BUILDING_ORDER.filter((b) => city.buildings.includes(b));
     for (const b of BUILDING_ORDER) {
       if (city.buildings.includes(b)) continue;
-      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue; // no water: no Harbor
-      if (!hasSiteFor(state, city, b)) continue; // no hex it can stand on (no hills: no Workshop)
-      const info = BUILDINGS[b];
-      const c = state.buildCheck(city, b, this.me);
-      const doing = city.project === b;
+      if (BUILDINGS[b].coastal && !state.isCoastal(city)) continue;
+      if (!hasSiteFor(state, city, b)) continue;
+      const info = BUILDINGS[b], c = state.buildCheck(city, b, this.me), doing = city.project === b;
       let where = '';
       if (doing && city.projectSite !== null) where = ` \u00b7 ${siteShort(state, city, city.projectSite)}`;
       else if (c.ok) {
-        const at = state.autoSite(city, b, this.me);
-        const bonus = at !== null ? shortNotes(placementNotes(state, city, at, b)) : '';
+        const at = state.autoSite(city, b, this.me), bonus = at !== null ? shortNotes(placementNotes(state, city, at, b)) : '';
         where = at !== null ? ` \u00b7 ${siteShort(state, city, at)}${bonus ? ` ${bonus}` : ''}` : '';
       }
-      buildButtons.push({
-        label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`,
-        enabled: c.ok,
-        active: doing,
+      buildButtons.push({ label: `${info.icon} ${info.name}${doing ? ` (${city.projectTurns}t left)` : ''}`, enabled: c.ok, active: doing,
         hint: doing ? `building${where}` : c.ok ? `${state.options.freeBuild ? 'free' : `${c.cost}g`} \u00b7 ${info.turns}t \u00b7 ${info.note}${where}` : c.reason,
-        onClick: () => this.build(city, b),
-      });
+        onClick: () => this.build(city, b) });
     }
-    sections.push({
-      heading: 'Amenities',
-      summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${used}/${slots}`,
-      lines: [
-        built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
-        "Buttons pick the best hex of the city's land for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.",
-      ],
-      buttons: buildButtons,
-      grid: true,
-    });
-
-    const wc = state.wallCheck(city, this.me);
-    const nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0;
-    const wt = state.wallTurnsFor(city);
-    const turnsTxt = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
-    const wallLines = [
-      city.walls
-        ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first`
-        : 'No walls yet. Walls cost stone (mines make it).',
-    ];
+    sections.push({ heading: 'Amenities', summary: city.project ? `${BUILDINGS[city.project].name} ${city.projectTurns}t` : `${built.length} built \u00b7 ${used}/${slots}`, lines: [
+      built.length ? `Built: ${built.map((b) => `${BUILDINGS[b].icon} ${BUILDINGS[b].name}`).join(', ')}` : 'Nothing built yet. One project at a time.',
+      "Buttons pick the best hex of the city's land for you. Open city (O, double-tap the city, or keep zooming in on it) to choose the spot yourself.",
+    ], buttons: buildButtons, grid: true });
+    const wc = state.wallCheck(city, this.me), nextStone = city.walls < MAX_WALLS ? state.wallStoneCost(city) : 0, wt = state.wallTurnsFor(city), turnsTxt = (n: number) => `${n} turn${n === 1 ? '' : 's'}`;
+    const wallLines = [city.walls ? `Walls level ${city.walls} of ${MAX_WALLS}: the blue bar soaks damage first` : 'No walls yet. Walls cost stone (mines make it).'];
     if (city.wallTurns > 0) wallLines.push(`Building walls level ${city.walls + 1}: ${turnsTxt(city.wallTurns)} left`);
-    sections.push({
-      heading: 'Defense',
-      folded: true,
-      summary: city.wallTurns > 0 ? `walls ${city.walls + 1} in ${city.wallTurns}` : city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls',
-      lines: wallLines,
-      buttons: [
-        {
-          label:
-            city.walls >= MAX_WALLS ? 'Walls maxed' : city.wallTurns > 0 ? `Building walls ${city.walls + 1}` : city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
-          key: 'W',
-          enabled: wc.ok,
-          hint: wc.ok
-            ? `${state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`} · ${turnsTxt(wt)}`
-            : city.walls >= MAX_WALLS ? '' : wc.reason,
-          onClick: () => this.buildWalls(city),
-        },
-      ],
+    sections.push({ heading: 'Defense', folded: true, summary: city.wallTurns > 0 ? `walls ${city.walls + 1} in ${city.wallTurns}` : city.walls ? `walls ${city.walls}/${MAX_WALLS}` : 'no walls', lines: wallLines, buttons: [{
+      label: city.walls >= MAX_WALLS ? 'Walls maxed' : city.wallTurns > 0 ? `Building walls ${city.walls + 1}` : city.walls ? `Upgrade walls to ${city.walls + 1}` : 'Build walls',
+      key: 'W', enabled: wc.ok, hint: wc.ok ? `${state.options.freeBuild ? 'free' : `${wc.cost}g + ${nextStone} stone`} · ${turnsTxt(wt)}` : city.walls >= MAX_WALLS ? '' : wc.reason, onClick: () => this.buildWalls(city),
+    }] });
+    sections.push({ heading: 'Land', summary: `${state.cityLand(city).length} tiles${open > 0 ? ` \u00b7 ${open} open` : ''}`, lines: claiming
+      ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
+      : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'} \u00b7 every tile is also room in the city`],
+      buttons: [{ label: claiming ? 'Done claiming' : 'Claim land', key: 'K', enabled: claiming || open > 0, hint: claiming ? '' : open > 0 ? `${open} open` : 'full', active: claiming, onClick: () => this.toggleClaim() }],
     });
-
-    sections.push({
-      heading: 'Land',
-      summary: `${state.cityLand(city).length} tiles${open > 0 ? ` \u00b7 ${open} open` : ''}`,
-      lines: claiming
-        ? [`${state.cityLand(city).length} tiles. Click a green hex to buy it (price shown). K or right-click when done.`]
-        : [`${state.cityLand(city).length} tiles · ${open > 0 ? `${open} more can be claimed` : 'area full: send a settler to expand'} \u00b7 every tile is also room in the city`],
-      buttons: [
-        {
-          label: claiming ? 'Done claiming' : 'Claim land',
-          key: 'K',
-          enabled: claiming || open > 0,
-          hint: claiming ? '' : open > 0 ? `${open} open` : 'full',
-          active: claiming,
-          onClick: () => this.toggleClaim(),
-        },
-      ],
-    });
-
     const train: PanelButton[] = [];
-    const recruitables: { type: UnitType; key?: string }[] = [
-      { type: 'builder', key: 'B' },
-      { type: 'settler', key: 'S' },
-      ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))),
-      ...(state.sandbox || !state.isCoastal(city) ? [] : NAVY.map((type) => ({ type }))),
-    ];
+    const recruitables: { type: UnitType; key?: string }[] = [{ type: 'builder', key: 'B' }, { type: 'settler', key: 'S' }, ...(state.sandbox ? [] : TROOPS.map((type) => ({ type }))), ...(state.sandbox || !state.isCoastal(city) ? [] : NAVY.map((type) => ({ type })))];
     for (const r of recruitables) {
-      const c = state.recruitCheck(r.type, city, this.me);
-      const s = UNIT_STATS[r.type];
-      const turns = state.trainTurns(r.type, city);
-      const time = turns > 0 ? ` · ${turns}t` : '';
-      train.push({
-        label: s.name,
-        key: r.key,
-        enabled: c.ok,
-        hint: c.ok ? `${c.cost}g · ${s.food} food${time}` : c.reason,
-        onClick: () => this.recruit(r.type),
-      });
+      const c = state.recruitCheck(r.type, city, this.me), s = UNIT_STATS[r.type], turns = state.trainTurns(r.type, city), time = turns > 0 ? ` · ${turns}t` : '';
+      train.push({ label: s.name, key: r.key, enabled: c.ok, hint: c.ok ? `${c.cost}g · ${s.food} food${time}` : c.reason, onClick: () => this.recruit(r.type) });
     }
     const queued = state.trainingAt(city);
-    const trainLines = queued
-      ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`]
-      : [city.project ? `Busy building ${BUILDINGS[city.project].name} (builders still OK)` : `One unit at a time \u00b7 food left: ${state.foodMade(this.me) - state.foodUsed(this.me)}`];
-    // While training, only Builder (instant) is still possible, so the list shrinks to that
+    const trainLines = queued ? [`Training ${UNIT_STATS[queued.type].name}: ${queued.turnsLeft > 0 ? `${queued.turnsLeft} turn${queued.turnsLeft > 1 ? 's' : ''} left` : 'waiting for room'}`] : [city.project ? `Busy building ${BUILDINGS[city.project].name} (builders still OK)` : `One unit at a time \u00b7 food left: ${state.foodMade(this.me) - state.foodUsed(this.me)}`];
     const trainButtons = queued ? train.filter((b) => b.enabled) : train;
-    sections.push({
-      heading: 'Train',
-      summary: queued ? `${UNIT_STATS[queued.type].name} \u00b7 ${queued.turnsLeft}t` : 'ready',
-      lines: trainLines,
-      buttons: trainButtons,
-      grid: true,
-    });
-
+    sections.push({ heading: 'Train', summary: queued ? `${UNIT_STATS[queued.type].name} \u00b7 ${queued.turnsLeft}t` : 'ready', lines: trainLines, buttons: trainButtons, grid: true });
     const here = state.unitAt(city);
-    if (here && here.owner === this.me) {
-      sections.push({
-        heading: 'In this city',
-        buttons: [
-          {
-            label: `Select ${UNIT_STATS[here.type].name}`,
-            enabled: true,
-            hint: 'or click the city again',
-            onClick: () => {
-              this.mode = 'select';
-              this.claimCity = null;
-              this.selectedUnitId = here.id;
-              this.redraw();
-            },
-          },
-        ],
-      });
-    }
-    return {
-      title: state.cityName(city),
-      subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} \u00b7 ${city.capital ? 'your capital' : 'your city'}`,
-      titleAction: { label: 'Rename', onClick: () => this.renameCity(city) },
-      sections,
-    };
+    if (here && here.owner === this.me) sections.push({ heading: 'In this city', buttons: [{
+      label: `Select ${UNIT_STATS[here.type].name}`, enabled: true, hint: 'or click the city again',
+      onClick: () => { this.mode = 'select'; this.claimCity = null; this.selectedUnitId = here.id; this.redraw(); },
+    }] });
+    return { title: state.cityName(city), subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} \u00b7 ${city.capital ? 'your capital' : 'your city'}`, titleAction: { label: 'Rename', onClick: () => this.renameCity(city) }, sections };
   }
-
   private tilePanel(state: GameState, tile: Tile): PanelModel {
-    if (!this.seen(tile)) {
-      return { title: 'Unexplored', sections: [{ lines: ['Nobody has scouted this land yet. Send a unit to see it.'] }] };
-    }
-    const lines: string[] = [];
-    const home = state.homeCity(tile);
+    if (!this.seen(tile)) return { title: 'Unexplored', sections: [{ lines: ['Nobody has scouted this land yet. Send a unit to see it.'] }] };
+    const lines: string[] = [], home = state.homeCity(tile);
     if (tile.owner === null) lines.push('Unclaimed');
     else lines.push(`${state.players[tile.owner].name}${home ? ` · land of ${state.cityName(home)}` : ''}`);
     lines.push(`Height ${tile.height} · ${YIELD[tile.terrain]} gold/turn${tile.improvement ? ` · ${tile.improvement}` : ''}${tile.road ? ' · road' : ''}`);
@@ -1535,9 +909,7 @@ export class MapScene extends Phaser.Scene {
       bars.push({ label: 'Health', value: tile.hp, max: cityMaxHp(tile), color: this.hpColor(tile.hp / cityMaxHp(tile)) });
       if (tile.walls) bars.push({ label: `Walls ${tile.walls}`, value: tile.shield, max: shieldMax(tile), color: '#60a5fa' });
     }
-    if (tile.palisade) {
-      lines.push(`Palisade ${tile.palisade}/${PALISADE_HP} HP${tile.owner === this.me ? ': enemies have to break it to get through' : ': break it to get through'}`);
-    }
+    if (tile.palisade) lines.push(`Palisade ${tile.palisade}/${PALISADE_HP} HP${tile.owner === this.me ? ': enemies have to break it to get through' : ': break it to get through'}`);
     const other = state.unitAt(tile);
     if (other && other.owner !== this.me && this.sees(tile)) {
       const s = UNIT_STATS[other.type];
@@ -1545,30 +917,14 @@ export class MapScene extends Phaser.Scene {
       bars.push({ label: 'Unit HP', value: other.hp, max: s.hp, color: this.hpColor(other.hp / s.hp) });
     }
     if (!this.sees(tile)) lines.push('Out of sight right now');
-    const sections: PanelSection[] = [{ bars, lines }];
-    // Another kingdom's city: war and peace with them
-    const q = tile.owner;
-    if (tile.city && q !== null && q !== this.me && !state.sandbox && state.players[q].alive) {
-      const war = state.atWar(this.me, q);
-      const t = state.warTurns(this.me, q);
-      sections.push({
-        heading: 'Diplomacy',
-        summary: war ? 'at war' : 'at peace',
-        lines: [war ? `At war with ${state.players[q].name} for ${t} turn${t === 1 ? '' : 's'}` : `At peace with ${state.players[q].name}`],
-        buttons: [{ label: war ? 'Make peace...' : 'Declare war...', enabled: true, hint: '', onClick: () => this.openDiplomacy(q) }],
-      });
-    }
-    return {
-      title,
-      subtitle:
-        tile.city && tile.owner !== null
-          ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} \u00b7 ${LEVEL_NAMES[cityLevel(tile) - 1]} \u00b7 ${tile.pop} people ${MOOD_FACE[state.mood(tile)]}`
-          : undefined,
-      sections,
-    };
+    const sections: PanelSection[] = [{ bars, lines }], q = tile.owner;
+    if (tile.city && q !== null && q !== this.me && !state.sandbox && state.players[q].alive) sections.push({
+      heading: 'Diplomacy', summary: state.atWar(this.me, q) ? 'at war' : 'at peace',
+      lines: [state.atWar(this.me, q) ? `At war with ${state.players[q].name} for ${state.warTurns(this.me, q)} turn${state.warTurns(this.me, q) === 1 ? '' : 's'}` : `At peace with ${state.players[q].name}`],
+      buttons: [{ label: state.atWar(this.me, q) ? 'Make peace...' : 'Declare war...', enabled: true, hint: '', onClick: () => this.openDiplomacy(q) }],
+    });
+    return { title, subtitle: tile.city && tile.owner !== null ? `${state.players[tile.owner].name} ${tile.capital ? 'capital' : 'city'} \u00b7 ${LEVEL_NAMES[cityLevel(tile) - 1]} \u00b7 ${tile.pop} people ${MOOD_FACE[state.mood(tile)]}` : undefined, sections };
   }
-
-  // Raise/lower is valid if any target (builder tile or neighbor) works.
   private terraformPreview(state: GameState, unit: Unit, job: 'raise' | 'lower'): Check {
     const here = state.tileOf(unit);
     let last: Check = { ok: false, cost: 0, reason: 'Nothing to change' };
@@ -1579,23 +935,14 @@ export class MapScene extends Phaser.Scene {
     }
     return last;
   }
-
   private findTargets(state: GameState, unit: Unit): Map<Tile, AttackPreview> {
-    const out = new Map<Tile, AttackPreview>();
-    const stats = UNIT_STATS[unit.type];
+    const out = new Map<Tile, AttackPreview>(), stats = UNIT_STATS[unit.type];
     if (!stats.military || unit.acted || unit.owner !== state.current) return out;
-    const here = state.tileOf(unit);
-    const near = new Set<Tile>(state.map.neighbors(here));
+    const here = state.tileOf(unit), near = new Set<Tile>(state.map.neighbors(here));
     if (stats.range >= 2) for (const n of [...near]) for (const m of state.map.neighbors(n)) if (m !== here) near.add(m);
-    for (const t of near) {
-      const pv = state.attackPreview(unit, t);
-      if (pv.ok) out.set(t, pv);
-    }
+    for (const t of near) { const pv = state.attackPreview(unit, t); if (pv.ok) out.set(t, pv); }
     return out;
   }
-
-  // ---------- drawing ----------
-
   private redraw(): void {
     const state = this.state;
     if (!state) return;
@@ -1603,244 +950,93 @@ export class MapScene extends Phaser.Scene {
     if (this.selectedUnitId !== null && !unit) this.clearSelection();
     if (unit) this.selected = state.tileOf(unit);
     if (this.mode === 'claim') {
-      // Stop if the city was lost
-      if (!this.claimCity || this.claimCity.owner !== this.me) {
-        this.mode = 'select';
-        this.claimCity = null;
-      } else this.selected = this.claimCity;
+      if (!this.claimCity || this.claimCity.owner !== this.me) { this.mode = 'select'; this.claimCity = null; }
+      else this.selected = this.claimCity;
     }
     if (this.routePreview && (this.routePreview.unitId !== this.selectedUnitId || this.mode !== 'select')) this.routePreview = null;
-    this.hoverPlan = null; // the board changed: re-plan hover routes
+    this.hoverPlan = null;
     this.reach = unit && this.mode === 'select' ? state.reachableFor(unit) : new Map();
     this.unloadAt = unit && this.mode === 'select' && unit.owner === this.me ? state.unloadTiles(unit) : new Set();
     this.targets = unit && this.mode === 'select' ? this.findTargets(state, unit) : new Map();
-    // Fog of war: reveal what's in sight now (and remember it)
     this.visible = state.fog ? state.explore(this.me) : null;
-
-    this.drawTerrain(state);
-    this.drawOwners(state);
-    this.drawFog(state);
+    this.hexArt.drawMap(state.map.tiles, (t) => this.seen(t), (t, d) => state.map.neighborAt(t, d));
+    // Compare the actual drawing inputs, not just turn numbers: captures, renames,
+    // new cities, mood changes and hot-seat visibility must invalidate immediately.
+    const ownerParts: string[] = [String(this.me), state.players.map((p) => p.color).join(',')];
+    const fogParts: string[] = [String(this.me), String(state.fog)];
+    for (const t of state.map.tiles) {
+      const seen = this.seen(t);
+      fogParts.push(seen ? this.sees(t) ? '2' : '1' : '0');
+      // Neighbor ownership affects an explored border even when the neighbor is still hidden.
+      ownerParts.push(`${+seen}/${t.owner}/${t.home}/${t.palisade ?? 0}/${+t.city}`);
+      if (seen && t.city) ownerParts.push(JSON.stringify([t.capital, t.hp, t.walls, t.shield, t.level, t.pop, state.cityName(t), state.mood(t)]));
+    }
+    const ownerStamp = ownerParts.join('|'), fogStamp = fogParts.join('');
+    if (ownerStamp !== this.ownerStamp) { this.drawOwners(state); this.ownerStamp = ownerStamp; }
+    if (fogStamp !== this.fogStamp) { this.drawFog(state); this.fogStamp = fogStamp; }
+    this.worked = [];
+    for (const p of state.players) if (p.alive) this.worked.push(...state.workedTiles(p.id));
+    this.smallZoom = this.cameras.main.zoom < WORKER_ZOOM;
     this.drawWorkers(state);
     this.drawOverlay(state);
     this.drawUnits(state);
-    this.hud.hideIdle();
-    this.refreshHover();
-    this.hud.update(state, this.mode);
-    this.hud.showPanel(this.buildPanel(state));
-    this.cityView.refresh(); // keep an open City View in step (or close it if the city was lost)
+    this.lastView = '';
+    this.hud.hideIdle(); this.refreshHover(); this.hud.update(state, this.mode);
+    this.hud.showPanel(this.buildPanel(state)); this.cityView.refresh();
     saveGame(state);
   }
-
-  // Terrain: flat color underneath, then the Kenney hex tile and its props (task 10). Whatever the art can't
-  // show (water, fisheries, a missing frame) is drawn like before. Grid lines and roads go on top of the tiles.
-  private drawTerrain(state: GameState): void {
-    const g = this.terrainGfx;
-    const r = this.roadGfx;
-    g.clear();
-    r.clear();
-    this.hexArt.clearGround();
-    const map = state.map;
-    for (const t of map.tiles) {
-      const { x, y } = tileCenter(t);
-      const pts = hexCorners(x, y, SIZE);
-      if (!this.seen(t)) {
-        // Never explored: just darkness
-        g.fillStyle(FOG_COLOR, 1);
-        g.fillPoints(pts, true);
-        g.lineStyle(1, 0x000000, 0.4);
-        g.strokePoints(pts, true);
-        continue;
-      }
-      g.fillStyle(HEIGHT_COLOR[t.height], 1);
-      g.fillPoints(pts, true);
-      r.lineStyle(1, 0x000000, 0.18);
-      r.strokePoints(pts, true);
-      const art = this.hexArt.drawTile(t, x, y) ?? NO_ART;
-      if (t.terrain === 'water') this.drawWaves(g, t, x, y);
-      else if (!art.ground && t.terrain === 'mountain') {
-        g.fillStyle(0x6b6b6b, 1);
-        g.fillTriangle(x - 12, y + 8, x, y - 11, x + 12, y + 8);
-        g.fillStyle(0xf2f2f2, 1);
-        g.fillTriangle(x - 4, y - 5, x, y - 11, x + 4, y - 5);
-      } else if (!art.ground && t.terrain === 'hills') {
-        g.fillStyle(0x6f6038, 1);
-        g.fillEllipse(x - 6, y + 4, 14, 8);
-        g.fillEllipse(x + 6, y + 6, 12, 7);
-      }
-      if (art.improvement) continue;
-      if (t.improvement === 'farm') {
-        r.lineStyle(2, 0xf0d264, 1);
-        for (let i = -1; i <= 1; i++) r.lineBetween(x - 11, y + i * 6, x + 11, y + i * 6);
-      } else if (t.improvement === 'mine') {
-        r.fillStyle(0x2b2b2b, 1);
-        r.fillRect(x - 7, y + 1, 14, 9);
-        r.fillStyle(0xd4a017, 1);
-        r.fillCircle(x, y + 5, 2.5);
-      } else if (t.improvement === 'pasture') {
-        // wooden fence with a horseshoe
-        r.lineStyle(2, 0x8b5a2b, 1);
-        r.lineBetween(x - 12, y + 2, x + 12, y + 2);
-        r.lineBetween(x - 12, y + 8, x + 12, y + 8);
-        for (const px of [-11, -4, 4, 11]) r.lineBetween(x + px, y - 1, x + px, y + 11);
-        r.lineStyle(2.5, 0xe5e7eb, 1);
-        r.beginPath();
-        r.arc(x, y - 8, 4, Phaser.Math.DegToRad(200), Phaser.Math.DegToRad(340), true);
-        r.strokePath();
-      } else if (t.improvement === 'fishery') {
-        // net floats and a little jumping fish
-        r.lineStyle(1.5, 0xe5e7eb, 0.8);
-        r.strokeCircle(x - 4, y + 4, 7);
-        r.lineBetween(x - 11, y + 4, x + 3, y + 4);
-        r.lineBetween(x - 4, y - 3, x - 4, y + 11);
-        r.fillStyle(0xf97316, 1);
-        for (const [dx, dy] of [[-11, 4], [3, 4], [-4, -3], [-4, 11]] as const) r.fillCircle(x + dx, y + dy, 2);
-        r.fillStyle(0x7dd3fc, 1);
-        r.fillEllipse(x + 8, y - 6, 8, 4);
-        r.fillTriangle(x + 12, y - 6, x + 15, y - 9, x + 15, y - 3);
-      } else if (t.improvement === 'forest') {
-        // three pine trees
-        for (const [dx, dy, s] of [[-8, 4, 1], [8, 4, 1], [0, -3, 1.2]] as const) {
-          r.fillStyle(0x5b3a1e, 1);
-          r.fillRect(x + dx - 1, y + dy + 4 * s, 2, 4);
-          r.fillStyle(0x1f5e2e, 1);
-          r.fillTriangle(x + dx - 6 * s, y + dy + 5 * s, x + dx, y + dy - 8 * s, x + dx + 6 * s, y + dy + 5 * s);
-        }
-      }
-    }
-    // Roads: connect road/city tiles to neighbors that also have roads
-    const hasRoad = (t: Tile) => (t.road || t.city) && this.seen(t);
-    r.lineStyle(4, 0x7a5a32, 0.95);
-    for (const t of map.tiles) {
-      if (!hasRoad(t)) continue;
-      const a = tileCenter(t);
-      let linked = false;
-      for (let dir = 0; dir < 6; dir++) {
-        const n = map.neighborAt(t, dir);
-        if (!n || !hasRoad(n)) continue;
-        linked = true;
-        if (dir === 0 || dir === 4 || dir === 5) {
-          const b = tileCenter(n);
-          r.lineBetween(a.x, a.y, b.x, b.y);
-        }
-      }
-      if (t.road && !linked) {
-        r.fillStyle(0x7a5a32, 1);
-        r.fillCircle(a.x, a.y, 4);
-      }
-    }
-  }
-
-  // Water has no tile in the hex pack: a lighter middle and two little wave marks (placed by the hex, so they
-  // don't line up into stripes across the sea)
-  private drawWaves(g: Phaser.GameObjects.Graphics, t: Tile, x: number, y: number): void {
-    g.fillStyle(0xffffff, 0.06);
-    g.fillPoints(hexCorners(x, y, SIZE - 6), true);
-    const flip = (t.col + t.row) & 1 ? -1 : 1;
-    g.lineStyle(1.5, 0xffffff, 0.22);
-    for (const [dx, dy] of [[-7 * flip, -5], [6 * flip, 7]] as const) {
-      g.beginPath();
-      g.arc(x + dx - 3, y + dy, 3, Math.PI * 1.1, Math.PI * 1.9);
-      g.strokePath();
-      g.beginPath();
-      g.arc(x + dx + 3, y + dy, 3, Math.PI * 1.1, Math.PI * 1.9);
-      g.strokePath();
-    }
-  }
-
   private drawOwners(state: GameState): void {
     const g = this.ownerGfx;
-    g.clear();
-    this.castles?.clear();
-    this.hexArt.clearCastles();
-    this.castleGfx.clear();
+    g.clear(); this.castles?.clear(); this.hexArt.clearCastles(); this.castleGfx.clear();
     const map = state.map;
     let names = 0;
     for (const t of map.tiles) {
       if (t.owner === null || !this.seen(t)) continue;
-      const color = state.players[t.owner].color;
-      const { x, y } = tileCenter(t);
-      const pts = hexCorners(x, y, SIZE);
-      g.fillStyle(color, 0.22);
-      g.fillPoints(pts, true);
-
+      const color = state.players[t.owner].color, { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE);
+      g.fillStyle(color, 0.22); g.fillPoints(pts, true);
       for (let i = 0; i < 6; i++) {
-        const n = map.neighborAt(t, EDGE_TO_DIR[i]);
-        const a = pts[i];
-        const b = pts[(i + 1) % 6];
+        const n = map.neighborAt(t, EDGE_TO_DIR[i]), a = pts[i], b = pts[(i + 1) % 6];
         if (n && n.owner === t.owner) {
-          // Same kingdom, different city: faint dashed-looking divider
-          if (n.home !== t.home) {
-            g.lineStyle(1.5, 0xffffff, 0.35);
-            g.lineBetween(a.x, a.y, b.x, b.y);
-          }
+          if (n.home !== t.home) { g.lineStyle(1.5, 0xffffff, 0.35); g.lineBetween(a.x, a.y, b.x, b.y); }
           continue;
         }
-        g.lineStyle(3, color, 1);
-        g.lineBetween(a.x, a.y, b.x, b.y);
+        g.lineStyle(3, color, 1); g.lineBetween(a.x, a.y, b.x, b.y);
       }
-
       if (t.palisade) {
-        // wooden stakes around the hex
         const ring = hexCorners(x, y, SIZE - 5);
-        g.lineStyle(3, 0x8b5a2b, 1);
-        g.strokePoints(ring, true);
-        g.fillStyle(0x5b3a1e, 1);
+        g.lineStyle(3, 0x8b5a2b, 1); g.strokePoints(ring, true); g.fillStyle(0x5b3a1e, 1);
         for (const c of ring) g.fillCircle(c.x, c.y, 2.5);
       }
       if (t.city) {
-        if (t.walls > 0) {
-          // stone ring, thicker per level
-          g.lineStyle(1.5 + t.walls * 1.5, 0x9ca3af, 1);
-          g.strokePoints(hexCorners(x, y, SIZE - 4), true);
-        }
-        this.drawCastle(x, y, color, t.capital);
-        this.drawCityBars(g, t, x, y);
+        if (t.walls > 0) { g.lineStyle(1.5 + t.walls * 1.5, 0x9ca3af, 1); g.strokePoints(hexCorners(x, y, SIZE - 4), true); }
+        this.drawCastle(x, y, color, t.capital); this.drawCityBars(g, t, x, y);
         this.cityLabel(names++, x, y + SIZE - 2, state.cityName(t), color, t.capital, t.pop, MOOD_FACE[state.mood(t)]);
       }
     }
     for (let i = names; i < this.cityLabels.length; i++) this.cityLabels[i].setVisible(false);
   }
-
-  // A city on the map: the Hexagon Pack castle (the large one on capitals) with a flag in the owner's color on
-  // top, and a gold crown on capitals. Falls back to the Tiny Town castle, then the drawn house, if art is missing.
   private drawCastle(x: number, y: number, color: number, capital: boolean): void {
-    const g = this.castleGfx;
-    const top = this.hexArt.castle(x, y, capital);
-    if (top !== null) {
-      this.drawFlag(g, Math.round(x), Math.round(top) + 2, color, capital);
-      return;
-    }
+    const g = this.castleGfx, top = this.hexArt.castle(x, y, capital);
+    if (top !== null) { this.drawFlag(g, Math.round(x), Math.round(top) + 2, color, capital); return; }
     const b = this.castles;
-    if (!b || !canDraw(this, KEEP_ART.cells)) {
-      this.drawCity(g, x, y, color, capital);
-      return;
-    }
-    const left = Math.round(x - (KEEP_ART.w * ART) / 2);
-    const tinyTop = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
+    if (!b || !canDraw(this, KEEP_ART.cells)) { this.drawCity(g, x, y, color, capital); return; }
+    const left = Math.round(x - (KEEP_ART.w * ART) / 2), tinyTop = Math.round(y - (KEEP_ART.h * ART) / 2 - 2);
     for (const c of KEEP_ART.cells) b.create(left + c.x * ART, tinyTop + c.y * ART, c.f);
     this.drawFlag(g, Math.round(x), tinyTop + 1, color, capital);
   }
-
-  // Kingdom flag on a pole standing at (px, py), with a gold crown above it on capitals
   private drawFlag(g: Phaser.GameObjects.Graphics, px: number, py: number, color: number, capital: boolean): void {
     const h = 8;
-    g.lineStyle(1.5, 0x2a1d14, 1);
-    g.lineBetween(px, py, px, py - h);
-    g.fillStyle(color, 1);
-    g.fillTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
-    g.lineStyle(1, 0x111111, 0.85);
-    g.strokeTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    g.lineStyle(1.5, 0x2a1d14, 1); g.lineBetween(px, py, px, py - h);
+    g.fillStyle(color, 1); g.fillTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
+    g.lineStyle(1, 0x111111, 0.85); g.strokeTriangle(px, py - h, px, py - h + 5, px + 8, py - h + 2.5);
     if (capital) {
       const base = py - h - 1;
-      g.fillStyle(0xfacc15, 1);
-      g.fillRect(px - 4, base - 2, 8, 2);
+      g.fillStyle(0xfacc15, 1); g.fillRect(px - 4, base - 2, 8, 2);
       g.fillTriangle(px - 4, base - 2, px - 4, base - 6, px - 2, base - 2);
       g.fillTriangle(px - 1.5, base - 2, px, base - 7, px + 1.5, base - 2);
       g.fillTriangle(px + 2, base - 2, px + 4, base - 6, px + 4, base - 2);
     }
   }
-
-  // Explored land that's out of sight right now gets a dark veil
   private drawFog(state: GameState): void {
     const g = this.fogGfx;
     g.clear();
@@ -1848,172 +1044,109 @@ export class MapScene extends Phaser.Scene {
     g.fillStyle(0x000000, FOG_DIM);
     for (const t of state.map.tiles) {
       if (!this.seen(t) || this.sees(t)) continue;
-      const { x, y } = tileCenter(t);
-      g.fillPoints(hexCorners(x, y, SIZE), true);
+      const { x, y } = tileCenter(t); g.fillPoints(hexCorners(x, y, SIZE), true);
     }
   }
-
-  // A little pixel worker on every worked farm, pasture, mine and forest you can see
-  private drawWorkers(state: GameState): void {
+  private drawWorkers(_state: GameState, active = true): void {
     let n = 0;
-    if (!this.smallZoom) {
-      for (const pl of state.players) {
-        if (!pl.alive) continue;
-        for (const t of state.workedTiles(pl.id)) {
-          if (!t.improvement || !this.sees(t)) continue;
-          const { x, y } = tileCenter(t);
-          const [ox, oy] = WORKER_OFFSET[t.improvement];
-          const key = WORKER_SPRITE[t.improvement];
-          let s = this.workerSprites[n];
-          if (!s) {
-            s = this.add.sprite(0, 0, key, '0').setDepth(1.3).setScale(WORKER_SCALE);
-            this.workerSprites.push(s);
-          }
-          s.setPosition(Math.round(x + ox), Math.round(y + oy)).setVisible(true);
-          if (s.anims.currentAnim?.key !== key) s.play({ key, startFrame: n % 2 });
-          n++;
-        }
-      }
+    if (active && !this.smallZoom) for (const t of this.worked) {
+      if (!t.improvement || !this.sees(t)) continue;
+      const { x, y } = tileCenter(t);
+      if (!this.onScreen(x, y)) continue;
+      const [ox, oy] = WORKER_OFFSET[t.improvement], key = WORKER_SPRITE[t.improvement];
+      let s = this.workerSprites[n];
+      if (!s) { s = this.add.sprite(0, 0, key, '0').setDepth(1.3).setScale(WORKER_SCALE); this.workerSprites.push(s); }
+      s.setPosition(Math.round(x + ox), Math.round(y + oy)).setVisible(true);
+      if (s.anims.currentAnim?.key !== key) s.play({ key, startFrame: n % 2 });
+      s.anims.resume(); n++;
     }
-    for (let i = n; i < this.workerSprites.length; i++) this.workerSprites[i].setVisible(false);
+    for (let i = n; i < this.workerSprites.length; i++) { this.workerSprites[i].setVisible(false); this.workerSprites[i].anims.pause(); }
   }
-
-  // Name tag under each city, above units so it never gets covered.
-  // After the name: how many people live there and how happy they are.
   private cityLabel(i: number, x: number, y: number, name: string, color: number, capital: boolean, pop: number, face: string): void {
     let label = this.cityLabels[i];
     if (!label) {
-      label = this.add
-        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#ffffff', padding: { x: 4, y: 1 } })
-        .setOrigin(0.5)
-        .setDepth(4.2);
+      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#ffffff', padding: { x: 4, y: 1 } }).setOrigin(0.5).setDepth(4.2);
       this.cityLabels.push(label);
     }
-    const bg = `#${color.toString(16).padStart(6, '0')}`;
-    const text = `${capital ? '\u2605 ' : ''}${name} ${pop} ${face}`;
+    const bg = `#${color.toString(16).padStart(6, '0')}`, text = `${capital ? '\u2605 ' : ''}${name} ${pop} ${face}`;
     label.setText(text).setBackgroundColor(bg).setPosition(x, y).setVisible(true);
   }
-
-  // Health bar (only when damaged) with the wall shield bar above it.
   private drawCityBars(g: Phaser.GameObjects.Graphics, t: Tile, x: number, y: number): void {
-    const w = 30;
-    const left = x - w / 2;
+    const w = 30, left = x - w / 2;
     let barY = y + 18;
     const bar = (value: number, max: number, color: number) => {
-      g.fillStyle(0x111111, 0.85);
-      g.fillRect(left - 1, barY - 1, w + 2, 5);
-      g.fillStyle(color, 1);
-      g.fillRect(left, barY, Math.max(0, (value / max) * w), 3);
-      barY -= 5;
+      g.fillStyle(0x111111, 0.85); g.fillRect(left - 1, barY - 1, w + 2, 5);
+      g.fillStyle(color, 1); g.fillRect(left, barY, Math.max(0, (value / max) * w), 3); barY -= 5;
     };
     const max = cityMaxHp(t);
     if (t.hp < max) bar(t.hp, max, t.hp / max > 0.5 ? 0x22c55e : t.hp / max > 0.25 ? 0xeab308 : 0xef4444);
     if (t.walls > 0) bar(t.shield, shieldMax(t), 0x60a5fa);
   }
-
   private priceLabel(i: number, x: number, y: number, text: string, affordable: boolean): void {
     let label = this.priceLabels[i];
     if (!label) {
-      label = this.add
-        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '12px', fontStyle: 'bold', color: '#ffffff', stroke: '#000000', strokeThickness: 3 })
-        .setOrigin(0.5)
-        .setDepth(2.5);
+      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '12px', fontStyle: 'bold', color: '#ffffff', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5).setDepth(2.5);
       this.priceLabels.push(label);
     }
     label.setText(text).setColor(affordable ? '#ffffff' : '#fca5a5').setPosition(x, y).setVisible(true);
   }
-
   private drawOverlay(state: GameState): void {
     const g = this.overlayGfx;
     g.clear();
     let labels = 0;
     const unit = this.selectedUnit;
-
     if (this.reach.size > 0 && unit) {
       const home = state.tileOf(unit);
       g.fillStyle(0x000000, 0.4);
       for (const t of state.map.tiles) {
         if (t === home || this.reach.has(t) || this.targets.has(t) || this.unloadAt.has(t)) continue;
-        const { x, y } = tileCenter(t);
-        g.fillPoints(hexCorners(x, y, SIZE), true);
+        const { x, y } = tileCenter(t); g.fillPoints(hexCorners(x, y, SIZE), true);
       }
       for (const t of this.reach.keys()) {
-        const { x, y } = tileCenter(t);
-        const pts = hexCorners(x, y, SIZE - 3);
-        const capture = t.city && t.owner !== null && t.owner !== unit.owner;
-        g.fillStyle(capture ? 0xfacc15 : 0xffffff, capture ? 0.3 : 0.12);
-        g.fillPoints(pts, true);
-        g.lineStyle(capture ? 3 : 2, capture ? 0xfacc15 : 0xffffff, 0.9);
-        g.strokePoints(pts, true);
+        const { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE - 3), capture = t.city && t.owner !== null && t.owner !== unit.owner;
+        g.fillStyle(capture ? 0xfacc15 : 0xffffff, capture ? 0.3 : 0.12); g.fillPoints(pts, true);
+        g.lineStyle(capture ? 3 : 2, capture ? 0xfacc15 : 0xffffff, 0.9); g.strokePoints(pts, true);
         const other = state.unitAt(t);
-        if ((!other || !this.sees(t)) && !capture) {
-          g.fillStyle(0xffffff, 0.9);
-          g.fillCircle(x, y, 4);
-        }
+        if ((!other || !this.sees(t)) && !capture) { g.fillStyle(0xffffff, 0.9); g.fillCircle(x, y, 4); }
       }
     }
     for (const t of this.unloadAt) {
-      const { x, y } = tileCenter(t);
-      const pts = hexCorners(x, y, SIZE - 3);
-      g.fillStyle(0x22c55e, 0.25);
-      g.fillPoints(pts, true);
-      g.lineStyle(2, 0x4ade80, 0.95);
-      g.strokePoints(pts, true);
-      g.fillStyle(0x4ade80, 1);
-      g.fillTriangle(x - 5, y - 3, x + 5, y - 3, x, y + 4);
+      const { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE - 3);
+      g.fillStyle(0x22c55e, 0.25); g.fillPoints(pts, true); g.lineStyle(2, 0x4ade80, 0.95); g.strokePoints(pts, true);
+      g.fillStyle(0x4ade80, 1); g.fillTriangle(x - 5, y - 3, x + 5, y - 3, x, y + 4);
     }
     if (this.targets.size > 0 && unit) {
       if (this.reach.size === 0) {
-        const home = state.tileOf(unit);
-        g.fillStyle(0x000000, 0.4);
+        const home = state.tileOf(unit); g.fillStyle(0x000000, 0.4);
         for (const t of state.map.tiles) {
           if (t === home || this.targets.has(t)) continue;
-          const { x, y } = tileCenter(t);
-          g.fillPoints(hexCorners(x, y, SIZE), true);
+          const { x, y } = tileCenter(t); g.fillPoints(hexCorners(x, y, SIZE), true);
         }
       }
       for (const t of this.targets.keys()) {
-        const { x, y } = tileCenter(t);
-        const pts = hexCorners(x, y, SIZE - 3);
-        g.fillStyle(0xef4444, 0.35);
-        g.fillPoints(pts, true);
-        g.lineStyle(3, 0xf87171, 1);
-        g.strokePoints(pts, true);
-        g.lineStyle(2, 0xffffff, 0.9);
-        g.strokeCircle(x, y - 14, 5);
-        g.lineBetween(x - 8, y - 14, x + 8, y - 14);
-        g.lineBetween(x, y - 22, x, y - 6);
+        const { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE - 3);
+        g.fillStyle(0xef4444, 0.35); g.fillPoints(pts, true); g.lineStyle(3, 0xf87171, 1); g.strokePoints(pts, true);
+        g.lineStyle(2, 0xffffff, 0.9); g.strokeCircle(x, y - 14, 5); g.lineBetween(x - 8, y - 14, x + 8, y - 14); g.lineBetween(x, y - 22, x, y - 6);
       }
     }
     if (this.mode === 'claim') {
-      const city = this.claimCity;
-      const zone = new Set(state.map.tiles.filter((t) => (city ? state.inCityRange(t, city) : state.inClaimRange(t, this.me))));
+      const city = this.claimCity, zone = new Set(state.map.tiles.filter((t) => city ? state.inCityRange(t, city) : state.inClaimRange(t, this.me)));
       g.fillStyle(0x000000, 0.55);
       for (const t of state.map.tiles) {
         if (zone.has(t)) continue;
-        const { x, y } = tileCenter(t);
-        g.fillPoints(hexCorners(x, y, SIZE), true);
+        const { x, y } = tileCenter(t); g.fillPoints(hexCorners(x, y, SIZE), true);
       }
       for (const t of zone) {
         if (t.owner === this.me && (!city || state.belongsTo(t, city))) continue;
-        const { x, y } = tileCenter(t);
-        const pts = hexCorners(x, y, SIZE - 3);
-        const c = state.check('claim', t, this.me, city);
+        const { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE - 3), c = state.check('claim', t, this.me, city);
         if (c.ok) {
-          g.fillStyle(0x22c55e, 0.5);
-          g.fillPoints(pts, true);
-          g.lineStyle(3, 0x86efac, 1);
-          g.strokePoints(pts, true);
+          g.fillStyle(0x22c55e, 0.5); g.fillPoints(pts, true); g.lineStyle(3, 0x86efac, 1); g.strokePoints(pts, true);
           this.priceLabel(labels++, x, y, c.cost > 0 ? `${c.cost}g` : 'free', c.cost <= state.players[this.me].gold || state.options.freeBuild);
-        } else {
-          g.fillStyle(0x000000, 0.3);
-          g.fillPoints(pts, true);
-        }
+        } else { g.fillStyle(0x000000, 0.3); g.fillPoints(pts, true); }
       }
       g.lineStyle(3, 0xfacc15, 0.95);
       for (const t of zone) {
-        const { x, y } = tileCenter(t);
-        const pts = hexCorners(x, y, SIZE);
+        const { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE);
         for (let i = 0; i < 6; i++) {
           const n = state.map.neighborAt(t, EDGE_TO_DIR[i]);
           if (n && zone.has(n)) continue;
@@ -2024,218 +1157,120 @@ export class MapScene extends Phaser.Scene {
     if ((this.mode === 'raise' || this.mode === 'lower') && unit) {
       const here = state.tileOf(unit);
       for (const t of [here, ...state.map.neighbors(here)]) {
-        const ok = state.jobCheck(unit, this.mode, t).ok;
-        const { x, y } = tileCenter(t);
-        const pts = hexCorners(x, y, SIZE - 3);
-        g.fillStyle(ok ? 0x22c55e : 0xef4444, ok ? 0.35 : 0.15);
-        g.fillPoints(pts, true);
-        if (ok) {
-          g.lineStyle(2, 0x4ade80, 0.95);
-          g.strokePoints(pts, true);
-        }
+        const ok = state.jobCheck(unit, this.mode, t).ok, { x, y } = tileCenter(t), pts = hexCorners(x, y, SIZE - 3);
+        g.fillStyle(ok ? 0x22c55e : 0xef4444, ok ? 0.35 : 0.15); g.fillPoints(pts, true);
+        if (ok) { g.lineStyle(2, 0x4ade80, 0.95); g.strokePoints(pts, true); }
       }
     }
     for (let i = labels; i < this.priceLabels.length; i++) this.priceLabels[i].setVisible(false);
     this.drawSelection();
   }
-
-  // Yellow hex outline on the selected tile, plus a halo on whichever thing is
-  // actually selected: the city itself, or the unit standing on it.
   private drawSelection(): void {
     const g = this.selGfx;
     g.clear();
     for (const l of this.routeLabels) l.setVisible(false);
     const tile = this.selected;
     if (!tile) return;
-    const { x, y } = tileCenter(tile);
-    const pts = hexCorners(x, y, SIZE - 2);
-    g.lineStyle(7, 0x000000, 0.45);
-    g.strokePoints(pts, true);
-    g.lineStyle(3.5, 0xfacc15, 1);
-    g.strokePoints(pts, true);
+    const { x, y } = tileCenter(tile), pts = hexCorners(x, y, SIZE - 2);
+    g.lineStyle(7, 0x000000, 0.45); g.strokePoints(pts, true); g.lineStyle(3.5, 0xfacc15, 1); g.strokePoints(pts, true);
     const unit = this.selectedUnit;
-    if (unit) {
-      const p = unitPos(tile);
-      g.lineStyle(3, 0xfacc15, 1);
-      g.strokeCircle(p.x, p.y, 15);
-    } else if (tile.city) {
-      g.lineStyle(3, 0xfacc15, 1);
-      g.strokeCircle(x, y - 2, 23);
-    }
+    if (unit) { const p = unitPos(tile); g.lineStyle(3, 0xfacc15, 1); g.strokeCircle(p.x, p.y, 15); }
+    else if (tile.city) { g.lineStyle(3, 0xfacc15, 1); g.strokeCircle(x, y - 2, 23); }
     this.drawRoute(g);
   }
-
-  // The selected unit's route: the tapped preview (yellow) or its active route (cyan).
-  // A numbered dot marks where it stops at the end of each turn.
   private drawRoute(g: Phaser.GameObjects.Graphics): void {
-    const state = this.state;
-    const unit = this.selectedUnit;
+    const state = this.state, unit = this.selectedUnit;
     if (!state || !unit || unit.owner !== this.me) return;
     const pv = this.routePreview && this.routePreview.unitId === unit.id ? this.routePreview : null;
-    let plan: RoutePlan | null = pv ? pv.plan : null;
-    let dest: Tile | null = pv ? pv.dest : null;
-    if (!plan && unit.goal) {
-      plan = state.routeLeft(unit);
-      dest = state.map.get(unit.goal.col, unit.goal.row) ?? null;
-    }
+    let plan: RoutePlan | null = pv ? pv.plan : null, dest: Tile | null = pv ? pv.dest : null;
+    if (!plan && unit.goal) { plan = state.routeLeft(unit); dest = state.map.get(unit.goal.col, unit.goal.row) ?? null; }
     if (!plan || !plan.path.length || !dest) return;
-    const color = pv ? 0xfacc15 : 0x22d3ee;
-    const pts = [unitPos(state.tileOf(unit)), ...plan.path.map((t) => tileCenter(t))];
-    g.lineStyle(6, 0x000000, 0.45);
-    g.strokePoints(pts, false);
-    g.lineStyle(3, color, 1);
-    g.strokePoints(pts, false);
-    // the hex it's heading for
+    const color = pv ? 0xfacc15 : 0x22d3ee, pts = [unitPos(state.tileOf(unit)), ...plan.path.map((t) => tileCenter(t))];
+    g.lineStyle(6, 0x000000, 0.45); g.strokePoints(pts, false); g.lineStyle(3, color, 1); g.strokePoints(pts, false);
     const d = tileCenter(dest);
-    g.lineStyle(3, color, 1);
-    g.strokePoints(hexCorners(d.x, d.y, SIZE - 5), true);
+    g.lineStyle(3, color, 1); g.strokePoints(hexCorners(d.x, d.y, SIZE - 5), true);
     const first = plan.turnAt[0];
     let n = 0;
     for (let i = 0; i < plan.path.length; i++) {
       const endOfTurn = i === plan.path.length - 1 || plan.turnAt[i + 1] !== plan.turnAt[i];
       if (!endOfTurn) continue;
       const { x, y } = tileCenter(plan.path[i]);
-      g.fillStyle(0x000000, 0.6);
-      g.fillCircle(x, y, 9);
-      g.fillStyle(color, 1);
-      g.fillCircle(x, y, 7.5);
+      g.fillStyle(0x000000, 0.6); g.fillCircle(x, y, 9); g.fillStyle(color, 1); g.fillCircle(x, y, 7.5);
       this.routeLabel(n++, x, y, String(plan.turnAt[i] - first + 1));
     }
-    if (pv) {
-      const t = `${plan.turns} turn${plan.turns === 1 ? '' : 's'} \u00b7 tap again to go`;
-      this.routeLabel(n++, d.x, d.y - SIZE + 2, t, true);
-    }
+    if (pv) this.routeLabel(n++, d.x, d.y - SIZE + 2, `${plan.turns} turn${plan.turns === 1 ? '' : 's'} \u00b7 tap again to go`, true);
   }
-
   private routeLabel(i: number, x: number, y: number, text: string, big = false): void {
     let label = this.routeLabels[i];
     if (!label) {
-      label = this.add
-        .text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#111111' })
-        .setOrigin(0.5)
-        .setDepth(5);
+      label = this.add.text(0, 0, '', { fontFamily: 'system-ui, sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#ffffff', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5).setDepth(5);
       this.routeLabels.push(label);
     }
-    label
-      .setText(text)
-      .setFontSize(big ? 13 : 11)
-      .setColor(big ? '#ffffff' : '#111111')
-      .setStroke('#000000', big ? 4 : 0)
-      .setPosition(x, y)
-      .setVisible(true);
+    label.setText(text).setFontSize(big ? 13 : 11).setColor(big ? '#ffffff' : '#111111').setStroke('#000000', big ? 4 : 0).setPosition(x, y).setVisible(true);
   }
-
   private drawUnits(state: GameState): void {
-    const g = this.unitGfx;
-    const badge = this.badgeGfx;
-    g.clear();
-    badge.clear();
+    const g = this.unitGfx, badge = this.badgeGfx;
+    g.clear(); badge.clear();
     let n = 0;
     for (const u of state.units) {
       const t = state.tileOf(u);
-      if (u.owner !== this.me && !this.sees(t)) continue; // hidden in the fog
-      const { x, y } = unitPos(t);
-      const color = state.players[u.owner].color;
-      const isSel = u.id === this.selectedUnitId;
-      const stats = UNIT_STATS[u.type];
+      if (u.owner !== this.me && !this.sees(t)) continue;
+      const { x, y } = unitPos(t), color = state.players[u.owner].color, isSel = u.id === this.selectedUnitId, stats = UNIT_STATS[u.type];
       if (stats.military) {
-        // Troops are squares, civilians are circles
-        g.fillStyle(0x000000, 0.35);
-        g.fillRoundedRect(x - 10, y - 9, 22, 22, 5);
-        g.fillStyle(color, 1);
-        g.fillRoundedRect(x - 11, y - 11, 22, 22, 5);
-        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
-        g.strokeRoundedRect(x - 11, y - 11, 22, 22, 5);
+        g.fillStyle(0x000000, 0.35); g.fillRoundedRect(x - 10, y - 9, 22, 22, 5);
+        g.fillStyle(color, 1); g.fillRoundedRect(x - 11, y - 11, 22, 22, 5);
+        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1); g.strokeRoundedRect(x - 11, y - 11, 22, 22, 5);
       } else {
-        g.fillStyle(0x000000, 0.35);
-        g.fillCircle(x + 1, y + 2, 11);
-        g.fillStyle(color, 1);
-        g.fillCircle(x, y, 11);
-        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1);
-        g.strokeCircle(x, y, 11);
+        g.fillStyle(0x000000, 0.35); g.fillCircle(x + 1, y + 2, 11); g.fillStyle(color, 1); g.fillCircle(x, y, 11);
+        g.lineStyle(isSel ? 3 : 2, isSel ? 0xfacc15 : 0xffffff, 1); g.strokeCircle(x, y, 11);
       }
       if (u.hp < stats.hp) {
         const frac = Math.max(0, u.hp / stats.hp);
-        g.fillStyle(0x111111, 0.9);
-        g.fillRect(x - 12, y + 13, 24, 4);
-        g.fillStyle(frac > 0.5 ? 0x22c55e : frac > 0.25 ? 0xeab308 : 0xef4444, 1);
-        g.fillRect(x - 11, y + 14, 22 * frac, 2);
+        g.fillStyle(0x111111, 0.9); g.fillRect(x - 12, y + 13, 24, 4);
+        g.fillStyle(frac > 0.5 ? 0x22c55e : frac > 0.25 ? 0xeab308 : 0xef4444, 1); g.fillRect(x - 11, y + 14, 22 * frac, 2);
       }
       this.unitSprite(n++, UNIT_SPRITE[u.type], x, y);
-      // Passengers on a transport: one white pip each
       for (let k = 0; k < (u.cargo?.length ?? 0); k++) {
-        badge.fillStyle(0xffffff, 1);
-        badge.lineStyle(1, 0x000000, 0.7);
-        badge.fillCircle(x - 9 + k * 6, y - 13, 2.5);
-        badge.strokeCircle(x - 9 + k * 6, y - 13, 2.5);
+        badge.fillStyle(0xffffff, 1); badge.lineStyle(1, 0x000000, 0.7); badge.fillCircle(x - 9 + k * 6, y - 13, 2.5); badge.strokeCircle(x - 9 + k * 6, y - 13, 2.5);
       }
-      // Status badge for your units: cyan arrow = on a route, cyan eye = exploring, green dot = ready, gray = holding
       if (u.owner === this.me && u.goal) {
-        badge.fillStyle(0x22d3ee, 1);
-        badge.lineStyle(1, 0x000000, 0.7);
+        badge.fillStyle(0x22d3ee, 1); badge.lineStyle(1, 0x000000, 0.7);
         const tri = [new Phaser.Math.Vector2(x + 6, y - 15), new Phaser.Math.Vector2(x + 15, y - 10), new Phaser.Math.Vector2(x + 6, y - 5)];
-        badge.fillPoints(tri, true);
-        badge.strokePoints(tri, true);
+        badge.fillPoints(tri, true); badge.strokePoints(tri, true);
       } else if (u.owner === this.me && u.explore) {
-        badge.fillStyle(0x22d3ee, 1);
-        badge.lineStyle(1, 0x000000, 0.7);
-        badge.fillEllipse(x + 10, y - 10, 12, 8);
-        badge.strokeEllipse(x + 10, y - 10, 12, 8);
-        badge.fillStyle(0x0f172a, 1);
-        badge.fillCircle(x + 10, y - 10, 2.2);
+        badge.fillStyle(0x22d3ee, 1); badge.lineStyle(1, 0x000000, 0.7); badge.fillEllipse(x + 10, y - 10, 12, 8); badge.strokeEllipse(x + 10, y - 10, 12, 8);
+        badge.fillStyle(0x0f172a, 1); badge.fillCircle(x + 10, y - 10, 2.2);
       } else if (u.owner === this.me && !state.players[state.current].isAI && (u.moves > 0 || !u.acted)) {
-        badge.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1);
-        badge.lineStyle(1, 0x000000, 0.6);
-        badge.fillCircle(x + 10, y - 10, 3.5);
-        badge.strokeCircle(x + 10, y - 10, 3.5);
+        badge.fillStyle(u.hold ? 0x9ca3af : 0x4ade80, 1); badge.lineStyle(1, 0x000000, 0.6); badge.fillCircle(x + 10, y - 10, 3.5); badge.strokeCircle(x + 10, y - 10, 3.5);
       }
     }
-    for (let i = n; i < this.unitSprites.length; i++) this.unitSprites[i].setVisible(false);
+    for (let i = n; i < this.unitSprites.length; i++) { this.unitSprites[i].setActive(false).setVisible(false); this.unitSprites[i].anims.pause(); }
+    this.cullUnitSprites();
   }
-
-  // The little pixel person standing on a unit's token
   private unitSprite(i: number, key: string, x: number, y: number): void {
     let s = this.unitSprites[i];
-    if (!s) {
-      s = this.add.sprite(0, 0, key, '0').setDepth(3.2).setScale(UNIT_SCALE);
-      this.unitSprites.push(s);
-    }
-    s.setPosition(Math.round(x), Math.round(y)).setVisible(true);
+    if (!s) { s = this.add.sprite(0, 0, key, '0').setDepth(3.2).setScale(UNIT_SCALE); this.unitSprites.push(s); }
+    s.setActive(true).setPosition(Math.round(x), Math.round(y)).setVisible(true);
     if (s.anims.currentAnim?.key !== key) s.play({ key, startFrame: i % 2 });
   }
-
-  // Fallback city (no Kenney art): a little house in the owner's color, with a crown on capitals
   private drawCity(g: Phaser.GameObjects.Graphics, x: number, y: number, color: number, capital: boolean): void {
     const s = capital ? 1.25 : 1;
-    g.fillStyle(0x1b1b1b, 1);
-    g.fillRect(x - 9 * s, y - 4 * s, 18 * s, 12 * s);
-    g.fillStyle(color, 1);
-    g.fillRect(x - 7 * s, y - 2 * s, 14 * s, 8 * s);
-    g.fillTriangle(x - 10 * s, y - 3 * s, x, y - 12 * s, x + 10 * s, y - 3 * s);
-    g.lineStyle(1.5, 0xffffff, 0.9);
-    g.strokeRect(x - 7 * s, y - 2 * s, 14 * s, 8 * s);
+    g.fillStyle(0x1b1b1b, 1); g.fillRect(x - 9 * s, y - 4 * s, 18 * s, 12 * s);
+    g.fillStyle(color, 1); g.fillRect(x - 7 * s, y - 2 * s, 14 * s, 8 * s); g.fillTriangle(x - 10 * s, y - 3 * s, x, y - 12 * s, x + 10 * s, y - 3 * s);
+    g.lineStyle(1.5, 0xffffff, 0.9); g.strokeRect(x - 7 * s, y - 2 * s, 14 * s, 8 * s);
     if (capital) {
-      g.fillStyle(0xfacc15, 1);
-      g.fillTriangle(x - 6, y - 17, x - 3, y - 22, x, y - 17);
-      g.fillTriangle(x - 2, y - 17, x + 1, y - 24, x + 4, y - 17);
-      g.fillTriangle(x + 2, y - 17, x + 5, y - 22, x + 8, y - 17);
+      g.fillStyle(0xfacc15, 1); g.fillTriangle(x - 6, y - 17, x - 3, y - 22, x, y - 17);
+      g.fillTriangle(x - 2, y - 17, x + 1, y - 24, x + 4, y - 17); g.fillTriangle(x + 2, y - 17, x + 5, y - 22, x + 8, y - 17);
     }
   }
 }
-
 function tileCenter(t: Tile): { x: number; y: number } {
-  return {
-    x: SIZE * SQRT3 * (t.col + 0.5 * (t.row & 1)),
-    y: SIZE * 1.5 * t.row,
-  };
+  return { x: SIZE * SQRT3 * (t.col + 0.5 * (t.row & 1)), y: SIZE * 1.5 * t.row };
 }
-
-// Units on a city sit in its lower-right corner so both stay visible.
 function unitPos(t: Tile): { x: number; y: number } {
   const c = tileCenter(t);
   return t.city ? { x: c.x + 12, y: c.y + 11 } : c;
 }
-
 function hexCorners(cx: number, cy: number, r: number): Phaser.Math.Vector2[] {
   const pts: Phaser.Math.Vector2[] = [];
   for (let i = 0; i < 6; i++) {
