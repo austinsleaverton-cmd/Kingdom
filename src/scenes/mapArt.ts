@@ -1,5 +1,5 @@
 // World terrain is baked into small, dirty-tracked canvas textures, not thousands of scene images.
-// Kenney props/castles remain CC0. Terrain uses a fixed, rim-free center swatch per terrain type.
+// Kenney props/castles remain CC0. Explicit terrain colors carry a faint, rim-free grain.
 import Phaser from 'phaser';
 import type { Tile, Improvement } from '../world/tile';
 import { CHUNK_SIZE, HEX_RADIUS, HEX_WIDTH, GROUND_FRAME, center, chunkKeys, intersects, terrainStamp, viewBounds } from './mapCache';
@@ -77,7 +77,15 @@ export class HexArt {
         canvas.width = 120; canvas.height = 140;
         const ctx = canvas.getContext('2d');
         if (!ctx) continue;
+        // Atlas frame names do not guarantee their center pixels have the expected hue.
+        // Make the palette authoritative; source pixels contribute only faint texture.
+        // Normal source-over at 12% cannot turn the green grass base gray, even when
+        // the sampled source is entirely gray, white or black.
+        ctx.fillStyle = ground === 'grass' ? COLORS[2] : COLORS[1];
+        ctx.fillRect(0, 0, 120, 140);
+        ctx.globalAlpha = 0.12;
         ctx.drawImage(tex.getSourceImage() as CanvasImageSource, f.cutX + 42, f.cutY + 52, 36, 36, 0, 0, 120, 140);
+        ctx.globalAlpha = 1;
         this.swatches.set(ground, canvas);
       }
     }
