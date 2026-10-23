@@ -19,7 +19,7 @@ interface Marker {
   signature: string;
 }
 const pools = new WeakMap<MapSurface, Map<string, Marker>>();
-const SCALE = 0.58;
+const SCALE = 0.46; // About 20% smaller than the initial world-map buildings; City View is unchanged.
 let installed = false;
 
 export function installWorldAmenities(): void {
@@ -63,13 +63,13 @@ export function installWorldAmenities(): void {
             marker.root.add(image);
           }
         } else {
-          marker.root.add(this.add.text(0, -3, BUILDINGS[building].icon, {
-            fontFamily: 'system-ui, sans-serif', fontSize: '20px',
+          marker.root.add(this.add.text(0, -2, BUILDINGS[building].icon, {
+            fontFamily: 'system-ui, sans-serif', fontSize: '16px',
           }).setOrigin(0.5));
         }
-        // Names distinguish otherwise similar roofs and remain readable when no sheet is available.
-        marker.root.add(this.add.text(0, 18, `${BUILDINGS[building].name}${broken ? ' (pillaged)' : ''}`, {
-          fontFamily: 'system-ui, sans-serif', fontSize: '8px', color: broken ? '#fecaca' : '#ffffff',
+        // Smaller labels sit closer to the building so neighboring amenities have more breathing room.
+        marker.root.add(this.add.text(0, 14, `${BUILDINGS[building].name}${broken ? ' (pillaged)' : ''}`, {
+          fontFamily: 'system-ui, sans-serif', fontSize: '7px', color: broken ? '#fecaca' : '#ffffff',
           backgroundColor: '#18202bdd', padding: { x: 2, y: 1 },
         }).setOrigin(0.5));
         marker.signature = signature;
