@@ -6,8 +6,10 @@ import { installHelp } from './scenes/Help';
 import { installRaidRules } from './world/raidRules';
 import { installRaidUi } from './scenes/RaidUi';
 import { installRaidGuide } from './scenes/RaidGuide';
+import { installWorldAmenities } from './scenes/worldAmenities';
 installRaidRules();
 installRaidUi();
+installWorldAmenities();
 if (import.meta.env.VITE_CHANNEL === 'dev') document.title = `${document.title} (dev)`;
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO, parent: 'game', width: window.innerWidth, height: window.innerHeight,
