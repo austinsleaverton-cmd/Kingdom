@@ -19,7 +19,10 @@ interface Marker {
   signature: string;
 }
 const pools = new WeakMap<MapSurface, Map<string, Marker>>();
-const SCALE = 0.46; // About 20% smaller than the initial world-map buildings; City View is unchanged.
+const SCALE = 0.40; // Another modest reduction; City View sizes remain unchanged.
+// Map text is zoomed up to 3x. A 7px text canvas at resolution 1 becomes a blurry enlarged bitmap.
+// Oversample glyphs without increasing their world-space dimensions or changing pixel-art texture filtering.
+const TEXT_RESOLUTION = 4;
 let installed = false;
 
 export function installWorldAmenities(): void {
@@ -36,7 +39,6 @@ export function installWorldAmenities(): void {
       const index = city.sites[building];
       if (index === undefined || index < 0) continue;
       const tile = state.map.tiles[index];
-      // Ignore waiting/stale sites rather than drawing a building in another city's territory.
       if (!tile || tile.city || tile.owner !== city.owner || tile.home !== state.tileIndex(city) || !this.seen(tile)) continue;
       const key = `${state.tileIndex(city)}:${building}`;
       const art = BUILDING_ART[building];
@@ -46,7 +48,6 @@ export function installWorldAmenities(): void {
       const signature = `${building}/${available}/${broken}`;
       let marker = pool.get(key);
       if (!marker || !marker.root.active) {
-        // Above terrain/workers, below fog, troops and selection. No input hitbox: hex selection stays unchanged.
         marker = { root: this.add.container(0, 0).setDepth(1.4), signature: '' };
         pool.set(key, marker);
       }
@@ -64,22 +65,27 @@ export function installWorldAmenities(): void {
           }
         } else {
           marker.root.add(this.add.text(0, -2, BUILDINGS[building].icon, {
-            fontFamily: 'system-ui, sans-serif', fontSize: '16px',
-          }).setOrigin(0.5));
+            fontFamily: 'system-ui, sans-serif', fontSize: '14px',
+          }).setResolution(TEXT_RESOLUTION).setOrigin(0.5));
         }
-        // Smaller labels sit closer to the building so neighboring amenities have more breathing room.
-        marker.root.add(this.add.text(0, 14, `${BUILDINGS[building].name}${broken ? ' (pillaged)' : ''}`, {
+        marker.root.add(this.add.text(0, 12, `${BUILDINGS[building].name}${broken ? ' (pillaged)' : ''}`, {
           fontFamily: 'system-ui, sans-serif', fontSize: '7px', color: broken ? '#fecaca' : '#ffffff',
           backgroundColor: '#18202bdd', padding: { x: 2, y: 1 },
-        }).setOrigin(0.5));
+        }).setResolution(TEXT_RESOLUTION).setOrigin(0.5));
         marker.signature = signature;
       }
       marker.root.setPosition(28 * Math.sqrt(3) * (tile.col + 0.5 * (tile.row & 1)), 42 * tile.row);
       marker.root.setVisible(true);
     }
-    // Reuse markers on ordinary redraws; discard ones belonging to removed cities or changed buildings.
     const live = new Set(state.cities().flatMap((city) => city.buildings.map((b) => `${state.tileIndex(city)}:${b}`)));
     for (const [key, marker] of pool) if (!live.has(key)) { marker.root.destroy(); pool.delete(key); }
+    // Existing city names, claim prices and route labels are scene-level Text objects.
+    // Upgrade each once, not on every camera frame; pooled/new labels are covered on the next redraw.
+    for (const object of this.children.list) {
+      if (object.type !== 'Text') continue;
+      const label = object as Phaser.GameObjects.Text;
+      if (label.style.resolution < TEXT_RESOLUTION) label.setResolution(TEXT_RESOLUTION);
+    }
   };
   const panel = proto.tilePanel;
   proto.tilePanel = function(state, tile) {
