@@ -22,151 +22,26 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Record existing TypeScript diagnostics
+      - name: Record baseline compiler diagnostics
         run: npx tsc --pretty false > /tmp/kingdom-before.txt 2>&1 || true
-      - name: Apply guarded performance changes
+      - name: Apply immutable guarded patch and prepare regression tests
         shell: python
         run: |
           from pathlib import Path
-          def replace(text, old, new):
-              count = text.count(old)
-              if count != 1:
-                  raise RuntimeError(f"Expected one matching block, got {count}: {old[:100]}")
-              return text.replace(old, new, 1)
-          root = Path('src/scenes')
-          city_path = root / 'CityScene.ts'
-          city = city_path.read_text()
-          if 'private refreshPending = false;' not in city:
-              city = replace(city, '  private ready = false;', '''  private ready = false;
-            private refreshPending = false;
-            private paintedLayout: Layout | null = null;
-            private paintedStamp = '';
-            private staticTextCount = 0;
-            private staticLabelCount = 0;
-            private bonusG!: Phaser.GameObjects.Graphics;''')
-              city = replace(city, '    if (s?.ready && s.sys.isActive()) s.redraw();', '    if (s?.ready && s.sys.isActive()) s.refreshPending = true;')
-              city = replace(city, '    this.marks = this.add.graphics().setDepth(1);', '    this.marks = this.add.graphics().setDepth(1);\n    this.bonusG = this.add.graphics().setDepth(1.1);')
-              city = replace(city, '  update(): void {\n    const big', '''  update(): void {
-              // Coalesce panel callbacks and interpolated paint cells into one repaint per frame.
-              if (this.refreshPending) {
-                this.refreshPending = false;
-                this.redraw();
-              }
-              const big''')
-              city = replace(city, '    const lay = cityLayout(s, c);\n    const town = this.town(c, lay);', '''    this.refreshPending = false;
-              const lay = cityLayout(s, c);
-              // Every static drawing input, excluding transient selection and tool choices.
-              const stamp = JSON.stringify([
-                link.me, !!ui, c.owner, c.walls, c.pop, c.buildings, c.sites,
-                c.project, c.projectSite, c.projectTurns, c.deco,
-                s.isSimple(link.me), s.cityNames,
-                s.players.map((p) => [p.name, p.color]),
-                lay.hexes.map((h) => [h.index, h.terrain, h.tile.road, h.tile.improvement]),
-                lay.outside.map((o) => o.tile
-                  ? [o.tile.owner, o.tile.home, o.tile.terrain, s.fog && !s.isExplored(link.me, o.tile)]
-                  : null),
-                this.moving,
-              ]);
-              if (this.paintedLayout === lay && this.paintedStamp === stamp) {
-                this.redrawSelection(link, lay);
-                return;
-              }
-              const town = this.town(c, lay);''')
-              city = replace(city, "      if (sel === 'keep' && !ui) this.txt(0, CASTLE_BOTTOM + 7, keepName, 9, { label: true });", '      // The selected Keep label belongs to the lightweight overlay.')
-              city = replace(city, '      const picked = sel === h.index && !ui;\n', '')
-              city = replace(city, '          if (picked) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });', '          // Selected building names belong to the lightweight overlay.')
-              city = replace(city, "        if (usable && (room || picked)) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : picked ? 0.95 : 0.6 });\n        if (picked) this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });", "        if (usable && room) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : 0.6 });")
-              a = city.index('    // The selected amenity: dotted lines')
-              b = city.index('    // Decorate mode: a faint cell grid', a)
-              bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,')
-              city = city[:a] + city[b:]
-              a = city.index('    // Selection: the picked decoration')
-              b = city.index('    for (let k = this.nText;', a)
-              selection = city[a:b]
-              city = city[:a] + '''    this.paintedLayout = lay;
-              this.paintedStamp = stamp;
-              this.staticTextCount = this.nText;
-              this.staticLabelCount = this.labels.length;
-              this.redrawSelection(link, lay);
-
-          ''' + city[b:]
-              city = replace(city, '    const sel = link.sel();\n    const ui = link.deco();\n    this.refreshPending', '    const ui = link.deco();\n    this.refreshPending')
-              helper = '''
-            // Taps update only transient labels, bonus lines and selection outlines.
-            private redrawSelection(link: CityLink, lay: Layout): void {
-              const { state: s, city: c } = link;
-              const sel = link.sel(), ui = link.deco();
-              this.nText = this.staticTextCount;
-              this.labels.length = this.staticLabelCount;
-              this.bonusG.clear();
-              if (!ui) {
-                if (sel === 'keep') {
-                  if (canDraw(this, CASTLE_ART.cells)) this.txt(0, CASTLE_BOTTOM + 7, `Keep${c.walls ? ` · walls ${c.walls}` : ''}`, 9, { label: true });
-                } else {
-                  const h = lay.byIndex.get(sel);
-                  if (h) {
-                    const [cx, cy] = h.center, x = cx * T, y = cy * T;
-                    const b = BUILDING_ORDER.find((k) => c.sites[k] === h.index && c.buildings.includes(k));
-                    const proj = c.projectSite === h.index ? c.project : null;
-                    if (b) {
-                      const pic = BUILDING_ART[b], under = h.terrain === 'water' ? [] : BUILT_GROUND[h.terrain];
-                      if (canDraw(this, [...pic.cells, ...pic.props, ...under])) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
-                    } else if (!proj && !h.keep) {
-                      const room = freeSlots(c, s.isSimple(link.me)) > 0;
-                      const harbor = !c.buildings.includes('harbor') && c.project !== 'harbor' && s.isCoastal(c) && hasSiteFor(s, c, 'harbor');
-                      if (!room && (h.terrain !== 'water' || harbor)) this.txt(x, y - 5, '+', 24, { alpha: 0.95 });
-                      this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });
-                    }
-                  }
-                }
-              }
-          ''' + bonus + selection + '''    for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
-            }
-
-          '''
-              city = replace(city, '  // ---------- life: horses, workers and townsfolk walking around ----------', helper + '  // ---------- life: horses, workers and townsfolk walking around ----------')
-              city_path.write_text(city)
-          map_path = root / 'MapScene.ts'
-          world = map_path.read_text()
-          if 'private redraw(persist = true): void' not in world:
-              world = replace(world, '  private redraw(): void {\n    const state = this.state;\n    if (!state) return;', '''  private redraw(persist = true): void {
-              const state = this.state;
-              if (!state) return;
-              // Rebuild the sleeping map once on exit, not on every city edit.
-              if (this.cityView.visible) {
-                this.cityView.refresh();
-                if (persist) saveGame(state);
-                this.lastView = '';
-                return;
-              }''')
-              world = replace(world, '    saveGame(state);\n  }\n  private drawOwners', '    if (persist) saveGame(state);\n  }\n  private drawOwners')
-              world = replace(world, "    this.mode = m;\n    if (m !== 'claim') this.claimCity = null;\n    this.redraw();", "    this.mode = m;\n    if (m !== 'claim') this.claimCity = null;\n    this.redraw(false);")
-              world = replace(world, "this.mode = 'claim'; this.redraw();", "this.mode = 'claim'; this.redraw(false);")
-              world = replace(world, "this.cameras.main.pan(x, y, 300, 'Sine.easeInOut'); this.redraw();", "this.cameras.main.pan(x, y, 300, 'Sine.easeInOut'); this.redraw(false);")
-              world = replace(world, "        if (state.perform('claim', tile, this.me, this.claimCity).ok) break;", "        if (state.perform('claim', tile, this.me, this.claimCity).ok) { acted = true; break; }")
-              world = replace(world, '          this.redraw(); this.openCity(tile); return;', '          this.redraw(false); this.openCity(tile); return;')
-              world = replace(world, '    this.redraw();\n    if (acted) this.autoAdvance(tile);', '    this.redraw(acted);\n    if (acted) this.autoAdvance(tile);')
-              world = replace(world, "this.mode = this.mode === job ? 'select' : job; this.redraw(); return;", "this.mode = this.mode === job ? 'select' : job; this.redraw(false); return;")
-              world = replace(world, 'onClose: (user) => { this.arrive(city, user); this.redraw(); }', 'onClose: (user) => { this.arrive(city, user); this.redraw(false); }')
-              world = replace(world, "this.clearSelection(); this.mode = 'select'; this.redraw();", "this.clearSelection(); this.mode = 'select'; this.redraw(false);")
-              world = replace(world, "    if (this.mode !== 'select') { this.mode = 'select'; this.claimCity = null; } else this.clearSelection();\n    this.redraw();", "    if (this.mode !== 'select') { this.mode = 'select'; this.claimCity = null; } else this.clearSelection();\n    this.redraw(false);")
-              world = replace(world, 'this.selectedUnitId = here.id; this.redraw();', 'this.selectedUnitId = here.id; this.redraw(false);')
-              map_path.write_text(world)
-          art_path = root / 'mapArt.ts'
-          art = art_path.read_text()
-          if 'export function terrainResolution' not in art:
-              art = replace(art, 'export class HexArt {', '''// Keep the current resolution while zoom hovers around the old cutoff.
-          export function terrainResolution(previous: number, zoom: number): number {
-            return previous === 0.5 ? (zoom > 0.72 ? 1 : 0.5) : (zoom < 0.58 ? 0.5 : 1);
-          }
-
-          export class HexArt {''')
-              art = replace(art, "  private viewStamp = '';", "  private viewStamp = '';\n  private viewScale = 1;")
-              art = replace(art, '    const scale = cam.zoom < 0.65 ? 0.5 : 1;', '    const scale = terrainResolution(this.viewScale, cam.zoom);\n    this.viewScale = scale;')
-              art_path.write_text(art)
-      - name: Check TypeScript regressions and build dev
-        env:
-          VITE_CHANNEL: dev
+          import subprocess, ast
+          # The exact patch template is retained in this immutable repository commit.
+          # No downloads, generated third-party code or mutable remote scripts.
+          seed = subprocess.check_output(['git', 'show', 'c9e8f40572d669b343f4d854e4933ea3f4ff3b72:.github/workflows/performance-pass.yml'], text=True)
+          block = seed.split('        shell: python\n        run: |\n', 1)[1].split('      - name:', 1)[0]
+          patch = '\n'.join(line[10:] if line.startswith('          ') else line for line in block.splitlines())
+          patch = patch.replace("bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,')", "bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,').replace('town.built.get(sel)', 'BUILDING_ORDER.find((k) => c.sites[k] === sel && c.buildings.includes(k))')")
+          ast.parse(patch)
+          exec(compile(patch, '<guarded performance patch>', 'exec'))
+          tests = seed.split("          node --input-type=commonjs <<'JS'\n", 1)[1].split('\n          JS', 1)[0]
+          tests = '\n'.join(line[10:] if line.startswith('          ') else line for line in tests.splitlines())
+          tests = tests.replace('imports[id] || {}', "(id === 'phaser' ? { default: imports[id] } : imports[id]) || {}")
+          Path('/tmp/kingdom-performance-tests.cjs').write_text(tests)
+      - name: Reject new TypeScript diagnostics
         run: |
           npx tsc --pretty false > /tmp/kingdom-after.txt 2>&1 || true
           python3 - <<'PY'
@@ -176,55 +51,22 @@ jobs:
           def diagnostics(path):
               return Counter(re.sub(r'\(\d+,\d+\)', '(location)', line) for line in Path(path).read_text().splitlines() if line.strip())
           extra = diagnostics('/tmp/kingdom-after.txt') - diagnostics('/tmp/kingdom-before.txt')
+          for line in extra.elements():
+              print('::error::' + line)
           if extra:
-              raise SystemExit('New TypeScript diagnostics:\n' + '\n'.join(extra.elements()))
+              raise SystemExit(1)
           print('No new TypeScript diagnostics.')
-          print(Path('/tmp/kingdom-after.txt').read_text())
+          baseline = Path('/tmp/kingdom-after.txt').read_text()
+          print(baseline)
+          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Performance validation\nNo new TypeScript diagnostics.\n\nExisting diagnostics:\n```\n' + baseline + '\n```\n')
           PY
-          npx vite build
-      - name: Run targeted regression checks
-        run: |
-          node --input-type=commonjs <<'JS'
-          const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), ts = require('typescript');
-          function load(path, imports) {
-            const out = ts.transpileModule(fs.readFileSync(path, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-            const exports = {};
-            vm.runInNewContext(out, { exports, require: (id) => imports[id] || {}, console, performance }, { filename: path });
-            return exports;
-          }
-          const phaser = { Scene: class { constructor() { this.sys = { isActive: () => true }; } } };
-          const { terrainResolution } = load('src/scenes/mapArt.ts', { phaser });
-          let scale = 1;
-          for (const zoom of [0.66, 0.64, 0.66, 0.64, 0.59]) scale = terrainResolution(scale, zoom);
-          assert.equal(scale, 1);
-          scale = terrainResolution(scale, 0.57);
-          assert.equal(scale, 0.5);
-          for (const zoom of [0.64, 0.66, 0.71]) scale = terrainResolution(scale, zoom);
-          assert.equal(scale, 0.5);
-          assert.equal(terrainResolution(scale, 0.73), 1);
-          assert.equal(terrainResolution(1, 0.58), 1);
-          assert.equal(terrainResolution(0.5, 0.72), 0.5);
-          const { CityScene } = load('src/scenes/CityScene.ts', { phaser, './cityArt': { ART: 16, CASTLE_ART: { w: 4, h: 4 } } });
-          const scene = new CityScene();
-          scene.ready = true;
-          scene.cameras = { main: { zoom: 1 } };
-          let draws = 0;
-          scene.redraw = () => { draws++; };
-          CityScene.refresh(); CityScene.refresh(); CityScene.refresh();
-          assert.equal(draws, 0);
-          scene.update(); assert.equal(draws, 1);
-          scene.update(); assert.equal(draws, 1);
-          scene.sys.isActive = () => false;
-          CityScene.refresh(); scene.update(); assert.equal(draws, 1);
-          const map = fs.readFileSync('src/scenes/MapScene.ts', 'utf8');
-          assert.match(map, /this\.redraw\(acted\)/);
-          assert.match(map, /if \(persist\) saveGame\(state\)/);
-          assert.match(map, /state\.perform\('claim'.*\{ acted = true; break; \}/);
-          const city = fs.readFileSync('src/scenes/CityScene.ts', 'utf8');
-          assert.match(city, /this\.paintedLayout === lay && this\.paintedStamp === stamp/);
-          assert.match(city, /this\.redrawSelection\(link, lay\);\s+return;/);
-          console.log('PASS: zoom hysteresis, refresh coalescing, sleeping-scene refresh, save wiring, selection fast path.');
-          JS
+      - name: Build dev
+        env:
+          VITE_CHANNEL: dev
+        run: npx vite build
+      - name: Run regression tests
+        run: NODE_PATH="$GITHUB_WORKSPACE/node_modules" node /tmp/kingdom-performance-tests.cjs
       - name: Commit validated source changes to dev
         run: |
           git config user.name 'github-actions[bot]'
