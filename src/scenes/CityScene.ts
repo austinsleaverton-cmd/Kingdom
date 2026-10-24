@@ -194,6 +194,12 @@ export class CityScene extends Phaser.Scene {
   private minZoom = 0.3;
   private maxZoom = 3;
   private ready = false;
+  private refreshPending = false;
+  private paintedLayout: Layout | null = null;
+  private paintedStamp = '';
+  private staticTextCount = 0;
+  private staticLabelCount = 0;
+  private bonusG!: Phaser.GameObjects.Graphics;
   private reduced = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
   private pressed = false;
@@ -223,7 +229,7 @@ export class CityScene extends Phaser.Scene {
   // The panel changed (selection, something built): redraw if the screen is up
   static refresh(): void {
     const s = CityScene.instance;
-    if (s?.ready && s.sys.isActive()) s.redraw();
+    if (s?.ready && s.sys.isActive()) s.refreshPending = true;
   }
 
   // Opened again while already running: fit the new city to the screen
@@ -254,6 +260,7 @@ export class CityScene extends Phaser.Scene {
     this.gridG = this.add.graphics().setDepth(0.5);
     this.scenery = this.add.graphics().setDepth(1.5);
     this.marks = this.add.graphics().setDepth(1);
+    this.bonusG = this.add.graphics().setDepth(1.1);
     this.selG = this.add.graphics().setDepth(4);
     this.hoverG = this.add.graphics().setDepth(4.1);
     const sheets: [Sheet, string][] = [['t', TINY], ['r', RPG]];
@@ -281,6 +288,11 @@ export class CityScene extends Phaser.Scene {
   }
 
   update(): void {
+    // Coalesce panel callbacks and interpolated paint cells into one repaint per frame.
+    if (this.refreshPending) {
+      this.refreshPending = false;
+      this.redraw();
+    }
     const big = this.cameras.main.zoom * T >= LABEL_MIN;
     if (big === this.bigLabels) return;
     this.bigLabels = big;
@@ -763,9 +775,25 @@ export class CityScene extends Phaser.Scene {
     const link = CityScene.link;
     if (!link || !this.ready) return;
     const { state: s, city: c } = link;
-    const sel = link.sel();
     const ui = link.deco();
+    this.refreshPending = false;
     const lay = cityLayout(s, c);
+    // Every static drawing input, excluding transient selection and tool choices.
+    const stamp = JSON.stringify([
+      link.me, !!ui, c.owner, c.walls, c.pop, c.buildings, c.sites,
+      c.project, c.projectSite, c.projectTurns, c.deco,
+      s.isSimple(link.me), s.cityNames,
+      s.players.map((p) => [p.name, p.color]),
+      lay.hexes.map((h) => [h.index, h.terrain, h.tile.road, h.tile.improvement]),
+      lay.outside.map((o) => o.tile
+        ? [o.tile.owner, o.tile.home, o.tile.terrain, s.fog && !s.isExplored(link.me, o.tile)]
+        : null),
+      this.moving,
+    ]);
+    if (this.paintedLayout === lay && this.paintedStamp === stamp) {
+      this.redrawSelection(link, lay);
+      return;
+    }
     const town = this.town(c, lay);
     const seed = c.col * 92821 + c.row * 68917;
     this.nText = 0;
@@ -809,7 +837,7 @@ export class CityScene extends Phaser.Scene {
     const keepName = `Keep${c.walls ? ` \u00b7 walls ${c.walls}` : ''}`;
     if (canDraw(this, CASTLE_ART.cells)) {
       this.cells('obj', CASTLE_ART.cells, CASTLE_LEFT, CASTLE_TOP);
-      if (sel === 'keep' && !ui) this.txt(0, CASTLE_BOTTOM + 7, keepName, 9, { label: true });
+      // The selected Keep label belongs to the lightweight overlay.
     } else {
       g.fillStyle(0x6b7280, 1);
       g.fillCircle(0, 0, T * 0.62);
@@ -834,10 +862,9 @@ export class CityScene extends Phaser.Scene {
       const y = cy * T;
       const b = town.built.get(h.index);
       const proj = c.projectSite === h.index ? c.project : null;
-      const picked = sel === h.index && !ui;
       if (b) {
         if (this.building(b, x, y, h.terrain, 1)) {
-          if (picked) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
+          // Selected building names belong to the lightweight overlay.
         } else {
           this.lotGround(g, x, y, h.terrain, 1);
           this.txt(x, y - 6, BUILDINGS[b].icon, 22);
@@ -856,8 +883,7 @@ export class CityScene extends Phaser.Scene {
       } else {
         if (!town.ground.has(cellKey(cx, cy))) this.lotGround(g, x, y, h.terrain, 1);
         const usable = h.terrain !== 'water' || harbor;
-        if (usable && (room || picked)) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : picked ? 0.95 : 0.6 });
-        if (picked) this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });
+        if (usable && room) this.txt(x, y - 5, '+', 24, { alpha: ui ? 0.3 : 0.6 });
       }
       if (h.tile.road) this.txt((cx - 2) * T, (cy - 2) * T, WORK_ICON.road, 13, { alpha: ui ? 0.45 : 0.9 });
     }
@@ -866,18 +892,6 @@ export class CityScene extends Phaser.Scene {
     const m = this.marks;
     m.clear();
     this.drawBorders(m, lay, c.owner !== null ? s.players[c.owner].color : 0xffffff, !ui);
-
-    // The selected amenity: dotted lines to the hexes paying its bonuses
-    if (!ui && typeof sel === 'number') {
-      const b = town.built.get(sel) ?? (c.projectSite === sel ? c.project : null);
-      const from = lay.byIndex.get(sel);
-      if (b && from) {
-        for (const at of bonusSources(s, c, sel, b)) {
-          const to = lay.byIndex.get(at)?.center ?? lay.outside.find((o) => o.tile && s.tileIndex(o.tile) === at)?.center;
-          if (to) this.dots(m, from.center[0] * T, from.center[1] * T, to[0] * T, to[1] * T, 0x4ade80, 0.85);
-        }
-      }
-    }
 
     // Decorate mode: a faint cell grid on the city's land (stronger while a path, grass or the eraser is picked)
     const gg = this.gridG;
@@ -888,6 +902,57 @@ export class CityScene extends Phaser.Scene {
         if (h.terrain === 'water') continue;
         const [x, y] = parseKey(key);
         gg.strokeRect(x * T - T / 2, y * T - T / 2, T, T);
+      }
+    }
+
+    this.paintedLayout = lay;
+    this.paintedStamp = stamp;
+    this.staticTextCount = this.nText;
+    this.staticLabelCount = this.labels.length;
+    this.redrawSelection(link, lay);
+
+    for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
+    for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
+  }
+
+
+  // Taps update only transient labels, bonus lines and selection outlines.
+  private redrawSelection(link: CityLink, lay: Layout): void {
+    const { state: s, city: c } = link;
+    const sel = link.sel(), ui = link.deco();
+    this.nText = this.staticTextCount;
+    this.labels.length = this.staticLabelCount;
+    this.bonusG.clear();
+    if (!ui) {
+      if (sel === 'keep') {
+        if (canDraw(this, CASTLE_ART.cells)) this.txt(0, CASTLE_BOTTOM + 7, `Keep${c.walls ? ` · walls ${c.walls}` : ''}`, 9, { label: true });
+      } else {
+        const h = lay.byIndex.get(sel);
+        if (h) {
+          const [cx, cy] = h.center, x = cx * T, y = cy * T;
+          const b = BUILDING_ORDER.find((k) => c.sites[k] === h.index && c.buildings.includes(k));
+          const proj = c.projectSite === h.index ? c.project : null;
+          if (b) {
+            const pic = BUILDING_ART[b], under = h.terrain === 'water' ? [] : BUILT_GROUND[h.terrain];
+            if (canDraw(this, [...pic.cells, ...pic.props, ...under])) this.txt(x, y + NAME_Y, BUILDINGS[b].name, 10, { label: true });
+          } else if (!proj && !h.keep) {
+            const room = freeSlots(c, s.isSimple(link.me)) > 0;
+            const harbor = !c.buildings.includes('harbor') && c.project !== 'harbor' && s.isCoastal(c) && hasSiteFor(s, c, 'harbor');
+            if (!room && (h.terrain !== 'water' || harbor)) this.txt(x, y - 5, '+', 24, { alpha: 0.95 });
+            this.txt(x, y + 14, PLOT_NAME[h.terrain], 9, { label: true });
+          }
+        }
+      }
+    }
+    // The selected amenity: dotted lines to the hexes paying its bonuses
+    if (!ui && typeof sel === 'number') {
+      const b = BUILDING_ORDER.find((k) => c.sites[k] === sel && c.buildings.includes(k)) ?? (c.projectSite === sel ? c.project : null);
+      const from = lay.byIndex.get(sel);
+      if (b && from) {
+        for (const at of bonusSources(s, c, sel, b)) {
+          const to = lay.byIndex.get(at)?.center ?? lay.outside.find((o) => o.tile && s.tileIndex(o.tile) === at)?.center;
+          if (to) this.dots(this.bonusG, from.center[0] * T, from.center[1] * T, to[0] * T, to[1] * T, 0x4ade80, 0.85);
+        }
       }
     }
 
@@ -916,7 +981,6 @@ export class CityScene extends Phaser.Scene {
     }
 
     for (let k = this.nText; k < this.texts.length; k++) this.texts[k].setVisible(false);
-    for (let k = this.nPeople; k < this.people.length; k++) this.people[k].setVisible(false).stop();
   }
 
   // ---------- life: horses, workers and townsfolk walking around ----------

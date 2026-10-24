@@ -51,6 +51,11 @@ function triangle(ctx: CanvasRenderingContext2D, points: number[], color: string
   ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(points[0], points[1]); ctx.lineTo(points[2], points[3]); ctx.lineTo(points[4], points[5]); ctx.closePath(); ctx.fill();
 }
 
+// Keep the current resolution while zoom hovers around the old cutoff.
+export function terrainResolution(previous: number, zoom: number): number {
+  return previous === 0.5 ? (zoom > 0.72 ? 1 : 0.5) : (zoom < 0.58 ? 0.5 : 1);
+}
+
 export class HexArt {
   private chunks = new Map<string, Chunk>();
   private stamps = new Map<Tile, string>();
@@ -63,6 +68,7 @@ export class HexArt {
   private clock = 0;
   private id = nextId++;
   private viewStamp = '';
+  private viewScale = 1;
 
   constructor(private scene: Phaser.Scene, private radius: number, private depth: { tiles: number; props: number; keeps: number }) {
     scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.destroy());
@@ -133,7 +139,8 @@ export class HexArt {
     if (stamp === this.viewStamp) return;
     this.viewStamp = stamp;
     const view = viewBounds(cam.scrollX, cam.scrollY, cam.width, cam.height, cam.zoom);
-    const scale = cam.zoom < 0.65 ? 0.5 : 1;
+    const scale = terrainResolution(this.viewScale, cam.zoom);
+    this.viewScale = scale;
     const frame = ++this.clock;
     for (const [key, c] of this.chunks) {
       const show = visible && intersects(c.bounds, view);

@@ -212,13 +212,13 @@ export class MapScene extends Phaser.Scene {
     if (m === 'select' && this.mode === 'select') this.clearSelection();
     this.mode = m;
     if (m !== 'claim') this.claimCity = null;
-    this.redraw();
+    this.redraw(false);
   }
   private toggleClaim(): void {
     const city = this.selected;
     if (!this.state || !city || !city.city || city.owner !== this.me) return;
     if (this.mode === 'claim' && this.claimCity === city) { this.setMode('select'); return; }
-    this.selectedUnitId = null; this.claimCity = city; this.mode = 'claim'; this.redraw();
+    this.selectedUnitId = null; this.claimCity = city; this.mode = 'claim'; this.redraw(false);
   }
   private clearSelection(): void {
     this.selected = null; this.selectedUnitId = null;
@@ -283,7 +283,7 @@ export class MapScene extends Phaser.Scene {
     if (!state) return;
     this.mode = 'select'; this.selectedUnitId = unit.id; this.selected = state.tileOf(unit);
     const { x, y } = tileCenter(this.selected);
-    this.cameras.main.pan(x, y, 300, 'Sine.easeInOut'); this.redraw();
+    this.cameras.main.pan(x, y, 300, 'Sine.easeInOut'); this.redraw(false);
   }
   private toggleHold(): void {
     const state = this.state, unit = this.selectedUnit;
@@ -335,7 +335,7 @@ export class MapScene extends Phaser.Scene {
     let acted = false;
     switch (this.mode) {
       case 'claim':
-        if (state.perform('claim', tile, this.me, this.claimCity).ok) break;
+        if (state.perform('claim', tile, this.me, this.claimCity).ok) { acted = true; break; }
         if (tile.city && tile.owner === this.me && tile !== this.claimCity) { this.claimCity = tile; this.selected = tile; break; }
         if (this.selectOwn(state, tile)) break;
         return this.fail();
@@ -351,7 +351,7 @@ export class MapScene extends Phaser.Scene {
         this.lastTap = { tile, at: now };
         if (tile.city && tile.owner === this.me && tap && tap.tile === tile && now - tap.at < DOUBLE_TAP_MS) {
           this.lastTap = null; this.routePreview = null; this.selectedUnitId = null; this.selected = tile;
-          this.redraw(); this.openCity(tile); return;
+          this.redraw(false); this.openCity(tile); return;
         }
         const unit = this.selectedUnit, rival = this.rivalCapital(state, tile);
         if (unit && state.tileOf(unit) === tile) this.clearSelection();
@@ -375,7 +375,7 @@ export class MapScene extends Phaser.Scene {
         break;
       }
     }
-    this.redraw();
+    this.redraw(acted);
     if (acted) this.autoAdvance(tile);
   }
   private rivalCapital(state: GameState, tile: Tile): number | null {
@@ -466,7 +466,7 @@ export class MapScene extends Phaser.Scene {
   private doJob(job: Job): void {
     const state = this.state, unit = this.selectedUnit;
     if (!state || !unit) return;
-    if (job === 'raise' || job === 'lower') { this.mode = this.mode === job ? 'select' : job; this.redraw(); return; }
+    if (job === 'raise' || job === 'lower') { this.mode = this.mode === job ? 'select' : job; this.redraw(false); return; }
     const here = state.tileOf(unit);
     if (!state.doJob(unit, job, here).ok) return this.fail();
     this.redraw(); this.autoAdvance(here);
@@ -628,7 +628,7 @@ export class MapScene extends Phaser.Scene {
       }
       if (e.key === 'Escape') {
         if (!this.playing) this.continueGame();
-        else if (this.selected || this.mode !== 'select') { this.clearSelection(); this.mode = 'select'; this.redraw(); }
+        else if (this.selected || this.mode !== 'select') { this.clearSelection(); this.mode = 'select'; this.redraw(false); }
         else this.openMenu();
         return;
       }
@@ -656,7 +656,7 @@ export class MapScene extends Phaser.Scene {
   }
   private cancel(): void {
     if (this.mode !== 'select') { this.mode = 'select'; this.claimCity = null; } else this.clearSelection();
-    this.redraw();
+    this.redraw(false);
   }
   private tileAtScreen(sx: number, sy: number): Tile | null {
     if (!this.state) return null;
@@ -892,7 +892,7 @@ export class MapScene extends Phaser.Scene {
     const here = state.unitAt(city);
     if (here && here.owner === this.me) sections.push({ heading: 'In this city', buttons: [{
       label: `Select ${UNIT_STATS[here.type].name}`, enabled: true, hint: 'or click the city again',
-      onClick: () => { this.mode = 'select'; this.claimCity = null; this.selectedUnitId = here.id; this.redraw(); },
+      onClick: () => { this.mode = 'select'; this.claimCity = null; this.selectedUnitId = here.id; this.redraw(false); },
     }] });
     return { title: state.cityName(city), subtitle: `${LEVEL_NAMES[cityLevel(city) - 1]} \u00b7 ${city.capital ? 'your capital' : 'your city'}`, titleAction: { label: 'Rename', onClick: () => this.renameCity(city) }, sections };
   }
@@ -943,9 +943,16 @@ export class MapScene extends Phaser.Scene {
     for (const t of near) { const pv = state.attackPreview(unit, t); if (pv.ok) out.set(t, pv); }
     return out;
   }
-  private redraw(): void {
+  private redraw(persist = true): void {
     const state = this.state;
     if (!state) return;
+    // Rebuild the sleeping map once on exit, not on every city edit.
+    if (this.cityView.visible) {
+      this.cityView.refresh();
+      if (persist) saveGame(state);
+      this.lastView = '';
+      return;
+    }
     const unit = this.selectedUnit;
     if (this.selectedUnitId !== null && !unit) this.clearSelection();
     if (unit) this.selected = state.tileOf(unit);
@@ -983,7 +990,7 @@ export class MapScene extends Phaser.Scene {
     this.lastView = '';
     this.hud.hideIdle(); this.refreshHover(); this.hud.update(state, this.mode);
     this.hud.showPanel(this.buildPanel(state)); this.cityView.refresh();
-    saveGame(state);
+    if (persist) saveGame(state);
   }
   private drawOwners(state: GameState): void {
     const g = this.ownerGfx;
