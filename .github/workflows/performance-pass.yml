@@ -24,65 +24,16 @@ jobs:
       - run: npm ci
       - name: Record baseline compiler diagnostics
         run: npx tsc --pretty false > /tmp/kingdom-before.txt 2>&1 || true
-      - name: Apply immutable guarded patch and prepare regression tests
+      - name: Apply guarded source patch and prepare tests
         shell: python
         run: |
-          from pathlib import Path
-          import subprocess, ast
-          seed = subprocess.check_output(['git', 'show', 'c9e8f40572d669b343f4d854e4933ea3f4ff3b72:.github/workflows/performance-pass.yml'], text=True)
+          import subprocess
+          seed = subprocess.check_output(['git', 'show', 'e82c3ee552d52efd61eb42b5da4e8c6202f30d0f:.github/workflows/performance-pass.yml'], text=True)
           block = seed.split('        shell: python\n        run: |\n', 1)[1].split('      - name:', 1)[0]
-          patch = '\n'.join(line[10:] if line.startswith('          ') else line for line in block.splitlines())
-          patch = patch.replace("bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,')", "bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,').replace('town.built.get(sel)', 'BUILDING_ORDER.find((k) => c.sites[k] === sel && c.buildings.includes(k))')")
-          # Closing a city also persists any settleCity changes made when it opened.
-          patch = patch.replace("'onClose: (user) => { this.arrive(city, user); this.redraw(false); }'", "'onClose: (user) => { this.arrive(city, user); this.redraw(); }'")
-          ast.parse(patch)
-          exec(compile(patch, '<guarded performance patch>', 'exec'))
-          tests = seed.split("          node --input-type=commonjs <<'JS'\n", 1)[1].split('\n          JS', 1)[0]
-          tests = '\n'.join(line[10:] if line.startswith('          ') else line for line in tests.splitlines())
-          tests = tests.replace('imports[id] || {}', "(id === 'phaser' ? { default: imports[id] } : imports[id]) || {}")
-          tests = tests.replace('const scene = new CityScene();', 'const scene = Object.create(CityScene.prototype); CityScene.instance = scene; scene.sys = { isActive: () => true }; scene.bigLabels = true; scene.labels = [];')
-          tests += '''
-          // Exercise the real redraw branch with graphics and world-data test doubles.
-          const lay = { cells: new Map(), hexes: [], outside: [], byIndex: new Map() };
-          const c = { owner: 0, walls: 0, pop: 0, buildings: [], sites: {}, project: null, projectSite: null, projectTurns: 0, deco: [] };
-          const state = { isSimple: () => true, cityNames: {}, players: [{ name: 'Test', color: 1 }], isCoastal: () => false };
-          let pick = 'keep', decoUI = null, staticDraws = 0, overlays = 0;
-          const link = { state, city: c, me: 0, sel: () => pick, deco: () => decoUI };
-          const { CityScene: CachedCity } = load('src/scenes/CityScene.ts', {
-            phaser,
-            '../world/grid': { cityLayout: () => lay },
-            '../world/city': { freeSlots: () => 1 },
-            '../world/tile': { BUILDING_ORDER: [] },
-            './cityArt': { ART: 16, CASTLE_ART: { w: 4, h: 4, cells: [] }, canDraw: () => false, hasFrame: () => false }
-          });
-          const cached = Object.create(CachedCity.prototype);
-          CachedCity.link = link;
-          let gfx;
-          gfx = new Proxy({}, { get: () => () => gfx });
-          Object.assign(cached, { ready: true, paintedLayout: null, paintedStamp: '', blit: { ground: {}, obj: {} }, labels: [], texts: [], people: [], ground: gfx, hillG: gfx, scenery: gfx, marks: gfx, gridG: gfx, selG: gfx, bonusG: gfx, moving: null });
-          cached.drawOutside = cached.drawLife = cached.crowd = cached.drawBorders = () => {};
-          cached.drawTown = () => { staticDraws++; };
-          cached.txt = () => { cached.nText++; return gfx; };
-          const realOverlay = cached.redrawSelection;
-          cached.redrawSelection = function(...args) { overlays++; return realOverlay.apply(this, args); };
-          cached.redraw(); cached.redraw();
-          assert.equal(staticDraws, 1);
-          assert.equal(overlays, 2);
-          pick = 123; cached.redraw(); assert.equal(staticDraws, 1);
-          c.deco.push([1, 1, 0]); cached.redraw(); assert.equal(staticDraws, 2);
-          decoUI = { tool: 0, picked: null }; cached.redraw(); assert.equal(staticDraws, 3);
-          decoUI = { tool: 1, picked: null }; cached.redraw(); assert.equal(staticDraws, 3);
-          let saves = 0, panelRefreshes = 0;
-          const { MapScene } = load('src/scenes/MapScene.ts', { phaser, '../world/save': { saveGame: () => saves++ } });
-          const mapScene = Object.create(MapScene.prototype);
-          mapScene.state = {};
-          mapScene.cityView = { visible: true, refresh: () => panelRefreshes++ };
-          mapScene.redraw(false); assert.equal(saves, 0);
-          mapScene.redraw(true); assert.equal(saves, 1);
-          assert.equal(panelRefreshes, 2);
-          console.log('PASS: actual city selection cache, decoration invalidation, tool-only overlay, sleeping-map autosave gate.');
-          '''
-          Path('/tmp/kingdom-performance-tests.cjs').write_text(tests)
+          code = '\n'.join(line[10:] if line.startswith('          ') else line for line in block.splitlines())
+          code = code.replace("'../world/grid': { cityLayout: () => lay },", "'../world/grid': { cityLayout: () => lay, cellKey: (x, y) => `${x},${y}` }, './citySprites': { keepPeople: () => [] }, '../world/deco': { isPathKind: () => false },")
+          code = code.replace('ART: 16, CASTLE_ART: { w: 4, h: 4, cells: [] }', 'ART: 16, GRASS: { plain: 0, tufts: 1, flowers: 2 }, CASTLE_ART: { w: 4, h: 4, cells: [] }')
+          exec(compile(code, '<validated patch and isolated test preparation>', 'exec'))
       - name: Reject new TypeScript diagnostics
         run: |
           npx tsc --pretty false > /tmp/kingdom-after.txt 2>&1 || true
@@ -98,7 +49,6 @@ jobs:
           if extra:
               raise SystemExit(1)
           print('No new TypeScript diagnostics.')
-          print(Path('/tmp/kingdom-after.txt').read_text())
           PY
       - name: Build dev
         env:
