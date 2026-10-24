@@ -604,7 +604,7 @@ export class CityScene extends Phaser.Scene {
             const t = this.tileAt(p.x, p.y) ?? this.moving.from;
             if (t[0] !== this.moving.to[0] || t[1] !== this.moving.to[1]) {
               this.moving.to = t;
-              this.redraw();
+              this.refreshPending = true;
             }
             return;
           }
@@ -780,7 +780,7 @@ export class CityScene extends Phaser.Scene {
     const lay = cityLayout(s, c);
     // Every static drawing input, excluding transient selection and tool choices.
     const stamp = JSON.stringify([
-      link.me, !!ui, c.owner, c.walls, c.pop, c.buildings, c.sites,
+      link.me, !!ui, paints(ui), c.owner, c.walls, c.pop, c.buildings, c.sites,
       c.project, c.projectSite, c.projectTurns, c.deco,
       s.isSimple(link.me), s.cityNames,
       s.players.map((p) => [p.name, p.color]),
