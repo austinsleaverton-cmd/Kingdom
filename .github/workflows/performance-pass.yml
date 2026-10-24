@@ -6,9 +6,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
-concurrency:
-  group: kingdom-performance-pass
-  cancel-in-progress: false
 jobs:
   performance:
     runs-on: ubuntu-latest
@@ -22,129 +19,61 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Record baseline compiler diagnostics
+      - name: Record compiler baseline
         run: npx tsc --pretty false > /tmp/kingdom-before.txt 2>&1 || true
-      - name: Apply guarded source patch
+      - name: Tighten decoration redraw invalidation
         shell: python
         run: |
-          import subprocess, traceback
-          try:
-              seed = subprocess.check_output(['git', 'show', 'c9e8f40572d669b343f4d854e4933ea3f4ff3b72:.github/workflows/performance-pass.yml'], text=True)
-              block = seed.split('        shell: python\n        run: |\n', 1)[1].split('      - name:', 1)[0]
-              patch = '\n'.join(line[10:] if line.startswith('          ') else line for line in block.splitlines())
-              patch = patch.replace("bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,')", "bonus = city[a:b].replace('this.dots(m,', 'this.dots(this.bonusG,').replace('town.built.get(sel)', 'BUILDING_ORDER.find((k) => c.sites[k] === sel && c.buildings.includes(k))')")
-              patch = patch.replace("'onClose: (user) => { this.arrive(city, user); this.redraw(false); }'", "'onClose: (user) => { this.arrive(city, user); this.redraw(); }'")
-              exec(compile(patch, '<guarded performance patch>', 'exec'), {})
-          except Exception:
-              print('::error::' + traceback.format_exc().replace('\n', '%0A'))
-              raise
-      - name: Reject new TypeScript diagnostics
+          from pathlib import Path
+          p = Path('src/scenes/CityScene.ts')
+          s = p.read_text()
+          def change(old, new):
+              global s
+              if old in s:
+                  assert s.count(old) == 1
+                  s = s.replace(old, new)
+              else:
+                  assert new in s
+          change('link.me, !!ui, c.owner, c.walls', 'link.me, !!ui, paints(ui), c.owner, c.walls')
+          change('this.moving.to = t;\n              this.redraw();', 'this.moving.to = t;\n              this.refreshPending = true;')
+          p.write_text(s)
+      - name: Reject new compiler errors
         run: |
           npx tsc --pretty false > /tmp/kingdom-after.txt 2>&1 || true
           python3 - <<'PY'
           import re
           from collections import Counter
           from pathlib import Path
-          def diagnostics(path):
-              return Counter(re.sub(r'\(\d+,\d+\)', '(location)', line) for line in Path(path).read_text().splitlines() if line.strip())
-          extra = diagnostics('/tmp/kingdom-after.txt') - diagnostics('/tmp/kingdom-before.txt')
-          for line in extra.elements():
-              print('::error::' + line)
-          if extra:
-              raise SystemExit(1)
-          print('No new TypeScript diagnostics.')
+          def errors(p):
+              return Counter(re.sub(r'\(\d+,\d+\)', '(location)', s) for s in Path(p).read_text().splitlines() if s.strip())
+          extra = errors('/tmp/kingdom-after.txt') - errors('/tmp/kingdom-before.txt')
+          for s in extra.elements():
+              print('::error::' + s)
+          assert not extra
           PY
       - name: Build dev
         env:
           VITE_CHANNEL: dev
         run: npx vite build
-      - name: Run isolated performance regressions
+      - name: Run performance regressions
         run: |
-          cat > /tmp/kingdom-performance-tests.cjs <<'JS'
-          const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), ts = require('typescript');
-          const phaser = { Scene: class {} };
-          function load(path, imports) {
-            const out = ts.transpileModule(fs.readFileSync(path, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-            const exports = {};
-            vm.runInNewContext(out, { exports, console, performance, require: (id) => (id === 'phaser' ? { default: imports[id] } : imports[id]) || {} }, { filename: path });
-            return exports;
-          }
-          const { terrainResolution } = load('src/scenes/mapArt.ts', { phaser });
-          let resolution = 1;
-          for (const z of [0.66, 0.64, 0.66, 0.59]) resolution = terrainResolution(resolution, z);
-          assert.equal(resolution, 1);
-          resolution = terrainResolution(resolution, 0.57);
-          assert.equal(resolution, 0.5);
-          for (const z of [0.64, 0.66, 0.71]) resolution = terrainResolution(resolution, z);
-          assert.equal(resolution, 0.5);
-          assert.equal(terrainResolution(resolution, 0.73), 1);
-          assert.equal(terrainResolution(1, 0.58), 1);
-          assert.equal(terrainResolution(0.5, 0.72), 0.5);
-          const { CityScene } = load('src/scenes/CityScene.ts', { phaser, './cityArt': { ART: 16, CASTLE_ART: { w: 4, h: 4 } } });
-          const scene = Object.create(CityScene.prototype);
-          CityScene.instance = scene;
-          Object.assign(scene, { ready: true, sys: { isActive: () => true }, cameras: { main: { zoom: 1 } }, bigLabels: true, labels: [] });
-          let draws = 0;
-          scene.redraw = () => draws++;
-          CityScene.refresh(); CityScene.refresh(); CityScene.refresh();
-          assert.equal(draws, 0);
-          scene.update(); assert.equal(draws, 1);
-          scene.update(); assert.equal(draws, 1);
-          scene.sys.isActive = () => false;
-          CityScene.refresh(); scene.update(); assert.equal(draws, 1);
-          const lay = { cells: new Map(), hexes: [], outside: [], byIndex: new Map() };
-          const c = { owner: 0, walls: 0, pop: 0, buildings: [], sites: {}, project: null, projectSite: null, projectTurns: 0, deco: [] };
-          const state = { isSimple: () => true, cityNames: {}, players: [{ name: 'Test', color: 1 }], isCoastal: () => false };
-          let pick = 'keep', decoUI = null, staticDraws = 0, overlays = 0;
-          const link = { state, city: c, me: 0, sel: () => pick, deco: () => decoUI };
-          const { CityScene: CachedCity } = load('src/scenes/CityScene.ts', {
-            phaser,
-            '../world/grid': { cityLayout: () => lay, cellKey: (x, y) => `${x},${y}` },
-            '../world/city': { freeSlots: () => 1 },
-            '../world/tile': { BUILDING_ORDER: [] },
-            '../world/deco': { isPathKind: () => false },
-            './citySprites': { keepPeople: () => [] },
-            './cityArt': { ART: 16, GRASS: { plain: 0, tufts: 1, flowers: 2 }, CASTLE_ART: { w: 4, h: 4, cells: [] }, canDraw: () => false, hasFrame: () => false }
-          });
-          const cached = Object.create(CachedCity.prototype);
-          CachedCity.link = link;
-          let gfx;
-          gfx = new Proxy({}, { get: () => () => gfx });
-          Object.assign(cached, { ready: true, paintedLayout: null, paintedStamp: '', blit: { ground: {}, obj: {} }, labels: [], texts: [], people: [], ground: gfx, hillG: gfx, scenery: gfx, marks: gfx, gridG: gfx, selG: gfx, bonusG: gfx, moving: null });
-          cached.drawOutside = cached.drawLife = cached.crowd = cached.drawBorders = () => {};
-          cached.drawTown = () => staticDraws++;
-          cached.txt = () => { cached.nText++; return gfx; };
-          const realOverlay = cached.redrawSelection;
-          cached.redrawSelection = function(...args) { overlays++; return realOverlay.apply(this, args); };
-          cached.redraw(); cached.redraw();
-          assert.equal(staticDraws, 1);
-          assert.equal(overlays, 2);
-          pick = 123; cached.redraw(); assert.equal(staticDraws, 1);
-          c.deco.push([1, 1, 0]); cached.redraw(); assert.equal(staticDraws, 2);
-          decoUI = { tool: 0, picked: null }; cached.redraw(); assert.equal(staticDraws, 3);
-          decoUI = { tool: 1, picked: null }; cached.redraw(); assert.equal(staticDraws, 3);
-          let saves = 0, panelRefreshes = 0;
-          const { MapScene } = load('src/scenes/MapScene.ts', { phaser, '../world/save': { saveGame: () => saves++ } });
-          const map = Object.create(MapScene.prototype);
-          map.state = {};
-          map.cityView = { visible: true, refresh: () => panelRefreshes++ };
-          map.redraw(false); assert.equal(saves, 0);
-          map.redraw(true); assert.equal(saves, 1);
-          assert.equal(panelRefreshes, 2);
-          const source = fs.readFileSync('src/scenes/MapScene.ts', 'utf8');
-          assert.match(source, /this\.redraw\(acted\)/);
-          assert.match(source, /state\.perform\('claim'.*\{ acted = true; break; \}/);
-          console.log('PASS: zoom hysteresis, refresh coalescing, selection cache, decoration invalidation, tool-only overlay, sleeping-map save gate.');
-          JS
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          seed = subprocess.check_output(['git', 'show', 'c2dbf14273456992bfd04adafeb58a5857fb5227:.github/workflows/performance-pass.yml'], text=True)
+          tests = seed.split("          cat > /tmp/kingdom-performance-tests.cjs <<'JS'\n", 1)[1].split('\n          JS', 1)[0]
+          tests = '\n'.join(s[10:] if s.startswith('          ') else s for s in tests.splitlines())
+          tests = tests.replace('isPathKind: () => false', 'isPathKind: (k) => k === 99')
+          tests += '\ndecoUI = { tool: 99, picked: null }; cached.redraw(); assert.equal(staticDraws, 4);\nassert.match(fs.readFileSync("src/scenes/CityScene.ts", "utf8"), /this\\.moving\\.to = t;\\s+this\\.refreshPending = true;/);\nconsole.log("PASS: paint-tool grid invalidation and queued drag preview.");\n'
+          Path('/tmp/kingdom-performance-tests.cjs').write_text(tests)
+          PY
           NODE_PATH="$GITHUB_WORKSPACE/node_modules" node -e "try { require('/tmp/kingdom-performance-tests.cjs'); } catch(e) { console.log('::error::' + String(e.stack).replace(/\n/g, '%0A')); process.exit(1); }"
-      - name: Commit validated source changes to dev
+      - name: Commit validated refinement to dev
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/scenes/CityScene.ts src/scenes/MapScene.ts src/scenes/mapArt.ts
-          if git diff --cached --quiet; then
-            echo 'Performance changes already applied; validation passed.'
-          else
-            git commit -m 'Reduce city repaint work, skip selection saves, and stabilize terrain zoom resolution'
+          git add src/scenes/CityScene.ts
+          if ! git diff --cached --quiet; then
+            git commit -m 'Invalidate paint-grid emphasis and batch decoration drag previews'
             git push origin HEAD:dev
           fi
